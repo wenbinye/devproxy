@@ -1,0 +1,62 @@
+# 本地开发服务器配置
+# 数据与证书默认存放在 ~/.local/share/caddy（纯用户目录，无需 root 运行）
+# 绑定 80/443 低位端口依赖一次性授权：
+#   sudo setcap cap_net_bind_service=+ep ~/.local/bin/caddy
+
+# 全局选项
+{
+	# 显式声明存储位置，证书、CA 都在用户目录下
+	storage file_system /home/yewenbin/.local/share/caddy
+}
+
+# HTTP 服务: http://localhost（默认 80 端口）
+http://localhost {
+	root * /home/yewenbin/work/tasks/local-https/site
+	file_server
+}
+
+# HTTPS 服务: https://localhost（默认 443 端口）
+# "localhost" 无 scheme 无端口 = 自动 https + tls internal 本地证书
+localhost {
+	tls internal
+	root * /home/yewenbin/work/tasks/local-https/site
+	file_server
+}
+
+# 本地应用网关：转发到 minikube 中的 APISIX 网关
+#
+# 域名解析：dnsmasq address=/.local.yikuaigao.com/127.0.0.1（本地已配置）
+# 转发链路：Caddy → minikube apisix-gateway NodePort 30800 → APISIX 按 Host 匹配
+#           ApisixRoute → 对应命名空间里的 Service
+#
+# MINIKUBE_IP 由 caddy.service 的 Environment= 提供；minikube 换 IP 时改
+# systemd 环境变量后 systemctl --user restart caddy 即可，无需改本文件
+# （{$VAR:默认值} 是 Caddyfile 适配期替换；冒号后的值是环境变量缺失时的兜底，
+#   保证手动 caddy reload（环境变量不在 shell 里）也能正常工作）
+#
+# 注意：reverse_proxy 默认保留原始 Host 头，APISIX 才能按域名匹配路由，
+# 不要加 header_up Host {upstream_hostport}
+#
+# 通配符站点：新增本地应用只需在对应 ns 里加一条 ApisixRoute，Caddyfile 不用动。
+# tls internal 会为 *.local.yikuaigao.com 签发通配符证书。
+# 若某个域名要走不同逻辑，再加一个具体域名的站点块即可（具体块优先于通配符）。
+# 未注册 ApisixRoute 的域名会被转发到 APISIX 并返回 404。
+*.local.yikuaigao.com {
+	tls internal
+	reverse_proxy {$MINIKUBE_IP:192.168.49.2}:30800 {
+		# APISIX 的 nginx real_ip_header 固定为 X-Real-IP，Caddy 默认不发该头，
+		# 不补上的话网关侧 $remote_addr 只会是 minikube 网关 IP
+		header_up X-Real-IP {remote_host}
+	}
+}
+
+# devp 动态注册的本地项目网关
+# 未注册的 *.test 域名返回 404；devp up 通过 Admin API 把精确域名路由插到本块之前
+*.test {
+	tls internal
+	respond "devp: no route registered for {http.request.host}" 404
+}
+
+http://*.test {
+	redir https://{host}{uri} permanent
+}
