@@ -564,15 +564,27 @@ class TestDownAndLs(unittest.TestCase):
     def test_down_unknown_fails(self):
         r = run_devp(["down", "ghost"], self.env)
         self.assertNotEqual(r.returncode, 0)
+        self.assertIn("未注册", r.stderr)
 
     def test_ls_lists_routes(self):
-        self.admin.routes = [devp.build_route("testapp", 12345)]
+        # 取一个空闲端口但不监听：ls 必须标出 ⛔ 不可达
+        port = devp.alloc_port()
+        self.admin.routes = [devp.build_route("testapp", port)]
         r = run_devp(["ls"], self.env)
         self.assertEqual(r.returncode, 0, msg=r.stderr)
         self.assertIn("testapp.test", r.stdout)
-        self.assertIn("127.0.0.1:12345", r.stdout)
+        self.assertIn(f"127.0.0.1:{port}", r.stdout)
+        self.assertIn("⛔ 不可达", r.stdout)
 
     def test_ls_empty(self):
         r = run_devp(["ls"], self.env)
         self.assertEqual(r.returncode, 0)
         self.assertIn("无 devp 路由", r.stdout)
+
+    def test_ls_admin_unreachable(self):
+        # Admin 故障不能被误报成「没有路由」
+        env = dict(self.env, DEVP_ADMIN="http://127.0.0.1:1")
+        r = run_devp(["ls"], env)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("Admin API 不可达", r.stderr)
+        self.assertNotIn("无 devp 路由", r.stdout)

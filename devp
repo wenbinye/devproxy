@@ -268,11 +268,15 @@ def cmd_down(a):
 
 
 def cmd_ls(a):
+    # 先区分「Admin 不可达」与「确实没有路由」，避免把故障误报成空状态
+    st, _ = api("GET", ROUTES_PATH)
+    if st != 200:
+        sys.exit("devp: Caddy Admin API 不可达")
     rows = list_routes()
     if not rows:
         print("（无 devp 路由）")
         return
-    for name, host, dial, port in rows:
+    for _name, host, dial, port in rows:
         mark = "✅" if reachable(port) else "⛔ 不可达"
         print(f"{host:40s} {dial:22s} {mark}")
 
