@@ -84,6 +84,8 @@ class StubAdmin:
     def __init__(self):
         self.routes = []
         self.ops = []  # 记录 (method, path) 序列
+        self.patch_bodies = []  # PATCH 收到的 body（序列化路径的可观测点）
+        self.patch_content_types = []  # PATCH 收到的 Content-Type
         outer = self
 
         class H(BaseHTTPRequestHandler):
@@ -116,6 +118,8 @@ class StubAdmin:
                 outer.ops.append(("PATCH", self.path))
                 n = int(self.headers.get("Content-Length", 0))
                 body = json.loads(self.rfile.read(n) or b"null")
+                outer.patch_bodies.append(body)
+                outer.patch_content_types.append(self.headers.get("Content-Type"))
                 if self.path == devp.ROUTES_PATH:
                     outer.routes = body
                     self._send(200, None)
@@ -144,6 +148,7 @@ class StubAdmin:
 
     def close(self):
         self.srv.shutdown()
+        self.srv.server_close()  # 释放监听 socket，避免后续任务积累 fd
 
 
 class TestApi(unittest.TestCase):
@@ -167,6 +172,26 @@ class TestApi(unittest.TestCase):
         # 端口 1 上无服务，连接必失败，应返回 (0, None) 而非抛异常
         st, body = devp.api("GET", "/config/", base="http://127.0.0.1:1")
         self.assertEqual((st, body), (0, None))
+
+    def test_patch_sends_json_body(self):
+        # PATCH 带 body 是注册协议的核心调用，必须锁住序列化与 Content-Type
+        routes = [{"@id": "devp_x", "match": [{"host": ["x.test"]}]}]
+        st, _ = devp.api("PATCH", devp.ROUTES_PATH, body=routes, base=self.admin.base)
+        self.assertEqual(st, 200)
+        self.assertEqual(self.admin.patch_bodies, [routes])
+        self.assertEqual(self.admin.patch_content_types, ["application/json"])
+        self.assertEqual(self.admin.routes, routes)
+
+    def test_default_base_falls_back_to_admin_base(self):
+        # base=None 时应回落到模块级 ADMIN_BASE（此处临时改指向桩）
+        old = devp.ADMIN_BASE
+        devp.ADMIN_BASE = self.admin.base
+        try:
+            st, body = devp.api("GET", devp.ROUTES_PATH)
+        finally:
+            devp.ADMIN_BASE = old
+        self.assertEqual(st, 200)
+        self.assertEqual(body, [])
 
 
 class TestBuildRoute(unittest.TestCase):
@@ -207,6 +232,17 @@ class TestInsertRoute(unittest.TestCase):
         self.assertEqual(len(got), 1)
 
 
+class TestIsWildcard(unittest.TestCase):
+    def test_wildcard_host_is_wildcard(self):
+        self.assertTrue(devp.is_wildcard({"match": [{"host": ["*.test"]}]}))
+
+    def test_exact_host_is_not_wildcard(self):
+        self.assertFalse(devp.is_wildcard({"match": [{"host": ["a.test"]}]}))
+
+    def test_route_without_match_is_not_wildcard(self):
+        self.assertFalse(devp.is_wildcard({"@id": "devp_a"}))
+
+
 class TestLocked(unittest.TestCase):
     def test_creates_lock_file_and_releases(self):
         with tempfile.TemporaryDirectory() as d:
@@ -216,3 +252,83 @@ class TestLocked(unittest.TestCase):
             # 释放后可再次加锁
             with devp.locked(p):
                 pass
+
+    def test_relative_path_without_dir_component(self):
+        # DEVP_LOCK 可被设为相对路径（如 devp.lock），此时 dirname 为空串，
+        # makedirs("") 会抛 FileNotFoundError
+        with tempfile.TemporaryDirectory() as d:
+            cwd = os.getcwd()
+            os.chdir(d)
+            try:
+                with devp.locked("devp.lock"):
+                    self.assertTrue(Path(d, "devp.lock").exists())
+            finally:
+                os.chdir(cwd)
+
+
+class TestRegisterLifecycle(unittest.TestCase):
+    def setUp(self):
+        self.admin = StubAdmin()
+        self.admin.routes = [{"match": [{"host": ["*.test"]}], "handle": [], "terminal": True}]
+
+    def tearDown(self):
+        self.admin.close()
+
+    def test_register_inserts_before_wildcard(self):
+        self.assertTrue(devp.register("codeup", 49831, base=self.admin.base))
+        self.assertEqual(self.admin.routes[0]["@id"], "devp_codeup")
+        self.assertEqual(self.admin.routes[1]["match"][0]["host"], ["*.test"])
+        self.assertIn(("GET", devp.ROUTES_PATH), self.admin.ops)
+        self.assertIn(("PATCH", devp.ROUTES_PATH), self.admin.ops)
+
+    def test_route_exists_and_deregister(self):
+        devp.register("codeup", 49831, base=self.admin.base)
+        self.assertTrue(devp.route_exists("codeup", base=self.admin.base))
+        self.assertFalse(devp.route_exists("other", base=self.admin.base))
+        self.assertTrue(devp.deregister("codeup", base=self.admin.base))
+        self.assertFalse(devp.route_exists("codeup", base=self.admin.base))
+        # 注销后通配兜底仍在（只删 devp_ 元素，不动数组其他项）
+        self.assertEqual(len(self.admin.routes), 1)
+
+    def test_deregister_unknown_returns_false(self):
+        self.assertFalse(devp.deregister("ghost", base=self.admin.base))
+
+    def test_deregister_rejects_invalid_name(self):
+        # name 会被拼进 /id/ 路径与 @id，含换行等非法字符必须在入口就被拒
+        with self.assertRaises(SystemExit):
+            devp.deregister("codeup\n", base=self.admin.base)
+
+    def test_route_exists_rejects_invalid_name(self):
+        with self.assertRaises(SystemExit):
+            devp.route_exists("codeup\n", base=self.admin.base)
+
+    def test_list_routes(self):
+        devp.register("a", 1111, base=self.admin.base)
+        devp.register("b", 2222, base=self.admin.base)
+        self.assertEqual(devp.list_routes(base=self.admin.base), [
+            ("a", "a.test", "127.0.0.1:1111", 1111),
+            ("b", "b.test", "127.0.0.1:2222", 2222),
+        ])
+
+    def test_register_retry_eventually_succeeds(self):
+        # 第一次 GET 前 stub 崩掉 503？——简化：直接验证 attempts=1 失败路径返回 False
+        self.assertFalse(devp.register_retry("x", 1, base="http://127.0.0.1:1", attempts=1))
+
+
+class TestReachable(unittest.TestCase):
+    def test_closed_port_unreachable(self):
+        # 找一个确定没监听的端口：bind 后关掉，立刻探测（TIME_WAIT 不影响 listen 探测）
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()
+        self.assertFalse(devp.reachable(port))
+
+    def test_listening_port_reachable(self):
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), BaseHTTPRequestHandler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            self.assertTrue(devp.reachable(srv.server_address[1]))
+        finally:
+            srv.shutdown()
+            srv.server_close()

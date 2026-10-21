@@ -15,6 +15,7 @@ import os
 import re
 import socket
 import sys
+import time
 import urllib.error
 import urllib.request
 from contextlib import contextmanager
@@ -74,7 +75,9 @@ def api(method, path, body=None, base=None):
 def locked(path=None):
     """flock 互斥，包住 GET+PATCH 读改写临界区。"""
     path = path or LOCK_PATH
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    d = os.path.dirname(path)
+    if d:  # 相对路径（如 "devp.lock"）dirname 为空，makedirs("") 会抛 FileNotFoundError
+        os.makedirs(d, exist_ok=True)
     fh = open(path, "w")
     try:
         fcntl.flock(fh, fcntl.LOCK_EX)
@@ -103,3 +106,59 @@ def insert_route(routes, route):
     idx = next((i for i, r in enumerate(routes) if is_wildcard(r)), len(routes))
     routes.insert(idx, route)
     return routes
+
+
+def register(name, port, base=None):
+    """GET 路由数组 → 插到通配路由之前 → PATCH 回写。flock 防并发。"""
+    with locked():
+        st, routes = api("GET", ROUTES_PATH, base=base)
+        if st != 200:
+            return False
+        routes = routes or []
+        insert_route(routes, build_route(name, port))
+        st, _ = api("PATCH", ROUTES_PATH, body=routes, base=base)
+        return st == 200
+
+
+def deregister(name, base=None):
+    validate_name(name)
+    st, _ = api("DELETE", f"/id/devp_{name}", base=base)
+    return st == 200
+
+
+def route_exists(name, base=None):
+    validate_name(name)
+    st, _ = api("GET", f"/id/devp_{name}", base=base)
+    return st == 200
+
+
+def register_retry(name, port, base=None, attempts=3):
+    """注册重试：1s/2s/4s 退避。"""
+    for i in range(attempts):
+        if register(name, port, base=base):
+            return True
+        if i < attempts - 1:
+            time.sleep(2 ** i)
+    return False
+
+
+def list_routes(base=None):
+    st, routes = api("GET", ROUTES_PATH, base=base)
+    out = []
+    for r in routes or []:
+        rid = r.get("@id", "")
+        if not rid.startswith("devp_"):
+            continue
+        name = rid[len("devp_"):]
+        host = r["match"][0]["host"][0]
+        dial = r["handle"][0]["upstreams"][0]["dial"]
+        out.append((name, host, dial, int(dial.rsplit(":", 1)[1])))
+    return out
+
+
+def reachable(port, timeout=0.5):
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=timeout):
+            return True
+    except OSError:
+        return False
