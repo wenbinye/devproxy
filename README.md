@@ -68,9 +68,12 @@ loginctl show-user $USER | grep -i linger   # 确认 linger 开启
 .
 ├── Caddyfile           # Caddy 配置（80/443 + tls internal 本地证书）
 ├── Justfile            # 安装与运维命令
-├── caddy.service       # systemd 用户级服务单元（enable 时复制到 ~/.config/systemd/user/）
+├── devp                # 本地开发动态域名网关 CLI（Python stdlib 单文件）
+├── caddy.service       # systemd 用户级服务单元（本机文件，未纳入 git）
 ├── README.md
-└── site/               # 站点根目录，静态文件放这里
+├── docs/               # 设计规格等文档
+├── site/               # 站点根目录，静态文件放这里（本机文件，未纳入 git）
+└── tests/              # devp 单元/集成测试
 ```
 
 数据与证书存放于 `~/.local/share/caddy/`，本地 CA 根证书路径：
@@ -139,6 +142,7 @@ just install-devp                      # 安装 CLI（~/.local/bin/devp）
 
 devp up codeup-web -- sh -c 'npx vite --port "$PORT" --host 127.0.0.1'            # → https://codeup-web.test
 devp up codeup-api -- sh -c 'uv run uvicorn app:app --host 127.0.0.1 --port "$PORT"'  # → https://codeup-api.test
+devp up codeup-api -- sh -c 'gunicorn app:app --bind 127.0.0.1:$PORT'             # gunicorn 不读 PORT
 
 devp ls                                # 查看已注册路由（含可达性）
 devp down codeup-web                   # 手动清理残留路由
@@ -182,10 +186,11 @@ devp up fixed --port 3000 -- python3 -m http.server 3000
 要点：
 
 - **应用接入分两种**：
-  1. **原生读 `PORT` 环境变量的应用**（Next.js / CRA / gunicorn 等）——直接写命令即可，
+  1. **原生读 `PORT` 环境变量的应用**（Next.js / CRA 等）——直接写命令即可，
      无需显式 `--port`。
-  2. **需要显式端口参数的应用**（Vite / uvicorn 等）——用 `sh -c '...'` 包一层，让 shell
-     在 devp 启动后展开 `$PORT`。
+  2. **需要显式端口参数的应用**（Vite / uvicorn / gunicorn 等）——用 `sh -c '...'` 包一层，
+     让 shell 在 devp 启动后展开 `$PORT`。注意 **gunicorn 不原生读 `PORT`**，必须写成
+     `sh -c 'gunicorn app:app --bind 127.0.0.1:$PORT'`。
 - **不要直接写 `--port $PORT`**：devp 用 `subprocess.Popen(argv)` 直接执行、**不经过
   shell**，命令里的 `$PORT` 会被用户自己的 shell 提前展开（此时 devp 尚未分配端口，值为
   空串），应用会收到缺值参数。用单引号包住 `sh -c` 的脚本即可把展开推迟到 devp 启动后。
@@ -205,12 +210,15 @@ devp up fixed --port 3000 -- python3 -m http.server 3000
 的通配证书——`*.test` 属于二级通配符，OpenSSL 与浏览器都会拒绝其主机名匹配
 （实测 `curl` exit 60: no alternative certificate subject name matches）。
 on-demand 未配置 `ask` 端点（Caddy 启动日志会有 abuse 告警）：仅本机使用，可接受。
+这意味着**本机任意进程都能为任意 `.test` 名称取得被系统信任的证书**——信任范围仅限本机，
+已作为可接受风险记录（若要收紧，需给 Caddy 配 `ask` 回调做白名单）。
 
 ### 自检（selftest）
 
-`devp selftest` 起一个**隔离的 Caddy 实例**（admin 20191 / https 14443 / http 14080，
-独立 storage），完整跑一遍注册、转发、注销，**不碰生产 443/2019**。它使用沙箱自身 CA
-的校验上下文发起真实 HTTPS 请求（带主机名校验），能抓住「证书退回通配」这类回归。
+`devp selftest` 起一个**隔离的 Caddy 实例**（admin 20191 / https 14443 / http 14480，
+独立 storage），完整跑一遍注册、转发、注销与 80→443 的 301 跳转，**不碰生产 443/2019**。
+它使用沙箱自身 CA 的校验上下文发起真实 HTTPS 请求（带主机名校验），能抓住「证书退回通配」
+这类回归。
 
 ### 已知边界
 

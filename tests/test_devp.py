@@ -5,6 +5,7 @@ import importlib.util
 import io
 import json
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -80,6 +81,17 @@ class TestHeartbeatEnv(unittest.TestCase):
         self.assertEqual(mod.HEARTBEAT, 30.0)
         self.assertIn("DEVP_HEARTBEAT", stderr.getvalue())
 
+    def test_non_finite_or_non_positive_heartbeat_falls_back_to_30(self):
+        # nan/inf 能通过 float()，必须再校验有限正数：stop.wait(nan) 会立即返回/行为异常
+        for raw in ("nan", "inf", "-inf", "0", "-1"):
+            with self.subTest(raw=raw):
+                with mock.patch.dict(os.environ, {"DEVP_HEARTBEAT": raw}):
+                    stderr = io.StringIO()
+                    with contextlib.redirect_stderr(stderr):
+                        mod = load_devp()
+                self.assertEqual(mod.HEARTBEAT, 30.0)
+                self.assertIn("DEVP_HEARTBEAT", stderr.getvalue())
+
 
 class StubAdmin:
     """最小 Admin API 桩：内存维护 srv0.routes，支持 GET/PATCH(/routes)、GET/DELETE(/id/x)。"""
@@ -90,6 +102,8 @@ class StubAdmin:
         self.patch_bodies = []  # PATCH 收到的 body（序列化路径的可观测点）
         self.patch_content_types = []  # PATCH 收到的 Content-Type
         self.get_status = 200  # 置为非 200 可模拟 Admin API 故障
+        self.delete_failures_remaining = 0  # >0 时 DELETE 返回 500（模拟 caddy 重启中）
+        self.ignore_patch = False  # True 时 PATCH 返回 200 但不落盘（模拟写入丢失）
         outer = self
 
         class H(BaseHTTPRequestHandler):
@@ -125,13 +139,18 @@ class StubAdmin:
                 outer.patch_bodies.append(body)
                 outer.patch_content_types.append(self.headers.get("Content-Type"))
                 if self.path == devp.ROUTES_PATH:
-                    outer.routes = body
+                    if not outer.ignore_patch:
+                        outer.routes = body
                     self._send(200, None)
                 else:
                     self._send(404, None)
 
             def do_DELETE(self):
                 outer.ops.append(("DELETE", self.path))
+                if outer.delete_failures_remaining > 0:
+                    outer.delete_failures_remaining -= 1
+                    self._send(500, {"error": "restarting"})
+                    return
                 if self.path.startswith("/id/"):
                     rid = self.path[4:]
                     before = len(outer.routes)
@@ -348,6 +367,82 @@ class TestRegisterLifecycle(unittest.TestCase):
                 "x", 1, base="http://127.0.0.1:1", attempts=3))
         self.assertEqual([c.args[0] for c in sleep.call_args_list], [1, 2])
 
+    def test_register_returns_false_when_routes_is_not_list(self):
+        # Caddy 返回 200+null 时不能把整个 routes 数组覆盖成空
+        self.admin.routes = None
+        self.assertFalse(devp.register("codeup", 49831, base=self.admin.base))
+        self.assertNotIn(("PATCH", devp.ROUTES_PATH), self.admin.ops)
+
+    def test_register_returns_false_when_patch_not_visible_on_readback(self):
+        # 替代 srv0 动态发现：PATCH 返回 200 但路由没落盘，必须视为注册失败
+        self.admin.ignore_patch = True
+        self.assertFalse(devp.register("codeup", 49831, base=self.admin.base))
+        self.assertIn(("PATCH", devp.ROUTES_PATH), self.admin.ops)
+        self.assertIn(("GET", "/id/devp_codeup"), self.admin.ops)
+
+    def test_register_skips_write_when_stop_already_set(self):
+        # 心跳在 stop 置位后即使拿到锁也不能再写回
+        stop = threading.Event()
+        stop.set()
+        self.assertFalse(devp.register("codeup", 49831, base=self.admin.base, stop=stop))
+        self.assertEqual(self.admin.ops, [])
+
+    def test_register_retry_stop_set_before_first_attempt(self):
+        stop = threading.Event()
+        stop.set()
+        with mock.patch.object(devp, "register") as reg:
+            self.assertFalse(devp.register_retry("x", 1, stop=stop))
+        reg.assert_not_called()
+
+    def test_register_retry_stops_after_stop_is_set_during_attempt(self):
+        # 第一次尝试失败并置位 stop：不得再发起第二次尝试
+        stop = threading.Event()
+
+        def fail_and_stop(*args, **kwargs):
+            stop.set()
+            return False
+
+        with mock.patch.object(devp, "register", side_effect=fail_and_stop) as reg, \
+                mock.patch.object(devp.time, "sleep"):
+            self.assertFalse(devp.register_retry("x", 1, stop=stop))
+        self.assertEqual(reg.call_count, 1)
+
+    def test_deregister_retry_succeeds_on_third_attempt(self):
+        devp.register("codeup", 49831, base=self.admin.base)
+        self.admin.delete_failures_remaining = 2
+        with mock.patch.object(devp.time, "sleep") as sleep:
+            self.assertTrue(devp.deregister_retry("codeup", base=self.admin.base))
+        self.assertEqual(len(self._ops("DELETE", "/id/devp_codeup")), 3)
+        self.assertEqual([c.args[0] for c in sleep.call_args_list], [1, 2])
+        self.assertFalse(devp.route_exists("codeup", base=self.admin.base))
+
+    def test_deregister_retry_all_attempts_fail(self):
+        devp.register("codeup", 49831, base=self.admin.base)
+        self.admin.delete_failures_remaining = 3
+        with mock.patch.object(devp.time, "sleep"):
+            self.assertFalse(devp.deregister_retry("codeup", base=self.admin.base))
+        self.assertEqual(len(self._ops("DELETE", "/id/devp_codeup")), 3)
+
+    def test_deregister_waits_for_flock(self):
+        # deregister 必须与 register 共用 flock：持锁期间 DELETE 不能发生
+        devp.register("codeup", 49831, base=self.admin.base)
+        done = threading.Event()
+
+        def worker():
+            devp.deregister("codeup", base=self.admin.base)
+            done.set()
+
+        with devp.locked():
+            t = threading.Thread(target=worker, daemon=True)
+            t.start()
+            self.assertFalse(done.wait(0.3), "持锁期间 deregister 不应完成")
+        self.assertTrue(done.wait(5))
+        t.join()
+        self.assertFalse(devp.route_exists("codeup", base=self.admin.base))
+
+    def _ops(self, method, path):
+        return [o for o in self.admin.ops if o == (method, path)]
+
 
 class TestReachable(unittest.TestCase):
     def test_closed_port_unreachable(self):
@@ -377,6 +472,53 @@ s.listen(1)
 time.sleep(3)
 raise SystemExit(7)
 """
+
+# 长期运行且自带孙进程的假应用：父进程写自己的 pid，再 fork 一个 sleep 孙进程。
+# 只杀直接子进程时，孙进程会继续存活——信号/进程组清理的回归就靠它抓。
+FAKE_APP_TREE = """
+import os, socket, subprocess, time
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1", int(os.environ["PORT"])))
+s.listen(1)
+open(os.environ["DEVP_TEST_CHILD_PIDFILE"], "w").write(str(os.getpid()))
+g = subprocess.Popen(["sleep", "30"])
+open(os.environ["DEVP_TEST_GRANDCHILD_PIDFILE"], "w").write(str(g.pid))
+time.sleep(30)
+"""
+
+# 收到 SIGTERM 时留下 marker，用于断言 Thread.start 失败路径仍终止了子进程
+FAKE_APP_SIG_MARKER = """
+import os, signal, socket, sys, time
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1", int(os.environ["PORT"])))
+s.listen(1)
+def stop(signum, frame):
+    open(os.environ["DEVP_TEST_MARKER"], "w").write("terminated")
+    sys.exit(0)
+signal.signal(signal.SIGTERM, stop)
+time.sleep(30)
+"""
+
+
+def pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def wait_pid_gone(pid, timeout=5.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not pid_alive(pid):
+            return True
+        time.sleep(0.05)
+    return not pid_alive(pid)
 
 
 def run_devp(args, env_extra=None):
@@ -484,6 +626,32 @@ time.sleep(10)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("Admin API 不可达", r.stderr)
 
+    def test_up_missing_command_reports_friendly_error(self):
+        # Popen 抛 FileNotFoundError 时不能甩裸 traceback
+        r = run_devp(["up", "testapp", "--", "/no/such/command-xyz"], self.env)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("命令不存在: /no/such/command-xyz", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertEqual(self._ops("PATCH", devp.ROUTES_PATH), [])
+
+    def test_up_thread_start_failure_still_cleans_up(self):
+        # Thread.start() 抛异常时 finally 的 join 不能掩盖原异常并跳过清理
+        stubdir = Path(self.tmp.name) / "stub"
+        stubdir.mkdir()
+        (stubdir / "sitecustomize.py").write_text(
+            "import threading\n"
+            "def _boom(self, *args, **kwargs):\n"
+            "    raise RuntimeError('cannot start thread')\n"
+            "threading.Thread.start = _boom\n"
+        )
+        marker = Path(self.tmp.name) / "terminated"
+        env = dict(self.env, PYTHONPATH=str(stubdir), DEVP_TEST_MARKER=str(marker))
+        r = run_devp(["up", "testapp", "--", sys.executable, "-c", FAKE_APP_SIG_MARKER], env)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertTrue(marker.exists(), "Thread.start 失败后子进程未被终止")
+        self.assertIn(("DELETE", "/id/devp_testapp"), self.admin.ops)
+        self.assertFalse(any(x.get("@id") == "devp_testapp" for x in self.admin.routes))
+
 
 class TestUpCliParsing(unittest.TestCase):
     """D18：up 的参数解析不再用 REMAINDER，name 之后的选项必须生效。"""
@@ -539,6 +707,20 @@ class TestUpCliParsing(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("缺少启动命令", r.stderr)
 
+    def test_explicit_port_zero_is_rejected(self):
+        r = run_devp(["up", "testapp", "--port", "0", "--", sys.executable, "-c", FAKE_APP],
+                     self.env)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("非法端口 0", r.stderr)
+        self.assertEqual(self.admin.patch_bodies, [])
+
+    def test_explicit_port_out_of_range_is_rejected(self):
+        r = run_devp(["up", "testapp", "--port", "65536", "--", sys.executable, "-c", FAKE_APP],
+                     self.env)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("非法端口 65536", r.stderr)
+        self.assertEqual(self.admin.patch_bodies, [])
+
 
 class TestDownAndLs(unittest.TestCase):
     def setUp(self):
@@ -566,6 +748,14 @@ class TestDownAndLs(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("未注册", r.stderr)
 
+    def test_down_admin_unreachable(self):
+        # 与 ls 一致：Admin 故障不能误报成「该路由未注册」
+        env = dict(self.env, DEVP_ADMIN="http://127.0.0.1:1")
+        r = run_devp(["down", "ghost"], env)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("Admin API 不可达", r.stderr)
+        self.assertNotIn("未注册", r.stderr)
+
     def test_ls_lists_routes(self):
         # 取一个空闲端口但不监听：ls 必须标出 ⛔ 不可达
         port = devp.alloc_port()
@@ -588,3 +778,115 @@ class TestDownAndLs(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("Admin API 不可达", r.stderr)
         self.assertNotIn("无 devp 路由", r.stdout)
+
+
+class TestSignalLifecycle(unittest.TestCase):
+    """SIGTERM / SIGINT 必须走 finally 清理：注销路由、终止整个子进程组、退出码 128+n。"""
+
+    def setUp(self):
+        self.admin = StubAdmin()
+        self.admin.routes = [{"match": [{"host": ["*.test"]}], "handle": [], "terminal": True}]
+        self.tmp = tempfile.TemporaryDirectory()
+        self.child_pidfile = Path(self.tmp.name) / "child.pid"
+        self.grandchild_pidfile = Path(self.tmp.name) / "grandchild.pid"
+        self.env = {
+            "DEVP_ADMIN": self.admin.base,
+            "DEVP_LOCK": str(Path(self.tmp.name) / "lock"),
+            "DEVP_HEARTBEAT": "30",
+            "DEVP_TEST_CHILD_PIDFILE": str(self.child_pidfile),
+            "DEVP_TEST_GRANDCHILD_PIDFILE": str(self.grandchild_pidfile),
+        }
+
+    def tearDown(self):
+        self.admin.close()
+        self.tmp.cleanup()
+
+    def _wait_for(self, predicate, timeout=15, msg="条件未在超时内满足"):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if predicate():
+                return
+            time.sleep(0.05)
+        self.fail(msg)
+
+    def _read_pids(self):
+        self._wait_for(
+            lambda: self.child_pidfile.exists() and self.grandchild_pidfile.exists(),
+            msg="假应用未写出 child/grandchild pid 文件",
+        )
+        return int(self.child_pidfile.read_text()), int(self.grandchild_pidfile.read_text())
+
+    def _run_signal_case(self, sig, expected_rc):
+        proc = subprocess.Popen(
+            [sys.executable, str(DEV), "up", "testapp", "--",
+             sys.executable, "-c", FAKE_APP_TREE],
+            env=dict(os.environ, **self.env),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        try:
+            self._wait_for(
+                lambda: any(r.get("@id") == "devp_testapp" for r in self.admin.routes),
+                msg="devp 未在超时内完成注册",
+            )
+            child_pid, grandchild_pid = self._read_pids()
+            proc.send_signal(sig)
+            rc = proc.wait(timeout=20)
+        finally:
+            out, err = proc.communicate(timeout=5)
+        self.assertEqual(rc, expected_rc, msg=f"stdout={out}\nstderr={err}")
+        self.assertIn(("DELETE", "/id/devp_testapp"), self.admin.ops)
+        self.assertFalse(any(r.get("@id") == "devp_testapp" for r in self.admin.routes))
+        self.assertTrue(wait_pid_gone(child_pid), f"子进程 {child_pid} 仍存活")
+        self.assertTrue(wait_pid_gone(grandchild_pid), f"孙进程 {grandchild_pid} 仍存活")
+
+    def test_sigterm_cleans_up_route_and_process_group(self):
+        self._run_signal_case(signal.SIGTERM, 143)
+
+    def test_sigint_cleans_up_route_and_process_group(self):
+        self._run_signal_case(signal.SIGINT, 130)
+
+
+LOCK_HOLDER_SCRIPT = r"""
+import importlib.machinery, importlib.util, os, sys, time
+loader = importlib.machinery.SourceFileLoader("devp", sys.argv[1])
+spec = importlib.util.spec_from_loader("devp", loader)
+mod = importlib.util.module_from_spec(spec)
+loader.exec_module(mod)
+start_file, lock_path = sys.argv[2], sys.argv[3]
+while not os.path.exists(start_file):
+    time.sleep(0.01)
+with mod.locked(lock_path):
+    t0 = time.time()
+    time.sleep(0.5)
+    t1 = time.time()
+print(t0, t1)
+"""
+
+
+class TestFlockCrossProcess(unittest.TestCase):
+    def test_two_processes_never_hold_lock_simultaneously(self):
+        # 删掉 flock 也能过的 TestLocked 之外，真实断言跨进程互斥
+        with tempfile.TemporaryDirectory() as d:
+            start = str(Path(d) / "start")
+            lock_path = str(Path(d) / "lock")
+            procs = [
+                subprocess.Popen(
+                    [sys.executable, "-c", LOCK_HOLDER_SCRIPT, str(DEV), start, lock_path],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                )
+                for _ in range(2)
+            ]
+            time.sleep(0.3)  # 让两个解释器都完成加载并进入等待
+            Path(start).touch()
+            results = [p.communicate(timeout=30) for p in procs]
+            for p, (out, err) in zip(procs, results):
+                self.assertEqual(p.returncode, 0, msg=err)
+            intervals = []
+            for out, _ in results:
+                t0, t1 = (float(x) for x in out.split())
+                intervals.append((t0, t1))
+            (a0, a1), (b0, b1) = intervals
+            self.assertTrue(
+                a1 <= b0 or b1 <= a0,
+                msg=f"两个进程的持锁区间重叠: {intervals}",
+            )
