@@ -9,12 +9,15 @@
 
 注册协议与设计决策见 docs/superpowers/specs/2026-10-21-devp-dynamic-domain-gateway-design.md
 """
+import argparse
 import fcntl
 import json
 import os
 import re
 import socket
+import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -171,3 +174,85 @@ def reachable(port, timeout=0.5):
             return True
     except OSError:
         return False
+
+
+def cmd_up(a):
+    validate_name(a.name)
+    st, _ = api("GET", "/config/")
+    if st != 200:
+        sys.exit("devp: Caddy Admin API 不可达（caddy 是否在运行？）")
+    if route_exists(a.name):
+        sys.exit(f"devp: {a.name} 已注册，先 devp down {a.name} 或换名")
+    port = a.port or alloc_port()
+    env = dict(os.environ, PORT=str(port))
+    print(f"PORT={port} 已分配，启动: {' '.join(a.cmd)}")
+    proc = subprocess.Popen(a.cmd, env=env)
+    print(f"等待 127.0.0.1:{port} 就绪（超时 {a.ready_timeout}s）…")
+    deadline = time.time() + a.ready_timeout
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            sys.exit(f"devp: 子进程先退出（code={proc.returncode}），未注册")
+        if reachable(port, timeout=1):
+            break
+        time.sleep(0.3)
+    else:
+        proc.terminate()
+        sys.exit("devp: 就绪超时——应用可能未使用 $PORT，可用 --port 显式指定")
+    if not register_retry(a.name, port):
+        proc.terminate()
+        sys.exit("devp: 注册失败（Admin API PATCH 重试 3 次未成功）")
+    print(f"✅ https://{a.name}.test")
+    stop = threading.Event()
+    threading.Thread(target=heartbeat, args=(a.name, port, stop), daemon=True).start()
+    rc = 0
+    try:
+        rc = proc.wait()
+    except KeyboardInterrupt:
+        # 同进程组：子进程也已收到 SIGINT，给 5s 宽限后强杀
+        try:
+            rc = proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            rc = proc.wait()
+    finally:
+        stop.set()
+        if not deregister(a.name):
+            print(f"⚠️ devp: 注销失败，残留路由请执行 devp down {a.name}", file=sys.stderr)
+    sys.exit(rc)
+
+
+def heartbeat(name, port, stop, interval=None):
+    """每 interval 校验路由存在，丢失（caddy reload/重启）则重注册。"""
+    interval = interval or HEARTBEAT
+    while not stop.wait(interval):
+        try:
+            if not route_exists(name):
+                register_retry(name, port)
+        except OSError:
+            pass
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(prog="devp",
+                                description="本地开发动态域名网关（*.test → 动态端口）")
+    sub = p.add_subparsers(dest="command", required=True)
+
+    up = sub.add_parser("up", help="分配端口并启动命令，注册 <name>.test")
+    up.add_argument("name", help="路由名（单标签 [a-z0-9-]）")
+    up.add_argument("--port", type=int, default=None, help="显式端口（默认自动分配）")
+    up.add_argument("--ready-timeout", type=int, default=60,
+                    help="就绪超时秒数（默认 60）")
+    up.add_argument("cmd", nargs=argparse.REMAINDER, metavar="-- CMD...",
+                    help="启动命令（会获得 PORT 环境变量）")
+
+    a = p.parse_args(argv)
+    if a.command == "up":
+        if a.cmd and a.cmd[0] == "--":
+            a.cmd = a.cmd[1:]
+        if not a.cmd:
+            p.error("缺少启动命令：devp up <name> -- CMD...")
+        cmd_up(a)
+
+
+if __name__ == "__main__":
+    main()

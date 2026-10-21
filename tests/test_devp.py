@@ -6,8 +6,11 @@ import io
 import json
 import os
 import socket
+import subprocess
+import sys
 import tempfile
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -363,3 +366,91 @@ class TestReachable(unittest.TestCase):
         finally:
             srv.shutdown()
             srv.server_close()
+
+
+FAKE_APP = """
+import os, socket, time
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1", int(os.environ["PORT"])))
+s.listen(1)
+time.sleep(3)
+raise SystemExit(7)
+"""
+
+
+def run_devp(args, env_extra=None):
+    env = dict(os.environ, **(env_extra or {}))
+    return subprocess.run([sys.executable, str(DEV), *args],
+                          env=env, capture_output=True, text=True, timeout=60)
+
+
+class TestUpLifecycle(unittest.TestCase):
+    """集成测试：真实 devp 子进程 + StubAdmin，覆盖注册→心跳重注册→注销→退出码。"""
+
+    def setUp(self):
+        self.admin = StubAdmin()
+        self.admin.routes = [{"match": [{"host": ["*.test"]}], "handle": [], "terminal": True}]
+        self.tmp = tempfile.TemporaryDirectory()
+        self.env = {
+            "DEVP_ADMIN": self.admin.base,
+            "DEVP_LOCK": str(Path(self.tmp.name) / "lock"),
+            "DEVP_HEARTBEAT": "0.5",
+        }
+
+    def tearDown(self):
+        self.admin.close()
+        self.tmp.cleanup()
+
+    def _ops(self, method, path):
+        return [o for o in self.admin.ops if o == (method, path)]
+
+    def test_up_registers_then_deregisters_and_exits_with_child_code(self):
+        r = run_devp(["up", "testapp", "--", sys.executable, "-c", FAKE_APP], self.env)
+        self.assertEqual(r.returncode, 7, msg=r.stderr)
+        self.assertIn("✅ https://testapp.test", r.stdout)
+
+        # 注册发生过：至少有一次 PATCH 的 body 里，devp_testapp 插在通配路由之前。
+        # 不能查 live routes——此时子进程已退出、路由已被注销，只剩通配兜底。
+        def index_of(routes, pred):
+            return next((i for i, x in enumerate(routes) if pred(x)), None)
+
+        self.assertTrue(self.admin.patch_bodies, "未发生 PATCH")
+        registered_before_wildcard = any(
+            (i := index_of(body, lambda x: x.get("@id") == "devp_testapp")) is not None
+            and (w := index_of(body, devp.is_wildcard)) is not None
+            and i < w
+            for body in self.admin.patch_bodies
+        )
+        self.assertTrue(
+            registered_before_wildcard,
+            msg=f"没有一次 PATCH 把 devp_testapp 插到通配之前: {self.admin.patch_bodies}",
+        )
+        # 子进程退出后已注销
+        self.assertFalse(any(x.get("@id") == "devp_testapp" for x in self.admin.routes))
+        self.assertIn(("DELETE", "/id/devp_testapp"), self.admin.ops)
+
+    def test_up_heartbeat_reregisters_after_route_loss(self):
+        # 起一个后台线程在注册后 ~2.0s 删掉路由，心跳(0.5s)应重注册。
+        # 2.0s 而非 1.2s：给首次注册留足余量，避免慢机上删在注册之前。
+        def sabotage():
+            time.sleep(2.0)
+            self.admin.routes = [r for r in self.admin.routes if r.get("@id") != "devp_testapp"]
+        threading.Thread(target=sabotage, daemon=True).start()
+        before = len(self._ops("PATCH", devp.ROUTES_PATH))
+        r = run_devp(["up", "testapp", "--", sys.executable, "-c", FAKE_APP], self.env)
+        self.assertEqual(r.returncode, 7, msg=r.stderr)
+        patches = self._ops("PATCH", devp.ROUTES_PATH)
+        self.assertGreaterEqual(len(patches), before + 2, msg=f"心跳未重注册: {self.admin.ops}")
+
+    def test_up_rejects_duplicate_name(self):
+        self.admin.routes.insert(0, devp.build_route("testapp", 1))
+        r = run_devp(["up", "testapp", "--", sys.executable, "-c", FAKE_APP], self.env)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("已注册", r.stderr)
+
+    def test_up_fails_when_admin_unreachable(self):
+        r = run_devp(["up", "testapp", "--", sys.executable, "-c", FAKE_APP],
+                     {"DEVP_ADMIN": "http://127.0.0.1:1", "DEVP_LOCK": str(Path(self.tmp.name) / "l")})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("Admin API 不可达", r.stderr)
