@@ -128,14 +128,17 @@ minikube apisix-gateway NodePort 30800 → APISIX 9080
 ## devp — 本地开发动态域名网关
 
 `*.test` 域名下的本地项目反向代理：一条命令启动，自动分配空闲端口并注册
-`https://<name>.test`，退出/崩溃自动注销。`.test`（本机进程）与
+`https://<name>.test`，正常退出/信号退出自动注销。`.test`（本机进程）与
 `.local.yikuaigao.com`（minikube/APISIX）两条链路互不影响。
+
+前置条件：已完成 `just setup`（Caddy 服务运行，Admin API 在 `127.0.0.1:2019`），
+且 dnsmasq 已配置 `*.test` 解析到本机。
 
 ```bash
 just install-devp                      # 安装 CLI（~/.local/bin/devp）
 
-devp up codeup-web -- npm run dev -- --port $PORT   # → https://codeup-web.test
-devp up codeup-api -- uvicorn app:app --port $PORT  # → https://codeup-api.test
+devp up codeup-web -- sh -c 'npx vite --port "$PORT" --host 127.0.0.1'            # → https://codeup-web.test
+devp up codeup-api -- sh -c 'uv run uvicorn app:app --host 127.0.0.1 --port "$PORT"'  # → https://codeup-api.test
 
 devp ls                                # 查看已注册路由（含可达性）
 devp down codeup-web                   # 手动清理残留路由
@@ -148,7 +151,7 @@ devp selftest                          # 隔离实例端到端自检
 |---|---|
 | `just install-devp` | 安装 `devp` 到 `~/.local/bin/devp`（修改 `devp` 脚本后需重跑） |
 | `devp up <name> [--port N] [--ready-timeout S] -- CMD...` | 分配端口、启动命令并注册 `https://<name>.test`；`--` 后的启动命令必填 |
-| `devp ls` | 列出所有 `devp_*` 路由，并探测上游端口可达性（✅ / ⛔ 不可达） |
+| `devp ls` | 列出所有已注册的 devp 路由（域名 → 上游端口 → 可达性） |
 | `devp down <name>` | 注销 `<name>.test`，用于清理崩溃残留 |
 | `devp selftest` | 起隔离 Caddy 实例做端到端自检 |
 
@@ -164,20 +167,33 @@ devp up <name> [--port N] [--ready-timeout S] -- CMD...
 全部原样传给子进程。缺少 `--` 会直接报错。示例：
 
 ```bash
-devp up codeup-web -- npm run dev -- --port $PORT
-devp up codeup-api -- uvicorn app:app --port $PORT
+# 原生读 PORT 环境变量的应用：直接写命令
+devp up next-app -- npx next dev
+devp up cra-app -- npm start
+
+# 需要显式端口参数的应用：用 sh -c 让 shell 在 devp 注入 PORT 后再展开
+devp up codeup-web -- sh -c 'npx vite --port "$PORT" --host 127.0.0.1'
+devp up codeup-api -- sh -c 'uv run uvicorn app:app --host 127.0.0.1 --port "$PORT"'
+
+# 应用完全不读 PORT：显式指定端口
 devp up fixed --port 3000 -- python3 -m http.server 3000
 ```
 
 要点：
 
-- **应用需使用 `$PORT`**：Next.js/CRA/gunicorn 原生读 `PORT` 环境变量；Vite/uvicorn
-  在命令里显式传 `--port $PORT`。不配合的应用用 `devp up <name> --port 3000 -- CMD...`。
+- **应用接入分两种**：
+  1. **原生读 `PORT` 环境变量的应用**（Next.js / CRA / gunicorn 等）——直接写命令即可，
+     无需显式 `--port`。
+  2. **需要显式端口参数的应用**（Vite / uvicorn 等）——用 `sh -c '...'` 包一层，让 shell
+     在 devp 启动后展开 `$PORT`。
+- **不要直接写 `--port $PORT`**：devp 用 `subprocess.Popen(argv)` 直接执行、**不经过
+  shell**，命令里的 `$PORT` 会被用户自己的 shell 提前展开（此时 devp 尚未分配端口，值为
+  空串），应用会收到缺值参数。用单引号包住 `sh -c` 的脚本即可把展开推迟到 devp 启动后。
 - **Host 校验放行**：请求的 Host 头是 `<name>.test`，Vite 需 `server.allowedHosts`、
   Django 需 `ALLOWED_HOSTS` 加上该域名。
 - **caddy 重启后**最长 30s 内已注册域名 404（心跳周期内自动恢复）。
-- name 限单标签 `[a-z0-9-]`（通配证书 `*.test` 只覆盖一级子域），分支信息编码进名字
-  （如 `codeup-featx`）。
+- 路由按单标签 `<name>.test` 注册，`name` 由 `[a-z0-9-]` 校验（长度 ≤ 63），不得含点；
+  分支信息编码进名字（如 `codeup-featx`）。
 - 注册协议：Admin API GET 路由数组 → 插到 `*.test` 通配兜底之前 → PATCH 回写
   （POST 追加会被通配路由遮蔽）；注销按 `@id` DELETE。详见
   `docs/superpowers/specs/2026-10-21-devp-dynamic-domain-gateway-design.md`。

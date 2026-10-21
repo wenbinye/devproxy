@@ -124,5 +124,6 @@ status:
 
 # 安装 devp CLI 到 ~/.local/bin（修改 devp 脚本后需重跑）
 install-devp:
+    mkdir -p {{home_dir()}}/.local/bin
     install -m 755 devp {{home_dir()}}/.local/bin/devp
     {{home_dir()}}/.local/bin/devp --help > /dev/null && echo "devp 已安装到 ~/.local/bin/devp"
