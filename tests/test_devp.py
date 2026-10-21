@@ -436,12 +436,41 @@ class TestUpLifecycle(unittest.TestCase):
         def sabotage():
             time.sleep(2.0)
             self.admin.routes = [r for r in self.admin.routes if r.get("@id") != "devp_testapp"]
-        threading.Thread(target=sabotage, daemon=True).start()
+        t = threading.Thread(target=sabotage, daemon=True)
+        t.start()
         before = len(self._ops("PATCH", devp.ROUTES_PATH))
         r = run_devp(["up", "testapp", "--", sys.executable, "-c", FAKE_APP], self.env)
+        # 等 sabotage 确定结束后再断言，避免与 PATCH 处理器的 routes 重绑定交错
+        t.join()
         self.assertEqual(r.returncode, 7, msg=r.stderr)
         patches = self._ops("PATCH", devp.ROUTES_PATH)
         self.assertGreaterEqual(len(patches), before + 2, msg=f"心跳未重注册: {self.admin.ops}")
+
+    def test_up_ready_timeout_terminates_child(self):
+        # 只 sleep 不监听：devp 应在 --ready-timeout 1 后终止子进程并退出
+        marker = Path(self.tmp.name) / "slow_exited"
+        slow_app = f"""
+import signal, sys, time
+def stop(signum, frame):
+    open({str(marker)!r}, "w").write("terminated")
+    sys.exit(0)
+signal.signal(signal.SIGTERM, stop)
+time.sleep(10)
+"""
+        r = run_devp(["up", "--ready-timeout", "1", "slowapp", "--",
+                      sys.executable, "-c", slow_app], self.env)
+        self.assertNotEqual(r.returncode, 0, msg=r.stdout)
+        self.assertIn("就绪超时", r.stderr)
+        self.assertTrue(marker.exists(), "就绪超时后子进程未被终止")
+        self.assertEqual(self._ops("PATCH", devp.ROUTES_PATH), [])
+
+    def test_up_exits_when_child_dies_before_ready(self):
+        r = run_devp(["up", "dieapp", "--", sys.executable, "-c", "raise SystemExit(3)"],
+                     self.env)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("子进程先退出", r.stderr)
+        self.assertIn("未注册", r.stderr)
+        self.assertEqual(self._ops("PATCH", devp.ROUTES_PATH), [])
 
     def test_up_rejects_duplicate_name(self):
         self.admin.routes.insert(0, devp.build_route("testapp", 1))

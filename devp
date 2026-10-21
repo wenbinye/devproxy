@@ -176,6 +176,16 @@ def reachable(port, timeout=0.5):
         return False
 
 
+def _stop(proc):
+    """terminate → 有限等待 → kill，确保子进程不会残留成孤儿。"""
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+
+
 def cmd_up(a):
     validate_name(a.name)
     st, _ = api("GET", "/config/")
@@ -185,39 +195,52 @@ def cmd_up(a):
         sys.exit(f"devp: {a.name} 已注册，先 devp down {a.name} 或换名")
     port = a.port or alloc_port()
     env = dict(os.environ, PORT=str(port))
+    registered = False
+    stop = threading.Event()
+    hb = None
     print(f"PORT={port} 已分配，启动: {' '.join(a.cmd)}")
     proc = subprocess.Popen(a.cmd, env=env)
-    print(f"等待 127.0.0.1:{port} 就绪（超时 {a.ready_timeout}s）…")
-    deadline = time.time() + a.ready_timeout
-    while time.time() < deadline:
-        if proc.poll() is not None:
-            sys.exit(f"devp: 子进程先退出（code={proc.returncode}），未注册")
-        if reachable(port, timeout=1):
-            break
-        time.sleep(0.3)
-    else:
-        proc.terminate()
-        sys.exit("devp: 就绪超时——应用可能未使用 $PORT，可用 --port 显式指定")
-    if not register_retry(a.name, port):
-        proc.terminate()
-        sys.exit("devp: 注册失败（Admin API PATCH 重试 3 次未成功）")
-    print(f"✅ https://{a.name}.test")
-    stop = threading.Event()
-    threading.Thread(target=heartbeat, args=(a.name, port, stop), daemon=True).start()
-    rc = 0
     try:
-        rc = proc.wait()
-    except KeyboardInterrupt:
-        # 同进程组：子进程也已收到 SIGINT，给 5s 宽限后强杀
+        print(f"等待 127.0.0.1:{port} 就绪（超时 {a.ready_timeout}s）…")
+        deadline = time.time() + a.ready_timeout
         try:
-            rc = proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+            while time.time() < deadline:
+                if proc.poll() is not None:
+                    sys.exit(f"devp: 子进程先退出（code={proc.returncode}），未注册")
+                if reachable(port, timeout=1):
+                    break
+                time.sleep(0.3)
+            else:
+                sys.exit("devp: 就绪超时——应用可能未使用 $PORT，可用 --port 显式指定")
+        except KeyboardInterrupt:
+            sys.exit(130)
+        if not register_retry(a.name, port):
+            sys.exit("devp: 注册失败（Admin API PATCH 重试 3 次未成功）")
+        registered = True
+        print(f"✅ https://{a.name}.test")
+        hb = threading.Thread(target=heartbeat, args=(a.name, port, stop), daemon=True)
+        hb.start()
+        rc = 0
+        try:
             rc = proc.wait()
+        except KeyboardInterrupt:
+            # 同进程组：子进程也已收到 SIGINT，给 5s 宽限后强杀
+            try:
+                rc = proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                rc = proc.wait()
     finally:
         stop.set()
-        if not deregister(a.name):
+        if hb is not None:
+            # 有界 join：等心跳体内可能正在进行的 register_retry 结束（最长约 3s），
+            # 否则它可能在下面 deregister 之后把路由写回，留下指向死端口的残留。
+            hb.join(timeout=10)
+        if registered and not deregister(a.name):
             print(f"⚠️ devp: 注销失败，残留路由请执行 devp down {a.name}", file=sys.stderr)
+        _stop(proc)
+    # 被信号杀死时 wait() 返回 -n；映射成 shell 约定的 128+n（SIGINT→130, SIGTERM→143）
+    rc = 128 - rc if rc < 0 else rc
     sys.exit(rc)
 
 
@@ -226,9 +249,13 @@ def heartbeat(name, port, stop, interval=None):
     interval = interval or HEARTBEAT
     while not stop.wait(interval):
         try:
-            if not route_exists(name):
-                register_retry(name, port)
-        except OSError:
+            if stop.is_set():
+                return
+            if not route_exists(name) and not register_retry(name, port):
+                print(f"⚠️ devp: 心跳重注册失败（https://{name}.test），"
+                      f"将按 {interval}s 间隔重试", file=sys.stderr)
+        except Exception:
+            # Admin 返回畸形响应等异常不能杀死心跳线程，否则此后不再重注册
             pass
 
 
