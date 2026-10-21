@@ -93,6 +93,13 @@ class TestHeartbeatEnv(unittest.TestCase):
                 self.assertIn("DEVP_HEARTBEAT", stderr.getvalue())
 
 
+class QuietHTTPServer(ThreadingHTTPServer):
+    """桩服务端：客户端提前断开（BrokenPipe）不该刷 traceback 干扰测试输出。"""
+
+    def handle_error(self, request, client_address):
+        pass
+
+
 class StubAdmin:
     """最小 Admin API 桩：内存维护 srv0.routes，支持 GET/PATCH(/routes)、GET/DELETE(/id/x)。"""
 
@@ -104,6 +111,7 @@ class StubAdmin:
         self.get_status = 200  # 置为非 200 可模拟 Admin API 故障
         self.delete_failures_remaining = 0  # >0 时 DELETE 返回 500（模拟 caddy 重启中）
         self.ignore_patch = False  # True 时 PATCH 返回 200 但不落盘（模拟写入丢失）
+        self.get_id_delay = 0  # >0 时 /id/ 的 GET 变慢（仅在已发生 PATCH 之后）
         outer = self
 
         class H(BaseHTTPRequestHandler):
@@ -123,6 +131,10 @@ class StubAdmin:
                     # Caddy 存活预检
                     self._send(200, {})
                 elif self.path.startswith("/id/"):
+                    # 只在 PATCH 之后拖慢 /id/ 的 GET：命中「PATCH 成功 → registered
+                    # 置位」这个窗口，用来复现信号落在中间的残留路由场景
+                    if outer.get_id_delay and outer.patch_bodies:
+                        time.sleep(outer.get_id_delay)
                     rid = self.path[4:]
                     hit = next((r for r in outer.routes if r.get("@id") == rid), None)
                     if hit is not None:
@@ -165,7 +177,7 @@ class StubAdmin:
             def log_message(self, *args):
                 pass
 
-        self.srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.srv = QuietHTTPServer(("127.0.0.1", 0), H)
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
         self.base = f"http://127.0.0.1:{self.srv.server_address[1]}"
 
@@ -501,6 +513,25 @@ signal.signal(signal.SIGTERM, stop)
 time.sleep(30)
 """
 
+# launcher 场景：组长（直接子进程）先退出，进程组里留下孙进程
+FAKE_APP_ORPHAN = """
+import os, socket, subprocess, sys, time
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1", int(os.environ["PORT"])))
+s.listen(1)
+# 孙进程忽略 SIGHUP：组长（session leader）退出会让内核向会话前台进程组发 SIGHUP，
+# 若不忽略它会自己死掉，就测不出「devp 是否按进程组清理」。
+# 另把它的 stdout/stderr 指向 DEVNULL，避免持有 devp 的输出管道。
+g = subprocess.Popen(
+    [sys.executable, "-c",
+     "import signal, time; signal.signal(signal.SIGHUP, signal.SIG_IGN); time.sleep(30)"],
+    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+open(os.environ["DEVP_TEST_GRANDCHILD_PIDFILE"], "w").write(str(g.pid))
+time.sleep(2)
+raise SystemExit(0)
+"""
+
 
 def pid_alive(pid):
     try:
@@ -652,6 +683,18 @@ time.sleep(10)
         self.assertIn(("DELETE", "/id/devp_testapp"), self.admin.ops)
         self.assertFalse(any(x.get("@id") == "devp_testapp" for x in self.admin.routes))
 
+    def test_up_kills_grandchild_when_group_leader_exits(self):
+        # launcher 场景：组长（直接子进程）先退出，进程组里仍留着孙进程。
+        # _stop 不能因为 proc.poll() 已非 None 就跳过整个进程组，否则孙进程变孤儿。
+        pidfile = Path(self.tmp.name) / "grandchild.pid"
+        env = dict(self.env, DEVP_TEST_GRANDCHILD_PIDFILE=str(pidfile))
+        r = run_devp(["up", "testapp", "--", sys.executable, "-c", FAKE_APP_ORPHAN], env)
+        self.assertEqual(r.returncode, 0, msg=r.stderr)
+        self.assertTrue(pidfile.exists(), "假应用未写出孙进程 pid")
+        grandchild_pid = int(pidfile.read_text())
+        self.assertTrue(wait_pid_gone(grandchild_pid, 5), f"孙进程 {grandchild_pid} 仍存活")
+        self.assertFalse(any(x.get("@id") == "devp_testapp" for x in self.admin.routes))
+
 
 class TestUpCliParsing(unittest.TestCase):
     """D18：up 的参数解析不再用 REMAINDER，name 之后的选项必须生效。"""
@@ -795,6 +838,7 @@ class TestSignalLifecycle(unittest.TestCase):
             "DEVP_HEARTBEAT": "30",
             "DEVP_TEST_CHILD_PIDFILE": str(self.child_pidfile),
             "DEVP_TEST_GRANDCHILD_PIDFILE": str(self.grandchild_pidfile),
+            "PYTHONUNBUFFERED": "1",  # 让「✅ 已注册」那行立刻落盘，供测试读取
         }
 
     def tearDown(self):
@@ -817,22 +861,31 @@ class TestSignalLifecycle(unittest.TestCase):
         return int(self.child_pidfile.read_text()), int(self.grandchild_pidfile.read_text())
 
     def _run_signal_case(self, sig, expected_rc):
-        proc = subprocess.Popen(
-            [sys.executable, str(DEV), "up", "testapp", "--",
-             sys.executable, "-c", FAKE_APP_TREE],
-            env=dict(os.environ, **self.env),
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-        )
+        out_path = Path(self.tmp.name) / "devp.out"
+        err_path = Path(self.tmp.name) / "devp.err"
+        # 用文件而非 PIPE 收输出：可以边跑边读，精确等到「已注册」的那一行
+        with open(out_path, "w") as outf, open(err_path, "w") as errf:
+            proc = subprocess.Popen(
+                [sys.executable, str(DEV), "up", "testapp", "--",
+                 sys.executable, "-c", FAKE_APP_TREE],
+                env=dict(os.environ, **self.env),
+                stdout=outf, stderr=errf,
+            )
         try:
+            # 就绪判据必须是 devp 自己打印的「已注册」标记（registered=True 之后），
+            # 不能用「路由已出现在 stub」——那是 PATCH 瞬间的事，早于 registered 置位。
             self._wait_for(
-                lambda: any(r.get("@id") == "devp_testapp" for r in self.admin.routes),
-                msg="devp 未在超时内完成注册",
+                lambda: "✅ https://testapp.test" in out_path.read_text(),
+                msg="devp 未在超时内打印就绪标记",
             )
             child_pid, grandchild_pid = self._read_pids()
             proc.send_signal(sig)
             rc = proc.wait(timeout=20)
         finally:
-            out, err = proc.communicate(timeout=5)
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+        out, err = out_path.read_text(), err_path.read_text()
         self.assertEqual(rc, expected_rc, msg=f"stdout={out}\nstderr={err}")
         self.assertIn(("DELETE", "/id/devp_testapp"), self.admin.ops)
         self.assertFalse(any(r.get("@id") == "devp_testapp" for r in self.admin.routes))
@@ -844,6 +897,28 @@ class TestSignalLifecycle(unittest.TestCase):
 
     def test_sigint_cleans_up_route_and_process_group(self):
         self._run_signal_case(signal.SIGINT, 130)
+
+    def test_signal_during_registration_still_deregisters(self):
+        # 「PATCH 成功」与「registered=True 置位」之间收到信号：finally 仍必须注销，
+        # 否则 finally 跳过注销 → 留下指向死端口的残留路由
+        self.admin.get_id_delay = 2.0
+        proc = subprocess.Popen(
+            [sys.executable, str(DEV), "up", "testapp", "--",
+             sys.executable, "-c", FAKE_APP_TREE],
+            env=dict(os.environ, **self.env),
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        try:
+            self._wait_for(lambda: bool(self.admin.patch_bodies), msg="未见 PATCH")
+            proc.send_signal(signal.SIGTERM)
+            rc = proc.wait(timeout=20)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+        self.assertEqual(rc, 143)
+        self.assertIn(("DELETE", "/id/devp_testapp"), self.admin.ops)
+        self.assertFalse(any(r.get("@id") == "devp_testapp" for r in self.admin.routes))
 
 
 LOCK_HOLDER_SCRIPT = r"""

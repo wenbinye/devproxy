@@ -907,7 +907,7 @@ def cmd_selftest(a):
     if not os.path.exists(caddy):
         sys.exit(f"devp: 找不到 caddy（{caddy}）")
     tmp = tempfile.mkdtemp(prefix="devp-selftest-")
-    admin_port, https_port, http_port = 20191, 14443, 14080
+    admin_port, https_port, http_port = 20191, 14443, 14480
     cfg = (f"{{\n"
            f"\tadmin localhost:{admin_port}\n"
            f"\tstorage file_system {tmp}/data\n"

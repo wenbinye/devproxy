@@ -205,30 +205,38 @@ def reachable(port, timeout=0.5):
         return False
 
 
-def _stop(proc, sig=signal.SIGTERM):
+def _stop(proc, pgid=None, sig=signal.SIGTERM):
     """向子进程组发信号 → 有限等待 → SIGKILL 进程组，确保孙进程也不残留。
 
     子进程以 start_new_session=True 启动，pgid == pid；npm run dev 之类的多级
     launcher 会再 fork 孙进程，只杀直接子进程会让孙进程继续占着端口。
+    pgid 在启动时捕获：组长（直接子进程）先退出时（如 launcher 场景），进程组
+    里仍留着孙进程，依然要按组发信号——不能因为 proc.poll() 已非 None 就跳过。
     """
-    if proc is None or proc.poll() is not None:
+    if proc is None:
         return
-    try:
-        pgid = os.getpgid(proc.pid)
-    except ProcessLookupError:
-        return
+    if pgid is None:
+        try:
+            pgid = os.getpgid(proc.pid)
+        except ProcessLookupError:
+            pgid = proc.pid
     try:
         os.killpg(pgid, sig)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):
         pass
     try:
         proc.wait(timeout=5)
     except subprocess.TimeoutExpired:
-        try:
-            os.killpg(pgid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        proc.wait()
+        pass
+    # 组长可能已退出但组内仍有孙进程：再按组补一刀 SIGKILL
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
 
 
 def cmd_up(a):
@@ -243,10 +251,12 @@ def cmd_up(a):
     port = a.port or alloc_port()
     env = dict(os.environ, PORT=str(port))
     registered = False
+    registering = False  # 已开始注册：可能已经写进 Caddy，退出时也要尝试注销
     stop = threading.Event()
     hb = None
     hb_started = False
     proc = None
+    pgid = None
 
     def on_signal(signum, frame):
         # 清理期间收到第二个信号时直接忽略，避免中断 finally 留下残留；
@@ -254,10 +264,11 @@ def cmd_up(a):
         if stop.is_set():
             return
         stop.set()
-        if proc is not None and proc.poll() is None:
+        if pgid is not None:
+            # 按组转发：组长可能已退出但组内仍有孙进程
             child_sig = signal.SIGINT if signum == signal.SIGINT else signal.SIGTERM
             try:
-                os.killpg(os.getpgid(proc.pid), child_sig)
+                os.killpg(pgid, child_sig)
             except (ProcessLookupError, PermissionError):
                 pass
         raise SystemExit(128 + signum)
@@ -271,6 +282,7 @@ def cmd_up(a):
         try:
             # 独立 session/进程组：devp 显式转发信号，退出时可按组清理孙进程
             proc = subprocess.Popen(a.cmd, env=env, start_new_session=True)
+            pgid = proc.pid  # start_new_session=True → 子进程是进程组 leader
         except FileNotFoundError:
             sys.exit(f"devp: 命令不存在: {a.cmd[0]}")
         print(f"等待 127.0.0.1:{port} 就绪（超时 {a.ready_timeout}s）…")
@@ -283,6 +295,7 @@ def cmd_up(a):
             time.sleep(0.3)
         else:
             sys.exit("devp: 就绪超时——应用可能未使用 $PORT，可用 --port 显式指定")
+        registering = True
         if not register_retry(a.name, port):
             sys.exit("devp: 注册失败（Admin API PATCH 重试 3 次未成功）")
         registered = True
@@ -297,9 +310,11 @@ def cmd_up(a):
             # 有界 join：等心跳体内可能正在进行的 register_retry 结束；stop 置位后
             # 心跳不会再发起新尝试，持锁后的二次检查也不会写回。
             hb.join(timeout=10)
-        if registered and not deregister_retry(a.name):
-            print(f"⚠️ devp: 注销失败，残留路由请执行 devp down {a.name}", file=sys.stderr)
-        _stop(proc)
+        if registered or registering:
+            # registering 为真但注册未确认时，DELETE 404 属正常：只有路由仍在才告警
+            if not deregister_retry(a.name) and route_exists(a.name):
+                print(f"⚠️ devp: 注销失败，残留路由请执行 devp down {a.name}", file=sys.stderr)
+        _stop(proc, pgid)
         for s, handler in old_handlers.items():
             signal.signal(s, handler)
     # 被信号杀死时 wait() 返回 -n；映射成 shell 约定的 128+n（SIGINT→130, SIGTERM→143）
@@ -328,6 +343,9 @@ def cmd_down(a):
     st, _ = api("GET", "/config/")
     if st != 200:
         sys.exit("devp: Caddy Admin API 不可达")
+    # 未注册的 name 直接报错，不必白等注销重试的 ~3s
+    if not route_exists(a.name):
+        sys.exit(f"devp: {a.name} 未注册")
     if deregister_retry(a.name):
         print(f"已注销 {a.name}.test")
     else:

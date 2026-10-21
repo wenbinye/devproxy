@@ -196,6 +196,9 @@ devp up fixed --port 3000 -- python3 -m http.server 3000
   空串），应用会收到缺值参数。用单引号包住 `sh -c` 的脚本即可把展开推迟到 devp 启动后。
 - **Host 校验放行**：请求的 Host 头是 `<name>.test`，Vite 需 `server.allowedHosts`、
   Django 需 `ALLOWED_HOSTS` 加上该域名。
+- **子进程脱离控制终端**：devp 以 `start_new_session=True` 启动子进程（独立进程组，便于
+  退出时按组清理孙进程）。代价是子进程**没有控制终端**，依赖 stdin 的交互式启动语义会变
+  （需要 TTY 交互的启动方式不适用）；stdout/stderr 仍直透当前终端。
 - **caddy 重启后**最长 30s 内已注册域名 404（心跳周期内自动恢复）。
 - 路由按单标签 `<name>.test` 注册，`name` 由 `[a-z0-9-]` 校验（长度 ≤ 63），不得含点；
   分支信息编码进名字（如 `codeup-featx`）。
