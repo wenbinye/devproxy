@@ -17,9 +17,20 @@ import sys
 ADMIN_BASE = os.environ.get("DEVP_ADMIN", "http://127.0.0.1:2019")
 ROUTES_PATH = "/config/apps/http/servers/srv0/routes"
 LOCK_PATH = os.environ.get("DEVP_LOCK", os.path.expanduser("~/.local/state/devp/lock"))
-HEARTBEAT = float(os.environ.get("DEVP_HEARTBEAT", "30"))
 
-NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+_HEARTBEAT_RAW = os.environ.get("DEVP_HEARTBEAT", "30")
+try:
+    HEARTBEAT = float(_HEARTBEAT_RAW)
+except ValueError:
+    # 模块级常量不能让整个 CLI 起不来：非法值回落默认值并告警
+    print(
+        f"devp: 警告: DEVP_HEARTBEAT={_HEARTBEAT_RAW!r} 不是数值，回落到 30.0",
+        file=sys.stderr,
+    )
+    HEARTBEAT = 30.0
+
+# 用 \A / \Z 而非 ^ / $ —— $ 也会匹配末尾换行之前，"codeup\n" 会被误放行
+NAME_RE = re.compile(r"\A[a-z0-9][a-z0-9-]*\Z")
 
 
 def validate_name(name):
