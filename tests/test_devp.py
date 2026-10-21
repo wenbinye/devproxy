@@ -86,6 +86,7 @@ class StubAdmin:
         self.ops = []  # 记录 (method, path) 序列
         self.patch_bodies = []  # PATCH 收到的 body（序列化路径的可观测点）
         self.patch_content_types = []  # PATCH 收到的 Content-Type
+        self.get_status = 200  # 置为非 200 可模拟 Admin API 故障
         outer = self
 
         class H(BaseHTTPRequestHandler):
@@ -100,7 +101,7 @@ class StubAdmin:
             def do_GET(self):
                 outer.ops.append(("GET", self.path))
                 if self.path == devp.ROUTES_PATH:
-                    self._send(200, outer.routes)
+                    self._send(outer.get_status, outer.routes if outer.get_status == 200 else None)
                 elif self.path == "/config/":
                     # Caddy 存活预检
                     self._send(200, {})
@@ -270,8 +271,14 @@ class TestRegisterLifecycle(unittest.TestCase):
     def setUp(self):
         self.admin = StubAdmin()
         self.admin.routes = [{"match": [{"host": ["*.test"]}], "handle": [], "terminal": True}]
+        # 别碰真实 HOME 下的锁文件（用户开着 devp 时还会阻塞）
+        self._lock_dir = tempfile.TemporaryDirectory()
+        self._old_lock_path = devp.LOCK_PATH
+        devp.LOCK_PATH = str(Path(self._lock_dir.name) / "lock")
 
     def tearDown(self):
+        devp.LOCK_PATH = self._old_lock_path
+        self._lock_dir.cleanup()
         self.admin.close()
 
     def test_register_inserts_before_wildcard(self):
@@ -310,9 +317,33 @@ class TestRegisterLifecycle(unittest.TestCase):
             ("b", "b.test", "127.0.0.1:2222", 2222),
         ])
 
-    def test_register_retry_eventually_succeeds(self):
-        # 第一次 GET 前 stub 崩掉 503？——简化：直接验证 attempts=1 失败路径返回 False
+    def test_register_is_idempotent_for_same_name(self):
+        # PATCH 已生效但响应丢失后重试：数组里已有 devp_x，不能插第二个同 @id 元素
+        self.assertTrue(devp.register("x", 1111, base=self.admin.base))
+        self.assertTrue(devp.register("x", 2222, base=self.admin.base))
+        self.assertEqual([r.get("@id") for r in self.admin.routes].count("devp_x"), 1)
+        hit = next(r for r in self.admin.routes if r.get("@id") == "devp_x")
+        self.assertEqual(hit["handle"][0]["upstreams"][0]["dial"], "127.0.0.1:2222")
+
+    def test_register_returns_false_and_skips_patch_when_get_fails(self):
+        self.admin.get_status = 503
+        self.assertFalse(devp.register("codeup", 49831, base=self.admin.base))
+        self.assertEqual(self.admin.ops, [("GET", devp.ROUTES_PATH)])
+
+    def test_register_rejects_invalid_name(self):
+        # admin 挂掉时非法 name 也必须在入口退出，而不是静默返回 False
+        with self.assertRaises(SystemExit):
+            devp.register("codeup\n", 49831, base="http://127.0.0.1:1")
+
+    def test_register_retry_fails_when_admin_unreachable(self):
+        # 端口 1 上无服务：attempts=1 时只试一次，返回 False 且不等待
         self.assertFalse(devp.register_retry("x", 1, base="http://127.0.0.1:1", attempts=1))
+
+    def test_register_retry_backoff_intervals(self):
+        with mock.patch.object(devp.time, "sleep") as sleep:
+            self.assertFalse(devp.register_retry(
+                "x", 1, base="http://127.0.0.1:1", attempts=3))
+        self.assertEqual([c.args[0] for c in sleep.call_args_list], [1, 2])
 
 
 class TestReachable(unittest.TestCase):

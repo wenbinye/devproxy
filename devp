@@ -109,13 +109,22 @@ def insert_route(routes, route):
 
 
 def register(name, port, base=None):
-    """GET 路由数组 → 插到通配路由之前 → PATCH 回写。flock 防并发。"""
+    """GET 路由数组 → 同名路由就地替换，否则插到通配路由之前 → PATCH 回写。flock 防并发。"""
+    validate_name(name)
     with locked():
         st, routes = api("GET", ROUTES_PATH, base=base)
         if st != 200:
             return False
         routes = routes or []
-        insert_route(routes, build_route(name, port))
+        route = build_route(name, port)
+        rid = route["@id"]
+        for i, r in enumerate(routes):
+            if r.get("@id") == rid:
+                # 幂等：PATCH 已生效但响应丢失后重试会再看到自己，必须就地替换而不是再插一个
+                routes[i] = route
+                break
+        else:
+            insert_route(routes, route)
         st, _ = api("PATCH", ROUTES_PATH, body=routes, base=base)
         return st == 200
 
@@ -133,7 +142,7 @@ def route_exists(name, base=None):
 
 
 def register_retry(name, port, base=None, attempts=3):
-    """注册重试：1s/2s/4s 退避。"""
+    """注册重试：默认 3 次尝试，失败间隔 1s、2s；最后一次失败后不再 sleep。"""
     for i in range(attempts):
         if register(name, port, base=base):
             return True
