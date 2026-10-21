@@ -483,3 +483,96 @@ time.sleep(10)
                      {"DEVP_ADMIN": "http://127.0.0.1:1", "DEVP_LOCK": str(Path(self.tmp.name) / "l")})
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("Admin API 不可达", r.stderr)
+
+
+class TestUpCliParsing(unittest.TestCase):
+    """D18：up 的参数解析不再用 REMAINDER，name 之后的选项必须生效。"""
+
+    def setUp(self):
+        self.admin = StubAdmin()
+        self.admin.routes = [{"match": [{"host": ["*.test"]}], "handle": [], "terminal": True}]
+        self.tmp = tempfile.TemporaryDirectory()
+        self.env = {
+            "DEVP_ADMIN": self.admin.base,
+            "DEVP_LOCK": str(Path(self.tmp.name) / "lock"),
+            "DEVP_HEARTBEAT": "0.5",
+        }
+
+    def tearDown(self):
+        self.admin.close()
+        self.tmp.cleanup()
+
+    def _dial(self):
+        return next(
+            route["handle"][0]["upstreams"][0]["dial"]
+            for body in self.admin.patch_bodies
+            for route in body
+            if route.get("@id") == "devp_testapp"
+        )
+
+    def test_explicit_port_after_name_is_used(self):
+        # devp up <name> --port N -- CMD...：--port 写在 name 之后必须被 devp 消费，
+        # 而不是变成子进程参数（Task 4 的 REMAINDER 会吞掉它）
+        port = devp.alloc_port()
+        r = run_devp(
+            ["up", "testapp", "--port", str(port), "--", sys.executable, "-c", FAKE_APP],
+            self.env,
+        )
+        self.assertEqual(r.returncode, 7, msg=r.stderr)
+        self.assertEqual(self._dial(), f"127.0.0.1:{port}")
+
+    def test_options_after_name_are_accepted(self):
+        r = run_devp(
+            ["up", "testapp", "--ready-timeout", "5", "--", sys.executable, "-c", FAKE_APP],
+            self.env,
+        )
+        self.assertEqual(r.returncode, 7, msg=r.stderr)
+        self.assertIn("✅ https://testapp.test", r.stdout)
+
+    def test_missing_separator_is_rejected(self):
+        r = run_devp(["up", "testapp"], self.env)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("缺少 '--'", r.stderr)
+
+    def test_empty_command_is_rejected(self):
+        r = run_devp(["up", "testapp", "--"], self.env)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("缺少启动命令", r.stderr)
+
+
+class TestDownAndLs(unittest.TestCase):
+    def setUp(self):
+        self.admin = StubAdmin()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.env = {"DEVP_ADMIN": self.admin.base,
+                    "DEVP_LOCK": str(Path(self.tmp.name) / "lock")}
+
+    def tearDown(self):
+        self.admin.close()
+        self.tmp.cleanup()
+
+    def test_down_removes_route(self):
+        self.admin.routes = [
+            devp.build_route("testapp", 12345),
+            {"match": [{"host": ["*.test"]}], "handle": [], "terminal": True},
+        ]
+        r = run_devp(["down", "testapp"], self.env)
+        self.assertEqual(r.returncode, 0, msg=r.stderr)
+        self.assertIn("已注销 testapp.test", r.stdout)
+        self.assertEqual(len(self.admin.routes), 1)  # 只剩通配兜底
+
+    def test_down_unknown_fails(self):
+        r = run_devp(["down", "ghost"], self.env)
+        self.assertNotEqual(r.returncode, 0)
+
+    def test_ls_lists_routes(self):
+        self.admin.routes = [devp.build_route("testapp", 12345)]
+        r = run_devp(["ls"], self.env)
+        self.assertEqual(r.returncode, 0, msg=r.stderr)
+        self.assertIn("testapp.test", r.stdout)
+        self.assertIn("127.0.0.1:12345", r.stdout)
+
+    def test_ls_empty(self):
+        r = run_devp(["ls"], self.env)
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("无 devp 路由", r.stdout)

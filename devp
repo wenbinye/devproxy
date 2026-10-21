@@ -259,7 +259,26 @@ def heartbeat(name, port, stop, interval=None):
             pass
 
 
+def cmd_down(a):
+    validate_name(a.name)
+    if deregister(a.name):
+        print(f"已注销 {a.name}.test")
+    else:
+        sys.exit(f"devp: {a.name} 未注册（或注销失败）")
+
+
+def cmd_ls(a):
+    rows = list_routes()
+    if not rows:
+        print("（无 devp 路由）")
+        return
+    for name, host, dial, port in rows:
+        mark = "✅" if reachable(port) else "⛔ 不可达"
+        print(f"{host:40s} {dial:22s} {mark}")
+
+
 def main(argv=None):
+    raw = list(sys.argv[1:] if argv is None else argv)
     p = argparse.ArgumentParser(prog="devp",
                                 description="本地开发动态域名网关（*.test → 动态端口）")
     sub = p.add_subparsers(dest="command", required=True)
@@ -269,16 +288,31 @@ def main(argv=None):
     up.add_argument("--port", type=int, default=None, help="显式端口（默认自动分配）")
     up.add_argument("--ready-timeout", type=int, default=60,
                     help="就绪超时秒数（默认 60）")
-    up.add_argument("cmd", nargs=argparse.REMAINDER, metavar="-- CMD...",
-                    help="启动命令（会获得 PORT 环境变量）")
 
-    a = p.parse_args(argv)
+    down = sub.add_parser("down", help="注销 <name>.test")
+    down.add_argument("name")
+
+    sub.add_parser("ls", help="列出 devp 路由")
+
+    # '--' 之后全部是子进程命令，先按原始 argv 切片再交给 argparse，
+    # 否则 name 之后的选项（如 --port）会被当成子进程参数吞掉。
+    if "--" in raw:
+        i = raw.index("--")
+        a = p.parse_args(raw[:i])
+        a.cmd = raw[i + 1:]
+    else:
+        a = p.parse_args(raw)
+        if a.command == "up":
+            p.error("缺少 '--'：devp up <name> [--port N] [--ready-timeout S] -- CMD...")
+
     if a.command == "up":
-        if a.cmd and a.cmd[0] == "--":
-            a.cmd = a.cmd[1:]
         if not a.cmd:
-            p.error("缺少启动命令：devp up <name> -- CMD...")
+            p.error("缺少启动命令：-- 之后需要 CMD...")
         cmd_up(a)
+    elif a.command == "down":
+        cmd_down(a)
+    elif a.command == "ls":
+        cmd_ls(a)
 
 
 if __name__ == "__main__":
