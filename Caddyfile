@@ -52,8 +52,13 @@ localhost {
 
 # devp 动态注册的本地项目网关
 # 未注册的 *.test 域名返回 404；devp up 通过 Admin API 把精确域名路由插到本块之前
+# on-demand：每个域名首次访问时单独签发证书（通配 *.test 证书会被客户端的
+# 主机名校验拒绝——OpenSSL/浏览器不接受二级通配符，实测 curl exit 60）
 *.test {
-	tls internal
+	tls {
+		on_demand
+		issuer internal
+	}
 	respond "devp: no route registered for {http.request.host}" 404
 }
 

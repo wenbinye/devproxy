@@ -301,7 +301,10 @@ def cmd_selftest(a):
            f"\thttps_port {https_port}\n"
            f"}}\n\n"
            f"*.test {{\n"
-           f"\ttls internal\n"
+           f"\ttls {{\n"
+           f"\t\ton_demand\n"
+           f"\t\tissuer internal\n"
+           f"\t}}\n"
            f"\trespond \"fallback\" 404\n"
            f"}}\n")
     cfg_path = os.path.join(tmp, "Caddyfile")
@@ -331,9 +334,12 @@ def cmd_selftest(a):
         if not ok:
             failures.append(desc)
 
+    cafile = os.path.join(tmp, "data", "pki", "authorities", "local", "root.crt")
+
     def fetch(host):
         # foo.test 经 dnsmasq 解析到 127.0.0.1/::1，直连沙箱 caddy 的 https_port
-        ctx = ssl._create_unverified_context()
+        # 信任沙箱自己的 CA：每次请求都做真实主机名校验（通配证书无法蒙混过关）
+        ctx = ssl.create_default_context(cafile=cafile)
         conn = http.client.HTTPSConnection(host, https_port, context=ctx, timeout=5)
         conn.request("GET", "/")
         r = conn.getresponse()
@@ -351,6 +357,7 @@ def cmd_selftest(a):
         else:
             sys.exit("devp: selftest 沙箱 caddy 启动超时")
 
+        check("沙箱 CA 根证书已生成", os.path.exists(cafile))
         check("通配站点可服务（未注册域名兜底 404）", fetch("anything-unregistered.test")[0] == 404)
         check("注册前 foo.test 命中兜底 404", fetch("foo.test")[0] == 404)
         check("register(foo) 成功", register("foo", uport, base=base))
