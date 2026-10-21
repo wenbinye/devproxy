@@ -9,10 +9,15 @@
 
 注册协议与设计决策见 docs/superpowers/specs/2026-10-21-devp-dynamic-domain-gateway-design.md
 """
+import fcntl
+import json
 import os
 import re
 import socket
 import sys
+import urllib.error
+import urllib.request
+from contextlib import contextmanager
 
 ADMIN_BASE = os.environ.get("DEVP_ADMIN", "http://127.0.0.1:2019")
 ROUTES_PATH = "/config/apps/http/servers/srv0/routes"
@@ -47,3 +52,54 @@ def alloc_port():
     port = s.getsockname()[1]
     s.close()
     return port
+
+
+def api(method, path, body=None, base=None):
+    """调用 Caddy Admin API。HTTP 错误返回 (code, None)，连接失败返回 (0, None)。"""
+    url = (base or ADMIN_BASE).rstrip("/") + path
+    data = json.dumps(body).encode() if body is not None else None
+    headers = {"Content-Type": "application/json"} if data else {}
+    req = urllib.request.Request(url, data=data, method=method, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            raw = r.read()
+            return r.status, (json.loads(raw) if raw else None)
+    except urllib.error.HTTPError as e:
+        return e.code, None
+    except (urllib.error.URLError, OSError):
+        return 0, None
+
+
+@contextmanager
+def locked(path=None):
+    """flock 互斥，包住 GET+PATCH 读改写临界区。"""
+    path = path or LOCK_PATH
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fh = open(path, "w")
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        yield
+    finally:
+        fh.close()
+
+
+def build_route(name, port):
+    validate_name(name)
+    return {
+        "@id": f"devp_{name}",
+        "match": [{"host": [f"{name}.test"]}],
+        "handle": [{"handler": "reverse_proxy",
+                    "upstreams": [{"dial": f"127.0.0.1:{port}"}]}],
+        "terminal": True,
+    }
+
+
+def is_wildcard(route):
+    return any("*" in h for m in route.get("match", []) for h in m.get("host", []))
+
+
+def insert_route(routes, route):
+    """插到首个通配 host 路由之前（POST 追加会被 *.test 兜底遮蔽，实测结论）。"""
+    idx = next((i for i, r in enumerate(routes) if is_wildcard(r)), len(routes))
+    routes.insert(idx, route)
+    return routes
