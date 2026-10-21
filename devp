@@ -1,0 +1,38 @@
+#!/usr/bin/env python3
+"""devp — 本地开发动态域名网关（*.test → 127.0.0.1:动态端口）
+
+用法:
+  devp up <name> [--port N] [--ready-timeout S] -- CMD...
+  devp down <name>
+  devp ls
+  devp selftest
+
+注册协议与设计决策见 docs/superpowers/specs/2026-10-21-devp-dynamic-domain-gateway-design.md
+"""
+import os
+import re
+import socket
+import sys
+
+ADMIN_BASE = os.environ.get("DEVP_ADMIN", "http://127.0.0.1:2019")
+ROUTES_PATH = "/config/apps/http/servers/srv0/routes"
+LOCK_PATH = os.environ.get("DEVP_LOCK", os.path.expanduser("~/.local/state/devp/lock"))
+HEARTBEAT = float(os.environ.get("DEVP_HEARTBEAT", "30"))
+
+NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+
+
+def validate_name(name):
+    """非法 name 直接退出：通配证书只覆盖一级子域，name 不得含点。"""
+    if not NAME_RE.match(name) or len(name) > 63:
+        sys.exit(f"devp: 非法 name {name!r}: 限单标签 [a-z0-9-]（不得含点）")
+
+
+def alloc_port():
+    """绑定 :0 取一个随机空闲端口后立即释放。存在微小时隙竞争，
+    子进程 bind 失败时会以子进程自身错误呈现，重跑即可。"""
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
