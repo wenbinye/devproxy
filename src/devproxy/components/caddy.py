@@ -7,6 +7,7 @@ Caddy 版本固定，sha256 内置在源码里 —— 上游发布的 checksums.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import platform as _platform
 import shutil
@@ -157,13 +158,30 @@ class CaddyComponent:
             return False
 
     def _unit_current(self) -> bool:
-        """已安装的单元是否把 ExecStart 指向本工具的主 Caddyfile。"""
+        """已安装的单元是否把 ExecStart 指向本工具的主 Caddyfile 与二进制。
+
+        只看 --config 不够：改了配置里的 caddy_bin 之后，已装单元仍指着旧
+        二进制跑 —— "单元过期"永远判不出来，服务会一直用旧二进制。
+        """
         unit = self.platform.service_unit_path("caddy")
         try:
             text = unit.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             return False
-        return f"run --config {self.paths.caddyfile}" in text
+        if f"run --config {self.paths.caddyfile}" not in text:
+            return False
+        return str(self.config.caddy_bin_path) in text
+
+    def _need_binary(self) -> bool:
+        """二进制判据：不存在，或版本与固定版本不符（含"版本读不出来"）。
+
+        check 与 plan 必须共用它 —— 否则同一行既写"已就绪"又写"下载"，
+        而且每次 setup 都会重复下载。
+        """
+        binary = self.config.caddy_bin_path
+        if not binary.exists():
+            return True
+        return self.platform.binary_version(binary) != f"v{CADDY_VERSION}"
 
     # -- check ---------------------------------------------------------
     def check(self) -> Status:
@@ -175,10 +193,13 @@ class CaddyComponent:
                 hint=f"devproxy setup 会自动下载 {CADDY_VERSION}",
             )
         version = self.platform.binary_version(binary)
-        if version and version != f"v{CADDY_VERSION}":
+        if self._need_binary():
             return Status(
                 ok=False,
-                detail=f"caddy 版本不符: 期望 v{CADDY_VERSION}，实际 {version}",
+                detail=(
+                    f"caddy 版本不符: 期望 v{CADDY_VERSION}，"
+                    f"实际 {version or '无法读取'}"
+                ),
                 hint="devproxy setup 会替换为固定版本",
             )
         if not self._caddyfile_current():
@@ -190,7 +211,7 @@ class CaddyComponent:
         if not self._unit_current():
             return Status(
                 ok=False,
-                detail="caddy 服务单元未指向本工具的 Caddyfile",
+                detail="caddy 服务单元未指向本工具的 Caddyfile 或二进制",
                 hint="devproxy setup 会重装 systemd user 单元",
             )
         if not self.platform.service_active("caddy"):
@@ -211,8 +232,7 @@ class CaddyComponent:
         setcap 与下载/服务绑定 —— 新下载的二进制或服务没起来时才需要重新授权。
         """
         binary = self.config.caddy_bin_path
-        version = self.platform.binary_version(binary) if binary.exists() else ""
-        need_binary = not binary.exists() or version != f"v{CADDY_VERSION}"
+        need_binary = self._need_binary()
         need_caddyfile = not self._caddyfile_current()
         need_unit = not self._unit_current()
         need_service = not self.platform.service_active("caddy")
@@ -341,6 +361,44 @@ class CaddyComponent:
                 return True
         return False
 
+    def _has_localhost_site(self) -> bool:
+        """sites.caddy 里是否有 localhost 站点块。
+
+        只有 *.test 站点的机器上没有 localhost 站点 —— 那时探 localhost
+        验的是"站点名匹配"而不是"服务活着"。
+        """
+        try:
+            text = self.paths.sites_caddy.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return False
+        for line in text.splitlines():
+            s = line.strip()
+            if not s or s.startswith("#"):
+                continue
+            if "localhost" in s.split("{")[0]:
+                return True
+        return False
+
+    def _probe_url(self) -> str | None:
+        """TLS 探测目标：优先首条已注册路由，其次确有 localhost 站点时的 localhost。
+
+        与 CertComponent 的做法一致：机器上只有 codeup.test 这类站点时，
+        拿 https://localhost 去探会因证书名不匹配而握手失败，把正常的机器
+        判成故障（setup 退 1）。没有可探的目标时返回 None。
+        """
+        try:
+            data = json.loads(self.paths.routes_json.read_text(encoding="utf-8"))
+        except (OSError, ValueError, UnicodeDecodeError):
+            data = {}
+        routes = data.get("routes") if isinstance(data, dict) else None
+        for route in routes or []:
+            domain = route.get("domain") if isinstance(route, dict) else None
+            if isinstance(domain, str) and domain:
+                return f"https://{domain}"
+        if self._has_localhost_site():
+            return "https://localhost"
+        return None
+
     # -- verify --------------------------------------------------------
     def verify(self) -> Status:
         """apply 后自检：二进制、服务 active、且真的能完成 TLS 握手。"""
@@ -361,13 +419,19 @@ class CaddyComponent:
                 ok=True,
                 detail="caddy 服务运行中（尚无站点，跳过 TLS 探测）",
             )
-        if not self.platform.http_ok("https://localhost"):
+        url = self._probe_url()
+        if url is None:
+            return Status(
+                ok=True,
+                detail="caddy 服务运行中（无路由且无 localhost 站点，跳过 TLS 探测）",
+            )
+        if not self.platform.http_ok(url):
             return Status(
                 ok=False,
-                detail="https://localhost TLS 握手失败",
+                detail=f"{url} TLS 握手失败",
                 hint="systemctl --user status caddy；检查 Caddyfile 与 443 端口占用",
             )
-        return Status(ok=True, detail="caddy 服务运行中，https://localhost 可访问")
+        return Status(ok=True, detail=f"caddy 服务运行中，{url} 可访问")
 
     def _main_caddyfile(self) -> str:
         from devproxy.proxy.caddy import build_main_caddyfile

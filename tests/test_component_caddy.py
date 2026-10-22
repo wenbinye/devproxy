@@ -1,4 +1,5 @@
 import hashlib
+import json
 import tarfile
 import io
 from pathlib import Path
@@ -432,3 +433,91 @@ def test_verify_skips_tls_probe_when_no_site_configured(tmp_path):
     assert status.ok is True
     assert "尚无站点" in status.detail
     assert platform.http_probes == []
+
+
+# -- N1: 探测目标不能硬编码 localhost ---------------------------------------
+
+
+def test_verify_probes_first_route_domain(tmp_path):
+    """只有 *.test 站点的机器上没有 localhost 站点 —— 探 localhost 会假失败。"""
+    comp, paths, cfg = _component(tmp_path)
+    platform = FakePlatform()
+    comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
+    _make_ready(comp, platform, cfg)
+    paths.sites_caddy.write_text("codeup.test { respond \"hi\" }\n", encoding="utf-8")
+    paths.routes_json.parent.mkdir(parents=True, exist_ok=True)
+    paths.routes_json.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "routes": [
+                    {
+                        "name": "codeup",
+                        "domain": "codeup.test",
+                        "port": 42133,
+                        "mode": "up",
+                        "upstream": "127.0.0.1:42133",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    status = comp.verify()
+    assert status.ok is True, status.detail
+    assert "https://codeup.test" in platform.http_probes
+    assert "https://localhost" not in platform.http_probes
+
+
+def test_verify_without_route_and_without_localhost_site_is_ok(tmp_path):
+    """既没有注册路由、也没有 localhost 站点 —— 无从探测，返回 ok + 提示。"""
+    comp, paths, cfg = _component(tmp_path)
+    platform = FakePlatform()
+    comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
+    _make_ready(comp, platform, cfg)
+    paths.sites_caddy.write_text("codeup.test { respond \"hi\" }\n", encoding="utf-8")
+    status = comp.verify()
+    assert status.ok is True, status.detail
+    assert platform.http_probes == []
+
+
+# -- N5: check 与 plan 的版本判据必须一致 ----------------------------------
+
+
+def test_check_and_plan_agree_when_version_unreadable(tmp_path):
+    """版本读不出来时，不能一个说"已就绪"、另一个说"要下载"。"""
+    comp, paths, cfg = _component(tmp_path)
+    platform = FakePlatform()
+    comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
+    _make_ready(comp, platform, cfg)
+    platform.binary_version = lambda binary: ""
+    assert comp.check().ok is False, "版本读不出来不能判就绪"
+    assert any("下载" in a.description for a in comp.plan())
+
+
+def test_check_and_plan_agree_when_version_matches(tmp_path):
+    comp, paths, cfg = _component(tmp_path)
+    platform = FakePlatform()
+    comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
+    _make_ready(comp, platform, cfg)
+    assert comp.check().ok is True
+    assert not any("下载" in a.description for a in comp.plan())
+
+
+# -- N6: 单元判据要看 ExecStart 里的二进制路径 -----------------------------
+
+
+def test_plan_reinstalls_unit_when_binary_path_changed(tmp_path):
+    """改了配置里的 caddy_bin 后，已装单元仍指旧二进制 —— 必须判为单元过期。"""
+    comp, paths, cfg = _component(tmp_path)
+    platform = FakePlatform()
+    comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
+    _make_ready(comp, platform, cfg)
+    platform.install_service(
+        "caddy",
+        exec_start=["/old/path/caddy", "run", "--config", str(paths.caddyfile)],
+        env={},
+    )
+    assert comp.check().ok is False
+    actions = comp.plan()
+    assert any(a.command[:1] == ["install-service"] for a in actions)

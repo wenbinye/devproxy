@@ -233,10 +233,19 @@ class LinuxPlatform:
         return _run(["sudo", "loginctl", "enable-linger", getpass.getuser()])
 
     def linger_enabled(self) -> bool:
+        """当前用户是否已启用 linger（只读探测）。
+
+        loginctl 不可用（容器 / WSL / 没有 systemd）时，linger 根本不适用 ——
+        判成"未启用"会让每次 setup 都计划一个注定失败、还要 sudo 的动作，
+        失败时 setup 直接退 1，整个工具在那种机器上不可用。
+        所以探测失败一律按"无需启用"处理。
+        """
         code, out = _run(
             ["loginctl", "show-user", getpass.getuser(), "-p", "Linger", "--value"]
         )
-        return code == 0 and out.strip() == "yes"
+        if code != 0:
+            return True
+        return out.strip() == "yes"
 
     def resolved_active(self) -> bool:
         code, out = _run(["systemctl", "is-active", "systemd-resolved"])

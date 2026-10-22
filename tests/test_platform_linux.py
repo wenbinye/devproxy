@@ -577,3 +577,13 @@ def test_linux_linger_enabled_reads_value(monkeypatch):
 def test_linux_linger_enabled_false(monkeypatch):
     monkeypatch.setattr(linux_mod, "_run", lambda argv: (0, "no"))
     assert LinuxPlatform().linger_enabled() is False
+
+
+def test_linux_linger_enabled_true_when_loginctl_unavailable(monkeypatch):
+    """无 loginctl 的宿主（容器 / WSL / 无 systemd）→ linger 不适用。
+
+    判成"未启用"会让每次 setup 都计划一个注定失败、还要 sudo 的动作，
+    失败时 setup 直接退 1 —— 整个工具在那种机器上不可用。
+    """
+    monkeypatch.setattr(linux_mod, "_run", lambda argv: (127, "命令不可用: loginctl"))
+    assert LinuxPlatform().linger_enabled() is True
