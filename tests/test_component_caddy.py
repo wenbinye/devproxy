@@ -10,6 +10,7 @@ from devproxy.components.caddy import (
     CADDY_VERSION,
     CaddyComponent,
     caddy_asset_name,
+    download_caddy,
 )
 from devproxy.config import Config
 from devproxy.paths import Paths
@@ -20,11 +21,21 @@ def _paths(tmp_path):
     return Paths(tmp_path / "config", tmp_path / "state", tmp_path / "data")
 
 
-def _component(tmp_path, platform=None):
+def _fake_downloader(dest: Path) -> None:
+    """假下载器：只落一个可执行占位文件，绝不触网。"""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text("#!/bin/sh\n")
+    dest.chmod(0o755)
+
+
+def _component(tmp_path, platform=None, downloader=None):
     paths = _paths(tmp_path)
     paths.ensure_files()
     cfg = Config(storage=str(paths.data_dir), caddy_bin=str(tmp_path / "bin" / "caddy"))
-    return CaddyComponent(platform or FakePlatform(), paths, cfg), paths, cfg
+    comp = CaddyComponent(
+        platform or FakePlatform(), paths, cfg, downloader or _fake_downloader
+    )
+    return comp, paths, cfg
 
 
 def test_asset_name_uses_mac_not_darwin():
@@ -46,7 +57,7 @@ def test_sha256_covers_four_platforms():
 def test_check_ok_when_binary_and_service_ready(tmp_path):
     comp, paths, cfg = _component(tmp_path)
     platform = FakePlatform()
-    comp = CaddyComponent(platform, paths, cfg)
+    comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
     binary = Path(cfg.caddy_bin)
     binary.parent.mkdir(parents=True, exist_ok=True)
     binary.write_text("#!/bin/sh\n")
@@ -75,7 +86,7 @@ def test_plan_includes_download_when_binary_missing(tmp_path):
 def test_plan_is_empty_when_everything_ready(tmp_path):
     comp, paths, cfg = _component(tmp_path)
     platform = FakePlatform()
-    comp = CaddyComponent(platform, paths, cfg)
+    comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
     binary = Path(cfg.caddy_bin)
     binary.parent.mkdir(parents=True, exist_ok=True)
     binary.write_text("#!/bin/sh\n")
@@ -87,7 +98,7 @@ def test_plan_is_empty_when_everything_ready(tmp_path):
 def test_apply_writes_unit_and_enables_service(tmp_path):
     comp, paths, cfg = _component(tmp_path)
     platform = FakePlatform()
-    comp = CaddyComponent(platform, paths, cfg)
+    comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
     comp.apply(comp.plan())
     assert "caddy" in platform.services
     unit = platform.services["caddy"]
@@ -116,8 +127,68 @@ def test_sites_caddy_is_not_overwritten(tmp_path):
 def test_verify_fails_when_service_inactive(tmp_path):
     comp, paths, cfg = _component(tmp_path)
     platform = FakePlatform()
-    comp = CaddyComponent(platform, paths, cfg)
+    comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
     comp.apply(comp.plan())
+    # 服务装上了却没起来（setcap 被拒、端口被占等）—— active 里没有 caddy
+    platform.active.discard("caddy")
     status = comp.verify()
     assert status.ok is False
     assert "systemctl" in status.hint
+
+
+# -- 下载归属组件 apply ----------------------------------------------------
+
+
+def test_default_downloader_is_the_real_download_caddy(tmp_path):
+    """默认走真实下载器；注入只用于测试离线运行。"""
+    paths = _paths(tmp_path)
+    paths.ensure_files()
+    cfg = Config(storage=str(paths.data_dir), caddy_bin=str(tmp_path / "bin" / "caddy"))
+    comp = CaddyComponent(FakePlatform(), paths, cfg)
+    assert comp._downloader is download_caddy
+
+
+def test_apply_downloads_binary_when_missing(tmp_path):
+    comp, paths, cfg = _component(tmp_path)
+    calls: list[Path] = []
+
+    def recorder(dest: Path) -> None:
+        calls.append(dest)
+        _fake_downloader(dest)
+
+    comp = CaddyComponent(FakePlatform(), paths, cfg, recorder)
+    comp.apply(comp.plan())
+    assert calls == [Path(cfg.caddy_bin)]
+    assert Path(cfg.caddy_bin).exists()
+
+
+def test_apply_propagates_download_failure_and_skips_service_install(tmp_path):
+    comp, paths, cfg = _component(tmp_path)
+
+    def boom(dest: Path) -> None:
+        raise RuntimeError("caddy 包校验失败")
+
+    platform = FakePlatform()
+    comp = CaddyComponent(platform, paths, cfg, boom)
+    with pytest.raises(RuntimeError):
+        comp.apply(comp.plan())
+    assert "caddy" not in platform.services
+
+
+# -- setcap 自愈 ------------------------------------------------------------
+
+
+def test_plan_replans_setcap_when_binary_present_but_service_inactive(tmp_path):
+    """二进制已就位但服务没跑：上次 setcap 可能失败过，需要重新授权。"""
+    comp, paths, cfg = _component(tmp_path)
+    platform = FakePlatform()
+    comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
+    binary = Path(cfg.caddy_bin)
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    binary.write_text("#!/bin/sh\n")
+    binary.chmod(0o755)
+    actions = comp.plan()
+    descriptions = [a.description for a in actions]
+    assert any("setcap" in d for d in descriptions)
+    assert any(a.privileged for a in actions)
+    assert any(a.command[:1] == ["install-service"] for a in actions)

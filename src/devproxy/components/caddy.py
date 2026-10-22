@@ -13,6 +13,7 @@ import tarfile
 import tempfile
 import urllib.request
 from pathlib import Path
+from typing import Callable
 
 from devproxy.config import Config
 from devproxy.paths import Paths
@@ -115,10 +116,18 @@ def render_unit(
 class CaddyComponent:
     name = "caddy"
 
-    def __init__(self, platform: Platform, paths: Paths, config: Config):
+    def __init__(
+        self,
+        platform: Platform,
+        paths: Paths,
+        config: Config,
+        downloader: Callable[[Path], None] | None = None,
+    ):
         self.platform = platform
         self.paths = paths
         self.config = config
+        # 下载属网络操作，默认走真实下载器；测试可注入假实现，保持离线。
+        self._downloader = downloader or download_caddy
 
     # -- check ---------------------------------------------------------
     def check(self) -> Status:
@@ -156,6 +165,7 @@ class CaddyComponent:
         binary = self.config.caddy_bin_path
         status = self.check()
         need_binary = "二进制不存在" in status.detail or "版本不符" in status.detail
+        need_service = not self.platform.service_active("caddy")
         if need_binary:
             actions.append(
                 Action(
@@ -164,6 +174,9 @@ class CaddyComponent:
                     command=["download-caddy", str(binary)],
                 )
             )
+        if need_binary or need_service:
+            # 没完全就绪就重新授权：上一轮下载成功但 setcap 失败（用户拒了
+            # sudo）时，二进制已在位而服务没起 —— 这一轮必须补 setcap。
             actions.append(
                 Action(
                     description="授权 caddy 绑定 80/443（setcap）",
@@ -172,7 +185,7 @@ class CaddyComponent:
                     privileged=True,
                 )
             )
-        if not self.platform.service_active("caddy"):
+        if need_service:
             actions.append(
                 Action(
                     description="生成主 Caddyfile",
@@ -199,10 +212,10 @@ class CaddyComponent:
                 action.path.write_text(action.content, encoding="utf-8")
                 continue
             if action.command[:1] == ["download-caddy"]:
-                # 下载是网络操作，由 CLI 层（devproxy setup 调
-                # download_caddy()）在 apply 之前完成；apply 只准备好目录，
-                # 自身不做网络访问。
+                # 下载属组件职责：固定版本 + sha256 校验，失败即抛，
+                # 不留半个文件，后续动作（setcap 等）不会在坏二进制上执行。
                 binary.parent.mkdir(parents=True, exist_ok=True)
+                self._downloader(binary)
                 continue
             if action.command[:1] == ["setcap"]:
                 self.platform.privilege().run(action.command)
