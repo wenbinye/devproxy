@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import time
+from dataclasses import replace
 
 import typer
 from rich.console import Console
@@ -11,7 +12,12 @@ from rich.markup import escape
 from rich.table import Table
 from typer.core import TyperGroup
 
+from devproxy.components.caddy import CaddyComponent
+from devproxy.components.certs import CertComponent
+from devproxy.components.dns import DnsComponent
+from devproxy.components.dnsmasq import DnsmasqComponent
 from devproxy.config import Config, ConfigError, load_config
+from devproxy.doctor import build_report, report_is_healthy
 from devproxy.paths import Paths, default_paths
 from devproxy.proxy.caddy import CaddyAdmin, CaddyConfig
 from devproxy.proxy.names import InvalidNameError, domain_for, validate_name
@@ -24,6 +30,7 @@ from devproxy.proxy.runner import (
     reachable,
 )
 from devproxy.proxy.store import RouteStore, RouteStoreError
+from devproxy.setup import apply_plan, build_plan
 
 console = Console()
 err_console = Console(stderr=True)
@@ -31,6 +38,7 @@ err_console = Console(stderr=True)
 EXIT_OK = 0
 EXIT_FAIL = 1
 EXIT_PRECONDITION = 3
+EXIT_SUDO = 4
 
 
 def fail(msg: str, code: int = EXIT_FAIL) -> None:
@@ -262,6 +270,129 @@ def selftest() -> None:
         err_console.print(f"devproxy: selftest 失败 {len(result.failed)} 项")
         raise typer.Exit(EXIT_FAIL)
     console.print(f"selftest 全部通过 ✅（{len(result.checks)} 项）")
+
+
+def _platform():
+    from devproxy.platform.linux import LinuxPlatform
+
+    return LinuxPlatform()
+
+
+def _components(paths, config, dns_backend="auto"):
+    platform = _platform()
+    return [
+        CaddyComponent(platform, paths, config),
+        DnsmasqComponent(platform, paths, config),
+        DnsComponent(platform, paths, config, backend=dns_backend),
+        CertComponent(platform, paths, config),
+    ]
+
+
+@app.command()
+def setup(
+    dns_backend: str = typer.Option(None, "--dns-backend", help="auto|resolved|system"),
+    domain_suffix: str = typer.Option(None, "--domain-suffix"),
+    no_trust: bool = typer.Option(False, "--no-trust", help="跳过证书信任"),
+    yes: bool = typer.Option(False, "--yes", help="非交互模式，不询问"),
+) -> None:
+    """部署本地开发环境（Caddy + dnsmasq + DNS 路由 + 证书信任 + 自启）。"""
+    paths, config, _, _ = build_context()
+    if domain_suffix:
+        config = replace(config, domain_suffix=domain_suffix)
+    components = _components(paths, config, dns_backend or config.dns_backend)
+    if no_trust:
+        components = [c for c in components if c.name != "cert"]
+
+    plan = build_plan(components)
+
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("组件")
+    table.add_column("现状")
+    table.add_column("将要执行")
+    for r in plan.reports:
+        table.add_row(
+            r.name,
+            "✔ 就绪" if r.status.ok else "✗ " + escape(r.status.detail),
+            "\n".join(escape(a.description) for a in r.actions) or "—",
+        )
+    console.print(table)
+
+    if plan.is_noop:
+        console.print("所有组件已就绪，无需变更。")
+        raise typer.Exit(EXIT_OK)
+
+    if plan.needs_sudo:
+        console.print(
+            f"[yellow]以下步骤需要 sudo（共 {len(plan.needs_sudo)} 项）：[/yellow]"
+        )
+        for a in plan.needs_sudo:
+            console.print(f"  · {escape(a.description)}")
+        if not yes and not sys.stdin.isatty():
+            err_console.print("非交互环境且未指定 --yes，拒绝执行需要提权的步骤。")
+            raise typer.Exit(EXIT_SUDO)
+
+    results = apply_plan(plan)
+    ok = True
+    for name, status in results:
+        mark = "✔" if status.ok else "✗"
+        console.print(f"{mark} {name}: {escape(status.detail)}")
+        if not status.ok:
+            ok = False
+            if status.hint:
+                console.print(f"    修复: {escape(status.hint)}")
+    if not ok:
+        raise typer.Exit(EXIT_FAIL)
+    console.print("完成。试试: devproxy up demo -- python3 -m http.server")
+
+
+@app.command()
+def doctor() -> None:
+    """体检：检查所有前置条件。"""
+    paths, config, _, _ = build_context()
+    reports = build_report(_components(paths, config))
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("组件")
+    table.add_column("状态")
+    table.add_column("详情")
+    table.add_column("修复")
+    for r in reports:
+        table.add_row(
+            r.name,
+            "✔ 就绪" if r.status.ok else "✗ 缺失",
+            escape(r.status.detail),
+            escape(r.status.hint),
+        )
+    console.print(table)
+    if not report_is_healthy(reports):
+        raise typer.Exit(EXIT_PRECONDITION)
+
+
+@app.command()
+def trust() -> None:
+    """把 CA 根证书装进系统信任库与 NSS 库。"""
+    paths, config, _, _ = build_context()
+    comp = CertComponent(_platform(), paths, config)
+    actions = comp.plan()
+    if not actions:
+        console.print("CA 根证书已信任，无需变更。")
+        raise typer.Exit(EXIT_OK)
+    try:
+        comp.apply(actions)
+    except Exception as e:  # noqa: BLE001 —— 面向用户的友好报错，不是 traceback
+        fail(str(e))
+    console.print("已安装 CA 根证书（Chrome 需完全退出重启后生效）")
+
+
+@app.command()
+def logs(
+    service: str = typer.Argument("caddy", help="caddy|dnsmasq"),
+) -> None:
+    """跟踪服务日志。"""
+    paths, config, _, _ = build_context()
+    if service not in ("caddy", "dnsmasq"):
+        err_console.print(f"devproxy: 未知服务 {service}（可选 caddy / dnsmasq）")
+        raise typer.Exit(EXIT_FAIL)
+    _platform().tail_service_log(service)
 
 
 def main() -> None:
