@@ -77,3 +77,67 @@ def test_cli_doctor_ok_when_healthy(tmp_path, monkeypatch):
     result = CliRunner().invoke(app, ["doctor"])
     assert result.exit_code == 0, result.stdout
     assert "a" in result.stdout
+
+
+def _patch_cli_with_config(monkeypatch, tmp_path, cfg):
+    from devproxy.paths import Paths
+
+    paths = Paths(tmp_path / "config", tmp_path / "state", tmp_path / "data")
+    paths.ensure_files()
+    monkeypatch.setattr(
+        "devproxy.cli.build_context", lambda *a, **k: (paths, cfg, None, None)
+    )
+    return paths
+
+
+def test_cli_doctor_uses_config_dns_backend(tmp_path, monkeypatch):
+    """doctor 必须和 setup 用同一个 DNS 后端，否则 setup 成功后 doctor 仍报缺失。"""
+    from typer.testing import CliRunner
+
+    from devproxy.cli import app
+    from devproxy.config import Config
+
+    cfg = Config(storage=str(tmp_path / "data"), dns_backend="system")
+    _patch_cli_with_config(monkeypatch, tmp_path, cfg)
+    seen = {}
+
+    def fake_components(paths, config, dns_backend=None):
+        seen["backend"] = dns_backend
+        return [FakeCliComponent("dns", True)]
+
+    monkeypatch.setattr("devproxy.cli._components", fake_components)
+    result = CliRunner().invoke(app, ["doctor"])
+    assert result.exit_code == 0, result.stdout
+    assert seen["backend"] == "system"
+
+
+def test_cli_doctor_accepts_dns_backend_override(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    from devproxy.cli import app
+    from devproxy.config import Config
+
+    cfg = Config(storage=str(tmp_path / "data"), dns_backend="system")
+    _patch_cli_with_config(monkeypatch, tmp_path, cfg)
+    seen = {}
+
+    def fake_components(paths, config, dns_backend=None):
+        seen["backend"] = dns_backend
+        return [FakeCliComponent("dns", True)]
+
+    monkeypatch.setattr("devproxy.cli._components", fake_components)
+    result = CliRunner().invoke(app, ["doctor", "--dns-backend", "resolved"])
+    assert result.exit_code == 0, result.stdout
+    assert seen["backend"] == "resolved"
+
+
+def test_cli_doctor_rejects_invalid_dns_backend(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    from devproxy.cli import app
+    from devproxy.config import Config
+
+    cfg = Config(storage=str(tmp_path / "data"))
+    _patch_cli_with_config(monkeypatch, tmp_path, cfg)
+    result = CliRunner().invoke(app, ["doctor", "--dns-backend", "foo"])
+    assert result.exit_code == 2

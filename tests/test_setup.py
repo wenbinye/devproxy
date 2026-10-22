@@ -78,6 +78,36 @@ def test_build_plan_keeps_component_reference():
     assert plan.reports[0].component is c
 
 
+def test_build_plan_isolates_check_exception():
+    """某个组件的 check() 抛异常，不能带崩整个 setup。"""
+
+    class BoomCheck(FakeComponent):
+        def check(self):
+            raise RuntimeError("检查炸了")
+
+    bad = BoomCheck("bad", Status(ok=True))
+    good = FakeComponent("good", Status(ok=True))
+    plan = build_plan([bad, good])
+    assert [r.name for r in plan.reports] == ["bad", "good"]
+    assert plan.reports[0].status.ok is False
+    assert "检查炸了" in plan.reports[0].status.detail
+    assert plan.reports[1].status.ok is True
+
+
+def test_build_plan_isolates_plan_exception():
+    class BoomPlan(FakeComponent):
+        def plan(self):
+            raise RuntimeError("算计划炸了")
+
+    bad = BoomPlan("bad", Status(ok=True))
+    good = FakeComponent("good", Status(ok=True))
+    plan = build_plan([bad, good])
+    assert plan.reports[0].status.ok is False
+    assert "算计划炸了" in plan.reports[0].status.detail
+    assert plan.reports[0].actions == []
+    assert plan.reports[1].status.ok is True
+
+
 # -- CLI：setup 编排 --------------------------------------------------------
 
 
@@ -223,3 +253,43 @@ def test_cli_setup_domain_suffix_override(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.stdout
     assert seen["suffix"] == "local"
     assert seen["backend"] == "resolved"
+
+
+def test_cli_setup_rejects_invalid_domain_suffix(tmp_path, monkeypatch):
+    """--domain-suffix 会流进 Caddyfile 与 /etc 下的配置 —— 必须过配置校验。"""
+    from typer.testing import CliRunner
+
+    from devproxy.cli import app
+
+    comps = [FakeCliComponent("caddy")]
+    _patch_cli(monkeypatch, tmp_path, comps)
+    result = CliRunner().invoke(app, ["setup", "--domain-suffix", "bad\nsuffix"])
+    assert result.exit_code == 2
+    assert comps[0].applied is None
+
+
+def test_cli_setup_rejects_invalid_dns_backend(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    from devproxy.cli import app
+
+    comps = [FakeCliComponent("caddy")]
+    _patch_cli(monkeypatch, tmp_path, comps)
+    result = CliRunner().invoke(app, ["setup", "--dns-backend", "foo"])
+    assert result.exit_code == 2
+    assert comps[0].applied is None
+
+
+def test_cli_setup_noop_with_unhealthy_component_exits_precondition(
+    tmp_path, monkeypatch
+):
+    """没有可执行的动作、但组件本身不健康 —— 不能谎报「已就绪」。"""
+    from typer.testing import CliRunner
+
+    from devproxy.cli import app
+
+    comps = [FakeCliComponent("caddy", Status(ok=False, detail="坏了"))]
+    _patch_cli(monkeypatch, tmp_path, comps)
+    result = CliRunner().invoke(app, ["setup"])
+    assert result.exit_code == 3
+    assert "坏了" in result.stdout or "坏了" in result.stderr

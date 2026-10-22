@@ -40,6 +40,7 @@ class FakePlatform:
         self.services: dict[str, str] = {}
         self.active: set[str] = set()
         self.trusted: set[Path] = set()
+        self.nss: set[Path] = set()
         self.dns_backends: set[str] = set()
         self.commands: list[list[str]] = []
         self.written: dict[Path, str] = {}
@@ -77,6 +78,10 @@ class FakePlatform:
 
     def ca_trusted(self, ca: Path) -> bool:
         return ca in self.trusted
+
+    def nss_trusted(self, ca: Path) -> bool:
+        """NSS 库是另一份信任库，单独记 —— 与系统信任库互不相干。"""
+        return ca in self.nss
 
     def dns_route_installed(self, backend: str) -> bool:
         return backend in self.dns_backends

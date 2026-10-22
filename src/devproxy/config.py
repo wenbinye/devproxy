@@ -70,7 +70,7 @@ def load_config(path: Path | None = None) -> Config:
         if env_storage:
             data["storage"] = os.path.expanduser(env_storage)
     cfg = Config(**{k: v for k, v in data.items() if k in known})
-    _validate_config(cfg)
+    validate_config(cfg)
     return cfg
 
 
@@ -90,8 +90,15 @@ def _valid_admin_addr(addr: object) -> bool:
     return bool(host) and port.isdigit() and PORT_MIN <= int(port) <= PORT_MAX
 
 
-def _validate_config(cfg: Config) -> None:
-    """值级校验。默认值必然合法，因此只需对整个生效配置跑一遍。"""
+def validate_config(cfg: Config) -> None:
+    """配置校验的公开入口。
+
+    load_config 与 CLI 的参数覆盖（--domain-suffix 等）都要过这一关：
+    domain_suffix 会直通 Caddyfile 的站点地址，也会被写进 /etc 下的
+    DNS 配置 —— 元字符（换行、花括号）能伪造出额外的配置块。
+
+    值级校验：默认值必然合法，因此只需对整个生效配置跑一遍。
+    """
     if (
         not isinstance(cfg.domain_suffix, str)
         or len(cfg.domain_suffix) > MAX_LABEL_LEN

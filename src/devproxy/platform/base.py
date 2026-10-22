@@ -6,6 +6,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
+# 证书信任的全局约定：组件与平台实现共用同一份，避免两边对不上。
+CA_NICKNAME = "devproxy Local CA"
+SYSTEM_CA_DEST = Path("/usr/local/share/ca-certificates/devproxy-local.crt")
+SYSTEM_TRUST_DIR = Path("/etc/ssl/certs")
+NSS_DIR = Path("~/.pki/nssdb")
+
 
 @dataclass
 class Status:
@@ -65,5 +71,8 @@ class Platform(Protocol):
     def tail_service_log(self, name: str) -> None: ...
 
     def ca_trusted(self, ca: Path) -> bool: ...
+
+    def nss_trusted(self, ca: Path) -> bool:
+        """NSS 库（Chrome/Chromium 的信任库）里是否已有该 CA。"""
 
     def dns_route_installed(self, backend: str) -> bool: ...

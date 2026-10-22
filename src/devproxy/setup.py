@@ -33,14 +33,40 @@ class SetupPlan:
 
 
 def build_plan(components: list[Component]) -> SetupPlan:
-    """对每个组件取 check() 与 plan()。plan 为空表示该组件无需变更。"""
+    """对每个组件取 check() 与 plan()。plan 为空表示该组件无需变更。
+
+    单个组件的 check()/plan() 抛异常不应带崩整个 setup —— 记为该组件失败，
+    其余组件照常收集。
+    """
     reports = []
     for c in components:
+        name = getattr(c, "name", "?")
+        try:
+            status = c.check()
+        except Exception as e:  # noqa: BLE001 —— 单组件失败不阻断其他组件
+            reports.append(
+                ComponentReport(
+                    name=name,
+                    status=Status(
+                        ok=False, detail=f"检查失败: {e}", hint="查看上面的报错"
+                    ),
+                    actions=[],
+                    component=c,
+                )
+            )
+            continue
+        try:
+            actions = c.plan()
+        except Exception as e:  # noqa: BLE001 —— 同上
+            actions = []
+            status = Status(
+                ok=False, detail=f"计算变更失败: {e}", hint="查看上面的报错"
+            )
         reports.append(
             ComponentReport(
-                name=c.name,
-                status=c.check(),
-                actions=c.plan(),
+                name=name,
+                status=status,
+                actions=actions,
                 component=c,
             )
         )

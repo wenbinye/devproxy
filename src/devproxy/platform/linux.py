@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 
-from devproxy.platform.base import ElevatedSession
+from devproxy.platform.base import (
+    CA_NICKNAME,
+    SYSTEM_CA_DEST,
+    SYSTEM_TRUST_DIR,
+    ElevatedSession,
+)
 
 
 def _run(argv: list[str]) -> tuple[int, str]:
@@ -122,13 +126,34 @@ class LinuxPlatform:
         subprocess.run(["journalctl", "--user", "-u", name, "-f"])
 
     def ca_trusted(self, ca: Path) -> bool:
-        dest = Path("/usr/local/share/ca-certificates/devproxy-local.crt")
+        """CA 是否**真的在系统信任库里**。
+
+        只比对暂存目录（/usr/local/share/ca-certificates）里的文件是不够的：
+        那个文件在 update-ca-certificates 没跑成功时也在那儿，系统却不认它。
+        所以优先用 openssl 对着真实信任库验证；没有 openssl 才退回比对暂存文件。
+        """
+        dest = SYSTEM_CA_DEST
         if not dest.exists():
             return False
-        try:
-            return dest.read_text(encoding="utf-8") == ca.read_text(encoding="utf-8")
-        except OSError:
+        code, msg = _run(
+            ["openssl", "verify", "-CApath", str(SYSTEM_TRUST_DIR), str(ca)]
+        )
+        if code == 127 and "命令不存在" in msg:
+            try:
+                return dest.read_text(encoding="utf-8") == ca.read_text(
+                    encoding="utf-8"
+                )
+            except (OSError, UnicodeDecodeError):
+                return False
+        return code == 0
+
+    def nss_trusted(self, ca: Path) -> bool:
+        """NSS 库里是否已有该 CA（按 nickname 判定）。只读、非特权。"""
+        nss = self.user_home / ".pki" / "nssdb"
+        if not (nss / "cert9.db").exists():
             return False
+        code, _ = _run(["certutil", "-L", "-d", f"sql:{nss}", "-n", CA_NICKNAME])
+        return code == 0
 
     def dns_route_installed(self, backend: str) -> bool:
         if backend == "resolved":

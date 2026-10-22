@@ -16,7 +16,13 @@ from devproxy.components.caddy import CaddyComponent
 from devproxy.components.certs import CertComponent
 from devproxy.components.dns import DnsComponent
 from devproxy.components.dnsmasq import DnsmasqComponent
-from devproxy.config import Config, ConfigError, load_config
+from devproxy.config import (
+    DNS_BACKENDS,
+    Config,
+    ConfigError,
+    load_config,
+    validate_config,
+)
 from devproxy.doctor import build_report, report_is_healthy
 from devproxy.paths import Paths, default_paths
 from devproxy.proxy.caddy import CaddyAdmin, CaddyConfig
@@ -37,6 +43,7 @@ err_console = Console(stderr=True)
 
 EXIT_OK = 0
 EXIT_FAIL = 1
+EXIT_USAGE = 2
 EXIT_PRECONDITION = 3
 EXIT_SUDO = 4
 
@@ -278,14 +285,31 @@ def _platform():
     return LinuxPlatform()
 
 
-def _components(paths, config, dns_backend="auto"):
+def _components(paths, config, dns_backend=None):
+    """按配置（或显式覆盖）组装组件。
+
+    dns_backend 缺省取 config.dns_backend —— setup 与 doctor 必须用同一个
+    后端，否则 setup 装完、doctor 仍报"路由缺失"。
+    """
     platform = _platform()
+    backend = dns_backend or config.dns_backend
     return [
         CaddyComponent(platform, paths, config),
         DnsmasqComponent(platform, paths, config),
-        DnsComponent(platform, paths, config, backend=dns_backend),
+        DnsComponent(platform, paths, config, backend=backend),
         CertComponent(platform, paths, config),
     ]
+
+
+def _dns_backend(value: str | None, config: Config) -> str:
+    """解析并校验 DNS 后端。非法值直接拒绝，别悄悄当成 auto。"""
+    backend = value or config.dns_backend
+    if backend not in DNS_BACKENDS:
+        fail(
+            f"dns_backend 必须是 {' / '.join(DNS_BACKENDS)}，当前值 {backend!r}",
+            EXIT_USAGE,
+        )
+    return backend
 
 
 @app.command()
@@ -297,9 +321,16 @@ def setup(
 ) -> None:
     """部署本地开发环境（Caddy + dnsmasq + DNS 路由 + 证书信任 + 自启）。"""
     paths, config, _, _ = build_context()
+    backend = _dns_backend(dns_backend, config)
     if domain_suffix:
         config = replace(config, domain_suffix=domain_suffix)
-    components = _components(paths, config, dns_backend or config.dns_backend)
+        try:
+            # --domain-suffix 会直通 Caddyfile 与 /etc 下的 DNS 配置，
+            # 与 config.toml 同等对待：必须过校验，不能绕过
+            validate_config(config)
+        except ConfigError as e:
+            fail(str(e), EXIT_USAGE)
+    components = _components(paths, config, backend)
     if no_trust:
         components = [c for c in components if c.name != "cert"]
 
@@ -318,8 +349,14 @@ def setup(
     console.print(table)
 
     if plan.is_noop:
-        console.print("所有组件已就绪，无需变更。")
-        raise typer.Exit(EXIT_OK)
+        unhealthy = [r for r in plan.reports if not r.status.ok]
+        if not unhealthy:
+            console.print("所有组件已就绪，无需变更。")
+            raise typer.Exit(EXIT_OK)
+        # 没有可执行的动作、但组件本身不健康 —— 不能谎报"已就绪"
+        for r in unhealthy:
+            err_console.print(f"devproxy: {r.name}: {escape(r.status.detail)}")
+        raise typer.Exit(EXIT_PRECONDITION)
 
     if plan.needs_sudo:
         console.print(
@@ -346,10 +383,13 @@ def setup(
 
 
 @app.command()
-def doctor() -> None:
+def doctor(
+    dns_backend: str = typer.Option(None, "--dns-backend", help="auto|resolved|system"),
+) -> None:
     """体检：检查所有前置条件。"""
     paths, config, _, _ = build_context()
-    reports = build_report(_components(paths, config))
+    backend = _dns_backend(dns_backend, config)
+    reports = build_report(_components(paths, config, backend))
     table = Table(show_header=True, header_style="bold")
     table.add_column("组件")
     table.add_column("状态")
@@ -368,16 +408,27 @@ def doctor() -> None:
 
 
 @app.command()
-def trust() -> None:
+def trust(
+    yes: bool = typer.Option(False, "--yes", help="非交互模式，不询问"),
+) -> None:
     """把 CA 根证书装进系统信任库与 NSS 库。"""
     paths, config, _, _ = build_context()
     comp = CertComponent(_platform(), paths, config)
     actions = comp.plan()
     if not actions:
-        console.print("CA 根证书已信任，无需变更。")
+        if not comp.ca_path.exists():
+            console.print("尚无 CA 根证书（注册首条路由后由 Caddy 生成），无需变更。")
+        else:
+            console.print("CA 根证书已信任，无需变更。")
         raise typer.Exit(EXIT_OK)
+    if any(a.privileged for a in actions) and not yes and not sys.stdin.isatty():
+        err_console.print("非交互环境且未指定 --yes，拒绝执行需要提权的步骤。")
+        raise typer.Exit(EXIT_SUDO)
     try:
         comp.apply(actions)
+    except PermissionError as e:
+        err_console.print(f"devproxy: {escape(str(e))}")
+        raise typer.Exit(EXIT_SUDO)
     except Exception as e:  # noqa: BLE001 —— 面向用户的友好报错，不是 traceback
         fail(str(e))
     console.print("已安装 CA 根证书（Chrome 需完全退出重启后生效）")
@@ -388,11 +439,15 @@ def logs(
     service: str = typer.Argument("caddy", help="caddy|dnsmasq"),
 ) -> None:
     """跟踪服务日志。"""
-    paths, config, _, _ = build_context()
     if service not in ("caddy", "dnsmasq"):
         err_console.print(f"devproxy: 未知服务 {service}（可选 caddy / dnsmasq）")
         raise typer.Exit(EXIT_FAIL)
-    _platform().tail_service_log(service)
+    try:
+        # 只读命令：不碰 build_context（它会在用户家目录里建文件）
+        _platform().tail_service_log(service)
+    except PermissionError as e:
+        err_console.print(f"devproxy: {escape(str(e))}")
+        raise typer.Exit(EXIT_SUDO)
 
 
 def main() -> None:
