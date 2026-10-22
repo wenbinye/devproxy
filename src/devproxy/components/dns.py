@@ -13,7 +13,13 @@ from pathlib import Path
 
 from devproxy.config import Config
 from devproxy.paths import Paths
-from devproxy.platform.base import Action, Platform, Status
+from devproxy.platform.base import (
+    RESOLVER_DIR,
+    Action,
+    Platform,
+    Status,
+    render_resolver_file,
+)
 
 RESOLVED_CONF_DIR = Path("/etc/systemd/resolved.conf.d")
 RESOLVED_CONF = RESOLVED_CONF_DIR / "devproxy.conf"
@@ -61,7 +67,11 @@ class DnsComponent:
         判据必须是 resolved **真的在运行**，而不是目录存在 ——
         /etc/systemd/resolved.conf.d 可能只是被手工创建过；反过来干净机器
         上目录不存在也不代表 resolved 没装。目录存在与否都不是可靠信号。
+
+        macOS 根本没有 systemd-resolved —— 恒为 False，后端恒为 resolver。
         """
+        if self.platform.name == "mac":
+            return False
         if self.backend == "system":
             return False
         if self.backend == "resolved":
@@ -70,6 +80,12 @@ class DnsComponent:
 
     @property
     def target_path(self) -> Path:
+        """本次要写/要查的 DNS 路由文件。
+
+        macOS 是每域解析器文件（/etc/resolver/<后缀>）—— 不动 /etc/resolv.conf。
+        """
+        if self.platform.name == "mac":
+            return RESOLVER_DIR / self.config.domain_suffix.lstrip(".")
         return RESOLVED_CONF if self.resolved_backend else SYSTEM_DNSMASQ_CONF
 
     def _backend_key(self) -> str:
@@ -97,6 +113,22 @@ class DnsComponent:
     def plan(self) -> list[Action]:
         """路由已是预期内容时返回空列表 —— 重复 setup 不该再要 sudo、
         更不该再重启系统 resolver（那会造成全机 DNS 抖动）。"""
+        if self.platform.name == "mac":
+            # macOS 的每域解析器文件：mDNSResponder 会自己重载，
+            # 不需要（也不能）重启任何解析服务。
+            content = render_resolver_file(self.platform.dns_port)
+            desc = "写入 %s（macOS 每域解析器）" % self.target_path
+            if self._route_in_place(content):
+                return []
+            return [
+                Action(
+                    description=desc,
+                    kind="write",
+                    path=self.target_path,
+                    content=content,
+                    privileged=True,
+                )
+            ]
         if self.resolved_backend:
             content = render_resolved_conf(
                 port=self.platform.dns_port, domains=[self.config.domain_suffix]
@@ -160,11 +192,16 @@ class DnsComponent:
     def verify(self) -> Status:
         """路由文件在位还不够 —— 必须真的能经系统解析器解析到本机。"""
         key = self._backend_key()
+        mac = self.platform.name == "mac"
         if not self.platform.dns_route_installed(key, self.config.domain_suffix):
             return Status(
                 ok=False,
                 detail="DNS 路由未生效",
-                hint="systemctl restart systemd-resolved",
+                hint=(
+                    f"确认 {self.target_path} 存在且内容正确"
+                    if mac
+                    else "systemctl restart systemd-resolved"
+                ),
             )
         name = f"foo.{self.config.domain_suffix}"
         answer = self.platform.dns_query(name)
@@ -175,7 +212,11 @@ class DnsComponent:
                     f"系统解析器未把 {name} 指到本机（"
                     f"{answer or '无响应'}）；路由文件已写但未生效"
                 ),
-                hint="systemctl restart systemd-resolved；resolvectl query " + name,
+                hint=(
+                    f"dscacheutil -q host -a name {name}"
+                    if mac
+                    else "systemctl restart systemd-resolved；resolvectl query " + name
+                ),
             )
         return Status(ok=True, detail=f"DNS 路由已生效（{name} → {answer}）")
 

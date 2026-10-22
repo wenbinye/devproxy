@@ -163,15 +163,21 @@ class CaddyComponent:
 
         只看 --config 不够：改了配置里的 caddy_bin 之后，已装单元仍指着旧
         二进制跑 —— "单元过期"永远判不出来，服务会一直用旧二进制。
+
+        判据按**单个 token** 匹配，不按整条命令行：systemd 单元里是
+        "ExecStart=/path/caddy run --config /path/Caddyfile"，launchd 的 plist
+        里则是逐个元素的数组，两边共有的只有 token 本身。
         """
         unit = self.platform.service_unit_path("caddy")
         try:
             text = unit.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             return False
-        if f"run --config {self.paths.caddyfile}" not in text:
+        if str(self.config.caddy_bin_path) not in text:
             return False
-        return str(self.config.caddy_bin_path) in text
+        if str(self.paths.caddyfile) not in text:
+            return False
+        return "run" in text
 
     def _need_binary(self) -> bool:
         """二进制判据：不存在，或版本与固定版本不符（含"版本读不出来"）。
@@ -183,6 +189,12 @@ class CaddyComponent:
         if not binary.exists():
             return True
         return self.platform.binary_version(binary) != f"v{CADDY_VERSION}"
+
+    def _service_hint(self) -> str:
+        """服务相关的修复提示（按平台给不同的命令）。"""
+        if self.platform.name == "mac":
+            return "launchctl print system/com.devproxy.caddy"
+        return "systemctl --user status caddy"
 
     # -- check ---------------------------------------------------------
     def check(self) -> Status:
@@ -219,7 +231,11 @@ class CaddyComponent:
             return Status(
                 ok=False,
                 detail="caddy 服务未运行",
-                hint="systemctl --user start caddy",
+                hint=(
+                    "launchctl kickstart -k system/com.devproxy.caddy"
+                    if self.platform.name == "mac"
+                    else "systemctl --user start caddy"
+                ),
             )
         return Status(ok=True, detail=f"caddy {CADDY_VERSION} 已就绪")
 
@@ -251,14 +267,16 @@ class CaddyComponent:
         if need_binary or need_service:
             # 没完全就绪就重新授权：上一轮下载成功但 setcap 失败（用户拒了
             # sudo）时，二进制已在位而服务没起 —— 这一轮必须补 setcap。
-            actions.append(
-                Action(
-                    description="授权 caddy 绑定 80/443（setcap）",
-                    kind="run",
-                    command=["setcap", "cap_net_bind_service=+ep", str(binary)],
-                    privileged=True,
+            # macOS 没有 setcap：绑 80/443 靠以 root 运行的 LaunchDaemon。
+            if self.platform.name != "mac":
+                actions.append(
+                    Action(
+                        description="授权 caddy 绑定 80/443（setcap）",
+                        kind="run",
+                        command=["setcap", "cap_net_bind_service=+ep", str(binary)],
+                        privileged=True,
+                    )
                 )
-            )
         if need_caddyfile:
             actions.append(
                 Action(
@@ -271,7 +289,11 @@ class CaddyComponent:
         if need_service or need_unit:
             actions.append(
                 Action(
-                    description="安装并启动 caddy.service（systemd user）",
+                    description=(
+                        "安装并启动 caddy LaunchDaemon（macOS）"
+                        if self.platform.name == "mac"
+                        else "安装并启动 caddy.service（systemd user）"
+                    ),
                     kind="run",
                     command=["install-service", "caddy"],
                 )
@@ -407,13 +429,13 @@ class CaddyComponent:
             return Status(
                 ok=False,
                 detail=f"caddy 二进制缺失: {self.config.caddy_bin_path}",
-                hint="devproxy setup 会下载；systemctl --user status caddy 查看服务",
+                hint=f"devproxy setup 会下载；{self._service_hint()} 查看服务",
             )
         if not self.platform.service_active("caddy"):
             return Status(
                 ok=False,
                 detail="caddy 服务未处于 active",
-                hint="systemctl --user status caddy",
+                hint=self._service_hint(),
             )
         if not self._has_configured_site():
             return Status(
@@ -430,7 +452,7 @@ class CaddyComponent:
             return Status(
                 ok=False,
                 detail=f"{url} TLS 握手失败",
-                hint="systemctl --user status caddy；检查 Caddyfile 与 443 端口占用",
+                hint=f"{self._service_hint()}；检查 Caddyfile 与 443 端口占用",
             )
         return Status(ok=True, detail=f"caddy 服务运行中，{url} 可访问")
 

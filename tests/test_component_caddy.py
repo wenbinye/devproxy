@@ -521,3 +521,75 @@ def test_plan_reinstalls_unit_when_binary_path_changed(tmp_path):
     assert comp.check().ok is False
     actions = comp.plan()
     assert any(a.command[:1] == ["install-service"] for a in actions)
+
+
+# -- macOS：没有 setcap，单元是 launchd plist ------------------------------
+
+
+class _MacPlatform(FakePlatform):
+    """macOS 平台：单元是 launchd plist（ProgramArguments 是数组）。"""
+
+    name = "mac"
+    dns_port = 5300
+
+    def linger_enabled(self) -> bool:
+        """macOS 没有 systemd-linger —— 恒为"无需启用"。"""
+        return True
+
+    def install_service(self, name, *, exec_start, exec_reload=None, exec_stop=None,
+                        env, description=""):
+        import plistlib
+
+        data = {
+            "Label": f"com.devproxy.{name}",
+            "ProgramArguments": list(exec_start),
+            "EnvironmentVariables": dict(env),
+            "RunAtLoad": True,
+            "KeepAlive": True,
+        }
+        text = plistlib.dumps(data).decode("utf-8")
+        self.services[name] = text
+        path = self.service_unit_path(name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+
+def test_macos_plan_has_no_setcap(tmp_path):
+    """macOS 没有 setcap —— 绑 80/443 靠 root 的 LaunchDaemon。"""
+    comp, paths, cfg = _component(tmp_path)
+    platform = _MacPlatform()
+    comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
+    actions = comp.plan()
+    assert not any(a.command[:1] == ["setcap"] for a in actions)
+
+
+def test_macos_plan_has_no_linger_action(tmp_path):
+    """macOS 无 systemd-linger —— 平台报"已启用"，不该计划任何 linger 动作。"""
+    comp, paths, cfg = _component(tmp_path)
+    platform = _MacPlatform()
+    comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
+    actions = comp.plan()
+    assert not any(a.command[:1] == ["enable-linger"] for a in actions)
+
+
+def test_macos_unit_current_accepts_plist(tmp_path):
+    """launchd plist 里 ProgramArguments 是数组 —— 单元判据必须认它。"""
+    comp, paths, cfg = _component(tmp_path)
+    platform = _MacPlatform()
+    comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
+    _make_ready(comp, platform, cfg)
+    assert comp._unit_current() is True
+    assert comp.check().ok is True
+
+
+def test_macos_unit_current_detects_stale_plist(tmp_path):
+    comp, paths, cfg = _component(tmp_path)
+    platform = _MacPlatform()
+    comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
+    _make_ready(comp, platform, cfg)
+    platform.install_service(
+        "caddy",
+        exec_start=["/old/path/caddy", "run", "--config", str(paths.caddyfile)],
+        env={},
+    )
+    assert comp._unit_current() is False

@@ -4,6 +4,7 @@ import pytest
 from typer.testing import CliRunner
 
 from devproxy.cli import app
+from devproxy.components import certs as certs_module
 from devproxy.components.certs import CertComponent
 from devproxy.config import Config
 from devproxy.paths import Paths
@@ -567,3 +568,114 @@ def test_cli_logs_does_not_create_files_in_home(tmp_path, monkeypatch):
     result = CliRunner().invoke(app, ["logs", "caddy"])
     assert result.exit_code == 0, result.stdout
     assert list(home.iterdir()) == []
+
+
+# -- macOS：CA 进系统钥匙串，没有 NSS 这一步 --------------------------------
+
+
+class _MacPlatform(FakePlatform):
+    """macOS 平台：没有 NSS 库，CA 只装进系统钥匙串。"""
+
+    name = "mac"
+    dns_port = 5300
+
+    def nss_trusted(self, ca):
+        return True
+
+
+def test_macos_plan_installs_ca_into_system_keychain(tmp_path):
+    comp, platform, paths = _component(tmp_path, platform=_MacPlatform())
+    _write_ca(paths)
+    actions = comp.plan()
+    assert len(actions) == 1, "macOS 没有 NSS 库 —— 只装系统钥匙串"
+    assert actions[0].command[0] == "install-macos-ca"
+    assert actions[0].privileged is True
+
+
+def test_macos_plan_skips_nss_step(tmp_path):
+    comp, platform, paths = _component(tmp_path, platform=_MacPlatform())
+    _write_ca(paths)
+    actions = comp.plan()
+    assert not any(a.command[:1] == ["install-nss-ca"] for a in actions)
+
+
+def test_macos_plan_is_empty_when_keychain_trusts(tmp_path):
+    comp, platform, paths = _component(tmp_path, platform=_MacPlatform())
+    ca = _write_ca(paths)
+    platform.trusted.add(ca)
+    assert comp.plan() == []
+
+
+def test_macos_apply_adds_trusted_cert_to_system_keychain(tmp_path):
+    comp, platform, paths = _component(tmp_path, platform=_MacPlatform())
+    ca = _write_ca(paths)
+    comp.apply(comp.plan())
+    assert [
+        "security",
+        "add-trusted-cert",
+        "-d",
+        "-r",
+        "trustRoot",
+        "-k",
+        certs_module.SYSTEM_KEYCHAIN,
+        str(ca),
+    ] in platform.commands
+
+
+def test_macos_apply_reports_keychain_failure(tmp_path):
+    """钥匙串写失败必须报错 —— 静默失败会让用户以为已经信任了。"""
+
+    class Failing(_MacPlatform):
+        def privilege(self):
+            class _S:
+                def run(self, argv):
+                    return 1, "boom"
+
+                def write(self, path, content):
+                    pass
+
+                def read(self, path):
+                    return ""
+
+                def copy(self, src, dest):
+                    pass
+
+            return _S()
+
+    comp, platform, paths = _component(tmp_path, platform=Failing())
+    _write_ca(paths)
+    with pytest.raises(RuntimeError, match="钥匙串"):
+        comp.apply(comp.plan())
+
+
+def test_macos_check_reports_keychain(tmp_path):
+    comp, platform, paths = _component(tmp_path, platform=_MacPlatform())
+    _write_ca(paths)
+    status = comp.check()
+    assert status.ok is False
+    assert "钥匙串" in status.detail
+
+
+def test_macos_check_ok_when_keychain_trusts(tmp_path):
+    comp, platform, paths = _component(tmp_path, platform=_MacPlatform())
+    ca = _write_ca(paths)
+    platform.trusted.add(ca)
+    status = comp.check()
+    assert status.ok is True
+    assert "钥匙串" in status.detail
+
+
+def test_macos_verify_ok_when_keychain_trusts(tmp_path):
+    comp, platform, paths = _component(tmp_path, platform=_MacPlatform())
+    ca = _write_ca(paths)
+    platform.trusted.add(ca)
+    assert comp.verify().ok is True
+
+
+def test_linux_plan_still_has_two_steps(tmp_path):
+    """Linux 路径不变：系统信任库 + NSS 两步都在。"""
+    comp, platform, paths = _component(tmp_path)
+    _write_ca(paths)
+    actions = comp.plan()
+    assert len(actions) == 2
+    assert {a.command[0] for a in actions} == {"install-nss-ca", "install-system-ca"}

@@ -347,3 +347,85 @@ def test_apply_unknown_action_raises(tmp_path):
     comp, _platform = _component(tmp_path, backend="resolved")
     with pytest.raises(RuntimeError):
         comp.apply([Action(description="?", kind="run", command=["bogus"])])
+
+
+# -- macOS：resolver 后端（每域解析器文件） ------------------------------
+
+
+class _MacPlatform(FakePlatform):
+    """macOS 平台：没有 systemd-resolved，走 /etc/resolver/<后缀>。"""
+
+    name = "mac"
+    dns_port = 5300
+
+
+def test_macos_backend_key_is_resolver(tmp_path):
+    comp, _platform = _component(tmp_path, backend="auto", platform=_MacPlatform())
+    assert comp._backend_key() == "resolver"
+
+
+def test_macos_resolved_backend_is_always_false(tmp_path):
+    """macOS 没有 systemd-resolved —— 即使用户显式写 resolved 也不能选它。"""
+    comp, _platform = _component(tmp_path, backend="resolved", platform=_MacPlatform())
+    assert comp.resolved_backend is False
+
+
+def test_macos_target_path_is_resolver_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(dns_module, "RESOLVER_DIR", tmp_path / "etc" / "resolver")
+    comp, _platform = _component(tmp_path, backend="auto", platform=_MacPlatform())
+    assert comp.target_path == tmp_path / "etc" / "resolver" / "test"
+
+
+def test_macos_plan_writes_resolver_file_with_platform_port(tmp_path, monkeypatch):
+    monkeypatch.setattr(dns_module, "RESOLVER_DIR", tmp_path / "etc" / "resolver")
+    comp, _platform = _component(tmp_path, backend="auto", platform=_MacPlatform())
+    actions = comp.plan()
+    assert len(actions) == 1, "macOS 不需要重启系统解析器 —— mDNSResponder 自己重载"
+    action = actions[0]
+    assert action.kind == "write"
+    assert action.privileged is True
+    assert action.path == tmp_path / "etc" / "resolver" / "test"
+    assert "nameserver 127.0.0.1" in action.content
+    assert "port 5300" in action.content
+
+
+def test_macos_plan_is_empty_when_resolver_file_in_place(tmp_path, monkeypatch):
+    """路由已就位时 plan 必须为空 —— 重复 setup 不该再要 sudo。"""
+    monkeypatch.setattr(dns_module, "RESOLVER_DIR", tmp_path / "etc" / "resolver")
+    comp, _platform = _component(tmp_path, backend="auto", platform=_MacPlatform())
+    assert comp.plan() != []
+    comp.apply(comp.plan())
+    assert comp.plan() == []
+
+
+def test_macos_apply_writes_the_resolver_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(dns_module, "RESOLVER_DIR", tmp_path / "etc" / "resolver")
+    comp, _platform = _component(tmp_path, backend="auto", platform=_MacPlatform())
+    comp.apply(comp.plan())
+    content = (tmp_path / "etc" / "resolver" / "test").read_text(encoding="utf-8")
+    assert "nameserver 127.0.0.1" in content
+    assert "port 5300" in content
+
+
+def test_macos_check_reports_resolver_backend(tmp_path):
+    comp, _platform = _component(tmp_path, backend="auto", platform=_MacPlatform())
+    status = comp.check()
+    assert status.ok is False
+    assert "resolver" in status.detail
+
+
+def test_macos_state_records_resolver_backend(tmp_path, monkeypatch):
+    monkeypatch.setattr(dns_module, "RESOLVER_DIR", tmp_path / "etc" / "resolver")
+    comp, _platform = _component(tmp_path, backend="auto", platform=_MacPlatform())
+    comp.apply(comp.plan())
+    import json
+
+    data = json.loads(comp.state_path.read_text(encoding="utf-8"))
+    assert data["backend"] == "resolver"
+
+
+def test_linux_plan_still_restarts_resolved(tmp_path):
+    """Linux 路径不变：写 drop-in 之后仍要重启 systemd-resolved。"""
+    comp, _platform = _component(tmp_path, backend="resolved")
+    reload_action = next(a for a in comp.plan() if a.kind == "run")
+    assert reload_action.command == ["systemctl", "restart", "systemd-resolved"]

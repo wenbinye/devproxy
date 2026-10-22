@@ -27,6 +27,15 @@ class Status:
     hint: str = ""
 
 
+def render_resolver_file(port: int) -> str:
+    """/etc/resolver/<后缀> 的内容（macOS 的每域解析器格式）。
+
+    macOS 原生支持每域解析器，不必改 /etc/resolv.conf。
+    放在这里是因为组件层（DNS 组件）也要用它 —— 组件不直接依赖某个平台实现。
+    """
+    return f"nameserver 127.0.0.1\nport {port}\n"
+
+
 @dataclass
 class Action:
     """一条待执行动作。"""

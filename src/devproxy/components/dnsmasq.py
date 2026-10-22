@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import shutil
 import time
 from pathlib import Path
 
@@ -16,6 +17,14 @@ from devproxy.paths import Paths
 from devproxy.platform.base import Action, Platform, Status
 
 DNSMASQ_CONF = Path("~/.config/dnsmasq/dnsmasq.conf")
+
+# macOS 上系统不带 dnsmasq —— Homebrew 装在 /opt/homebrew/sbin（Apple Silicon）
+# 或 /usr/local/sbin（Intel）。launchd 不认 PATH，必须绝对路径。
+MACOS_DNSMASQ_CANDIDATES = (
+    "/opt/homebrew/sbin/dnsmasq",
+    "/usr/local/sbin/dnsmasq",
+    "/usr/sbin/dnsmasq",
+)
 
 # 没有全局上游时补的公共 DNS。绝不能补 127.0.0.53（systemd-resolved 桩）——
 # resolved 会被指回本机 dnsmasq，形成解析环路。
@@ -156,7 +165,11 @@ class DnsmasqComponent:
                 content=merged,
             ),
             Action(
-                description="安装并启动 dnsmasq.service（systemd user）",
+                description=(
+                    "安装并启动 dnsmasq LaunchAgent（macOS）"
+                    if self.platform.name == "mac"
+                    else "安装并启动 dnsmasq.service（systemd user）"
+                ),
                 kind="run",
                 command=["install-service", "dnsmasq"],
             ),
@@ -176,7 +189,11 @@ class DnsmasqComponent:
                     exec_start=self._exec_start(),
                     exec_reload=self._exec_reload(),
                     env={},
-                    description="dnsmasq for devproxy (user scope)",
+                    description=(
+                        "dnsmasq for devproxy (LaunchAgent)"
+                        if self.platform.name == "mac"
+                        else "dnsmasq for devproxy (user scope)"
+                    ),
                 )
                 self.platform.enable_service("dnsmasq")
                 continue
@@ -229,13 +246,33 @@ class DnsmasqComponent:
 
         必须先 resolve：systemd 把相对路径按 / 解析，`--conf-dir=rel` 会指到
         根目录下，单元根本起不来。
+
+        macOS 的 launchd 不认 %h —— 一律写绝对路径。
         """
         conf_dir = self.conf_path.resolve().parent
+        if self.platform.name == "mac":
+            return str(conf_dir)
         try:
             rel = conf_dir.relative_to(Path.home().resolve())
         except ValueError:
             return str(conf_dir)
         return "%h" if str(rel) == "." else f"%h/{rel}"
+
+    def _dnsmasq_binary(self) -> str:
+        """dnsmasq 可执行文件的绝对路径。
+
+        Linux 上固定 /usr/sbin/dnsmasq；macOS 上系统不带 dnsmasq，
+        Homebrew 装在 /opt/homebrew/sbin 或 /usr/local/sbin —— 按存在的那个挑。
+        """
+        if self.platform.name != "mac":
+            return "/usr/sbin/dnsmasq"
+        found = shutil.which("dnsmasq")
+        if found:
+            return found
+        for candidate in MACOS_DNSMASQ_CANDIDATES:
+            if Path(candidate).exists():
+                return candidate
+        return MACOS_DNSMASQ_CANDIDATES[0]
 
     def _exec_start(self) -> list[str]:
         """dnsmasq 的启动命令。
@@ -246,11 +283,17 @@ class DnsmasqComponent:
         `~/.cache` 目录存在的依赖）。
         """
         return [
-            "/usr/sbin/dnsmasq",
+            self._dnsmasq_binary(),
             "--keep-in-foreground",
             f"--conf-dir={self._conf_dir_spec()}",
         ]
 
-    def _exec_reload(self) -> list[str]:
-        """重载配置：给 dnsmasq 发 HUP，让它重读 conf-dir。"""
+    def _exec_reload(self) -> list[str] | None:
+        """重载配置：给 dnsmasq 发 HUP，让它重读 conf-dir。
+
+        launchd 的 plist 没有 ExecReload —— macOS 上返回 None，
+        重载靠 kickstart 重启服务。
+        """
+        if self.platform.name == "mac":
+            return None
         return ["/bin/kill", "-HUP", "$MAINPID"]

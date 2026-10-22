@@ -17,6 +17,7 @@ from devproxy.platform.base import (
     CA_NICKNAME,
     NSS_DIR,
     SYSTEM_CA_DEST,
+    SYSTEM_KEYCHAIN,
     Action,
     Platform,
     Status,
@@ -71,6 +72,14 @@ class CertComponent:
             return False
         return self._trusted(checker, self.ca_path)
 
+    @property
+    def _is_macos(self) -> bool:
+        return self.platform.name == "mac"
+
+    def _system_label(self) -> str:
+        """系统信任点的名字（报错与提示里用）。"""
+        return "系统钥匙串" if self._is_macos else "系统信任库"
+
     # -- check ---------------------------------------------------------
 
     def check(self) -> Status:
@@ -82,7 +91,7 @@ class CertComponent:
             )
         missing = []
         if not self._system_trusted():
-            missing.append("系统信任库")
+            missing.append(self._system_label())
         if not self._nss_trusted():
             missing.append("NSS 库")
         if missing:
@@ -91,6 +100,8 @@ class CertComponent:
                 detail=f"CA 根证书未被信任（缺少：{'、'.join(missing)}）",
                 hint="devproxy trust",
             )
+        if self._is_macos:
+            return Status(ok=True, detail="CA 根证书已信任（系统钥匙串）")
         return Status(ok=True, detail="CA 根证书已信任（系统信任库 + NSS 库）")
 
     # -- plan ----------------------------------------------------------
@@ -102,6 +113,18 @@ class CertComponent:
         """
         if not self.ca_path.exists():
             return []
+        if self._is_macos:
+            # macOS 没有 NSS 库：CA 只要进系统钥匙串（Safari/Chrome 都认它）。
+            if self._system_trusted():
+                return []
+            return [
+                Action(
+                    description="把 CA 根证书加入系统钥匙串（Safari/Chrome 都会信任）",
+                    kind="run",
+                    command=["install-macos-ca", str(self.ca_path)],
+                    privileged=True,
+                )
+            ]
         actions: list[Action] = []
         if not self._nss_trusted():
             actions.append(
@@ -154,6 +177,25 @@ class CertComponent:
             raise RuntimeError(message)
 
     def _apply_one(self, action: Action) -> None:
+        if action.command[:1] == ["install-macos-ca"]:
+            # macOS：把 CA 加进系统钥匙串并标成信任根（-d 加到系统域，
+            # -r trustRoot 让它对所有应用生效，包括 Safari/Chrome）。
+            src = Path(action.command[1])
+            code, msg = self.platform.privilege().run(
+                [
+                    "security",
+                    "add-trusted-cert",
+                    "-d",
+                    "-r",
+                    "trustRoot",
+                    "-k",
+                    SYSTEM_KEYCHAIN,
+                    str(src),
+                ]
+            )
+            if code != 0:
+                raise RuntimeError(f"安装 CA 到系统钥匙串失败: {msg}")
+            return
         if action.command[:1] == ["install-system-ca"]:
             elevated = self.platform.privilege()
             src, dest = Path(action.command[1]), Path(action.command[2])
@@ -234,6 +276,10 @@ class CertComponent:
             return Status(
                 ok=False,
                 detail=f"CA 已进信任库，但 {url} 仍握手失败",
-                hint="devproxy trust；systemctl --user status caddy",
+                hint=(
+                    "devproxy trust；launchctl print system/com.devproxy.caddy"
+                    if self._is_macos
+                    else "devproxy trust；systemctl --user status caddy"
+                ),
             )
         return Status(ok=True, detail=f"CA 已信任，{url} 握手成功")

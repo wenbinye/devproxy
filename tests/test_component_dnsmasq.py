@@ -416,3 +416,67 @@ def test_apply_creates_no_backup_for_new_config(tmp_path):
     comp, _platform, _conf_path = _component(tmp_path)
     comp.apply(comp.plan())
     assert list((tmp_path / "s" / "backups").glob("*.bak")) == []
+
+
+# -- macOS：launchd 没有 %h，也没有 ExecReload ----------------------------
+
+
+class _MacPlatform(FakePlatform):
+    """macOS 平台：单元由平台渲染成 launchd plist。"""
+
+    name = "mac"
+    dns_port = 5300
+
+    def __init__(self):
+        super().__init__()
+        self.installed: dict = {}
+
+    def install_service(self, name, *, exec_start, exec_reload=None, exec_stop=None,
+                        env, description=""):
+        self.installed = {
+            "name": name,
+            "exec_start": list(exec_start),
+            "exec_reload": exec_reload,
+            "env": dict(env),
+            "description": description,
+        }
+
+
+def test_macos_exec_start_uses_absolute_conf_dir(tmp_path):
+    """launchd 不认 systemd 的 %h —— 配置目录必须写成绝对路径。"""
+    comp, platform, _conf = _component(tmp_path, platform=_MacPlatform())
+    comp.apply(comp.plan())
+    exec_start = platform.installed["exec_start"]
+    conf_dir = [a for a in exec_start if a.startswith("--conf-dir=")]
+    assert conf_dir, "单元必须带上配置目录"
+    path = conf_dir[0].split("=", 1)[1]
+    assert path.startswith("/"), f"launchd 需要绝对路径: {path}"
+    assert "%h" not in path
+
+
+def test_macos_exec_start_program_is_absolute(tmp_path):
+    """launchd 的 ProgramArguments 必须是绝对路径。"""
+    comp, platform, _conf = _component(tmp_path, platform=_MacPlatform())
+    comp.apply(comp.plan())
+    assert Path(platform.installed["exec_start"][0]).is_absolute()
+
+
+def test_macos_has_no_exec_reload(tmp_path):
+    """launchd 的 plist 没有 ExecReload —— 重载靠 kickstart 重启。"""
+    comp, platform, _conf = _component(tmp_path, platform=_MacPlatform())
+    comp.apply(comp.plan())
+    assert platform.installed["exec_reload"] is None
+
+
+def test_macos_service_description_mentions_launchagent(tmp_path):
+    comp, platform, _conf = _component(tmp_path, platform=_MacPlatform())
+    comp.apply(comp.plan())
+    assert "LaunchAgent" in platform.installed["description"]
+
+
+def test_linux_exec_reload_still_uses_mainpid(tmp_path):
+    """Linux 路径不变：ExecReload 仍然是给 dnsmasq 发 HUP。"""
+    comp, platform, _conf = _component(tmp_path)
+    comp.apply(comp.plan())
+    unit = platform.services["dnsmasq"]
+    assert "ExecReload=/bin/kill -HUP $MAINPID" in unit

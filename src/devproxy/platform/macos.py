@@ -23,6 +23,7 @@ from devproxy.platform.base import (
     RESOLVER_DIR,
     ElevatedSession,
     Platform,
+    render_resolver_file as _render_resolver_file,
 )
 
 LAUNCH_AGENTS = "Library/LaunchAgents"
@@ -113,8 +114,9 @@ def render_resolver_file(port: int) -> str:
     """/etc/resolver/<后缀> 的内容。
 
     macOS 原生支持每域解析器，不必改 /etc/resolv.conf。
+    实现放在 platform/base.py —— DNS 组件也要用同一份格式。
     """
-    return f"nameserver 127.0.0.1\nport {port}\n"
+    return _render_resolver_file(port)
 
 
 class MacOSElevated:
