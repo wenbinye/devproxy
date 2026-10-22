@@ -31,7 +31,8 @@ from devproxy.platform.base import (
 LAUNCH_AGENTS = "Library/LaunchAgents"
 LAUNCH_DAEMONS = "/Library/LaunchDaemons"
 
-# DNS 解析的超时上限（秒）：解析器挂住不能把 doctor 拖死。
+# DNS 解析的超时上限（秒）：解析器挂住不能把 setup 的自检拖死。
+# dns_query 只在 verify() 里被调用（doctor 不做 DNS 解析）。
 DNS_QUERY_TIMEOUT = 3
 
 # launchctl print 里的服务状态行（"state = running" / "state = not running"）。
@@ -243,7 +244,7 @@ class MacOSPlatform:
         return False
 
     def dns_query(self, name: str) -> str | None:
-        """走系统解析器查询。必须有超时上限：解析器挂住会拖死 doctor。"""
+        """走系统解析器查询。必须有超时上限：解析器挂住会拖死 setup 的自检。"""
         code, out = _run(
             ["dscacheutil", "-q", "host", "-a", "name", name], timeout=DNS_QUERY_TIMEOUT
         )

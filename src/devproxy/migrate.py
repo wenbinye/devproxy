@@ -92,10 +92,10 @@ def _split_blocks(text: str) -> tuple[list[str], list[str]]:
     return global_blocks, site_blocks
 
 
-def split_caddyfile(
+def split_caddyfile_blocks(
     text: str, suffix: str = "test"
-) -> tuple[str, list[str]]:
-    """拆出个人站点块。返回 (个人站点文本, 被丢弃的 .test 相关块)。
+) -> tuple[list[str], list[str]]:
+    """拆出个人站点块。返回 (个人站点块列表, 被丢弃的 .test 相关块列表)。
 
     只做块级切分，不解析 Caddyfile 语法 —— 站点块原样保留。
     """
@@ -115,7 +115,29 @@ def split_caddyfile(
             dropped.append(block)
         else:
             personal.append(block)
+    return personal, dropped
+
+
+def split_caddyfile(text: str, suffix: str = "test") -> tuple[str, list[str]]:
+    """拆出个人站点。返回 (个人站点文本, 被丢弃的 .test 相关块)。"""
+    personal, dropped = split_caddyfile_blocks(text, suffix)
     return "\n".join(personal), dropped
+
+
+def block_addresses(blocks: list[str]) -> list[str]:
+    """一组站点块声明的地址（全局块与解析不出地址的块略过）。"""
+    addresses = [_block_address(b) for b in blocks]
+    return [a for a in addresses if a]
+
+
+def wildcard_addresses(text: str, suffix: str = "test") -> list[str]:
+    """文本里仍存在的通配站点块地址。
+
+    通配块（如 *.test）与工具生成的精确站点块同后缀时，Caddy 的 TLS
+    握手会整体失败 —— 所以 doctor 必须能指出"现役配置里还有通配块"。
+    """
+    _, dropped = split_caddyfile_blocks(text, suffix)
+    return block_addresses(dropped)
 
 
 def legacy_storage_path(text: str) -> Path | None:
@@ -382,32 +404,43 @@ def _write_sites_caddy(
 
     工具只 import sites.caddy，绝不覆盖已有内容 —— 用户自己写的站点不能被
     迁移冲掉（重复的站点块还会让 Caddy 直接起不来）。
+
+    但"不覆盖"不等于"没影响"：迁移会把单元改指向工具的 Caddyfile，而它
+    只 import sites.caddy。旧 Caddyfile 从此不再被读取 —— 留在那里的个人
+    站点**就此不再被服务**。这件事必须明说（点名文件与地址），否则用户
+    只会看到"站点突然 404 了"。
     """
     if not state.config_path.exists():
         notes.append(f"遗留 Caddyfile 不存在，跳过站点拆分：{state.config_path}")
         return
     legacy = state.config_path.read_text(encoding="utf-8")
-    personal, dropped = split_caddyfile(legacy, suffix=config.domain_suffix)
+    personal_blocks, dropped = split_caddyfile_blocks(
+        legacy, suffix=config.domain_suffix
+    )
     if dropped:
-        addresses = [a for a in (_block_address(b) for b in dropped) if a]
+        addresses = block_addresses(dropped)
         notes.append(
             f"已丢弃 {len(dropped)} 个 .{config.domain_suffix} 站点块"
             f"（由工具接管）：{', '.join(addresses)}；"
             f"旧 Caddyfile 未被改动且已完整备份，需要可从备份里取回"
         )
-    if not personal.strip():
+    if not personal_blocks:
         return
     existing = ""
     if paths.sites_caddy.exists():
         existing = paths.sites_caddy.read_text(encoding="utf-8")
     if _has_content(existing):
+        addresses = block_addresses(personal_blocks)
         notes.append(
-            f"sites.caddy 已有内容，未覆盖；个人站点仍在旧 Caddyfile 里："
-            f"{state.config_path}"
+            f"⚠ 迁移后这些个人站点将不再被服务：{state.config_path} 已不再被"
+            f"主 Caddyfile import，工具只 import {paths.sites_caddy}。"
+            f"涉及地址：{', '.join(addresses) or '（无法从文件解析）'}。"
+            f"请手工把这些站点块从 {state.config_path} 合并到 {paths.sites_caddy}"
+            f"（备份目录里也有原件）。"
         )
         return
     paths.sites_caddy.parent.mkdir(parents=True, exist_ok=True)
-    paths.sites_caddy.write_text(personal, encoding="utf-8")
+    paths.sites_caddy.write_text("\n".join(personal_blocks), encoding="utf-8")
 
 
 def _main_caddyfile_content(paths: Paths, config: Config) -> str:
@@ -520,11 +553,36 @@ def load_extra_env(paths: Paths) -> dict[str, str]:
 
 
 def _install_caddy_unit(
-    platform: Platform, paths: Paths, config: Config, state: LegacyState
+    platform: Platform,
+    paths: Paths,
+    config: Config,
+    state: LegacyState,
+    notes: list[str],
 ) -> None:
-    """改写单元：指向工具的 Caddyfile，保留原有 Environment=。"""
+    """改写单元：指向工具的 Caddyfile，保留原有 Environment=。
+
+    二进制路径必须能落到一个**真实存在**的文件上：迁移发生在组件流程
+    之前，caddy 二进制可能还没下载（首次 setup、无网络）。那时若照抄
+    config 里的路径，单元就指向一个不存在的二进制 —— 正在跑的 Caddy
+    会被这一改弄坏，而且没有任何东西能把它拉起来。
+
+    所以退回遗留单元里的 ExecStart 二进制：那个文件正在这台机器上跑，
+    一定可用。setup 后续的组件流程会把单元换成正式路径。
+    """
     binary = config.caddy_bin_path
-    was_active = platform.service_active("caddy")
+    if not binary.exists():
+        fallback = _legacy_caddy_binary(state)
+        if fallback is not None and fallback.exists():
+            notes.append(
+                f"配置里的 caddy 二进制不存在，单元先沿用遗留的 {fallback}"
+                f"（setup 下载完成后会自动换成 {binary}）"
+            )
+            binary = fallback
+        else:
+            notes.append(
+                f"caddy 二进制不存在（{binary}），单元将指向它 —— "
+                f"setup 下载完成后才会可用"
+            )
     platform.install_service(
         "caddy",
         exec_start=[str(binary), "run", "--config", str(paths.caddyfile)],
@@ -604,7 +662,7 @@ def migrate(
         _write_sites_caddy(paths, state, config, notes)
         _validate_caddyfile(platform, paths, config, notes, state)
         _write_main_caddyfile(paths, config)
-        _install_caddy_unit(platform, paths, config, state)
+        _install_caddy_unit(platform, paths, config, state, notes)
         # 生效的 storage 就是遗留的 storage 时必须留档：之后的 setup
         # 换了位置，Caddy 会重新生成 CA。
         if legacy is not None and legacy == config.storage_path:

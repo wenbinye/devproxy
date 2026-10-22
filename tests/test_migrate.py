@@ -337,6 +337,66 @@ def test_migrate_does_not_overwrite_existing_sites_caddy(tmp_path):
     assert any("sites.caddy" in n for n in notes), "必须告诉用户个人站点没被迁走"
 
 
+def test_migrate_states_that_personal_sites_are_no_longer_served(tmp_path):
+    """迁移后旧 Caddyfile 不再被 import —— 里面的站点就此不再被服务。
+
+    这件事必须明说（点名文件与地址）：只留一句"未覆盖"会让人以为
+    个人站点还好好的，实际上它们已经 404 了。
+    """
+    paths = _paths(tmp_path)
+    paths.ensure_files()
+    paths.sites_caddy.write_text("mine.example { respond \"hi\" }\n", encoding="utf-8")
+    platform = FakePlatform()
+    state = _legacy_state(
+        tmp_path,
+        caddyfile_text=(
+            "localhost {\n\ttls internal\n}\n"
+            "\n"
+            "api.example.com {\n\treverse_proxy 1.2.3.4:80\n}\n"
+        ),
+    )
+    notes: list[str] = []
+    _migrate(platform, paths, Config(), state, tmp_path, notes=notes)
+    joined = "\n".join(notes)
+    assert "不再被服务" in joined, f"必须明说站点不再被服务：{notes}"
+    assert "localhost" in joined and "api.example.com" in joined, "必须点名涉及的地址"
+    assert str(state.config_path) in joined, "必须点名要从哪个文件合并"
+    assert str(paths.sites_caddy) in joined, "必须点名要合并到哪个文件"
+
+
+def test_migrate_unit_falls_back_to_legacy_binary_when_config_binary_missing(tmp_path):
+    """二进制还没下载时，单元不能指向一个不存在的文件。
+
+    迁移发生在组件流程（下载）之前 —— 照抄 config 里的路径会让正在跑的
+    Caddy 被改坏（单元指向不存在的二进制），而且没有东西能把它拉起来。
+    """
+    paths = _paths(tmp_path)
+    paths.ensure_files()
+    platform = FakePlatform()
+    legacy_bin = tmp_path / "legacy" / "caddy"
+    legacy_bin.parent.mkdir(parents=True, exist_ok=True)
+    legacy_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+    state = _legacy_state(
+        tmp_path,
+        unit_text=(
+            "[Service]\n"
+            f"ExecStart={legacy_bin} run --config /old/Caddyfile\n"
+        ),
+    )
+    notes: list[str] = []
+    _migrate(
+        platform,
+        paths,
+        Config(caddy_bin=str(tmp_path / "not-downloaded" / "caddy")),
+        state,
+        tmp_path,
+        notes=notes,
+    )
+    unit = platform.services["caddy"]
+    assert f"ExecStart={legacy_bin} run" in unit, unit
+    assert any("沿用遗留" in n for n in notes), f"必须说明用了哪个二进制：{notes}"
+
+
 def test_migrate_preserves_unit_env(tmp_path):
     paths = _paths(tmp_path)
     paths.ensure_files()
