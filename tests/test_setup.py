@@ -171,6 +171,7 @@ class FakeCliComponent:
 def _patch_cli(monkeypatch, tmp_path, components):
     from devproxy.config import Config
     from devproxy.paths import Paths
+    from devproxy.platform.fake import FakePlatform
 
     paths = Paths(tmp_path / "config", tmp_path / "state", tmp_path / "data")
     paths.ensure_files()
@@ -179,6 +180,9 @@ def _patch_cli(monkeypatch, tmp_path, components):
         "devproxy.cli.build_context", lambda *a, **k: (paths, cfg, None, None)
     )
     monkeypatch.setattr("devproxy.cli._components", lambda *a, **k: components)
+    # 平台也必须换成假的：setup 的迁移检测会去看真实单元目录，
+    # 迁移一旦跑起来就会改写用户机器上的 caddy.service
+    monkeypatch.setattr("devproxy.cli._platform", lambda: FakePlatform())
     return paths, cfg
 
 
@@ -272,7 +276,7 @@ def test_cli_setup_domain_suffix_override(tmp_path, monkeypatch):
 
     seen = {}
 
-    def fake_components(paths, config, dns_backend="auto"):
+    def fake_components(paths, config, dns_backend="auto", platform=None):
         seen["suffix"] = config.domain_suffix
         seen["backend"] = dns_backend
         return [FakeCliComponent("caddy")]
