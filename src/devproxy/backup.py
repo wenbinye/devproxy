@@ -29,6 +29,27 @@ class BackupEntry:
     sha256: str = ""
 
 
+class BackupRestoreError(RuntimeError):
+    """还原过程中有条目失败时抛出。
+
+    还原会尽力完成其余条目，不会因单个条目失败而中断。
+    `.restored` 是已成功还原（覆盖或删除）的原始路径列表，
+    `.failures` 是失败条目列表，元素为 (原始路径, 异常)。
+    """
+
+    def __init__(
+        self,
+        restored: list[Path],
+        failures: list[tuple[Path, Exception]],
+    ):
+        self.restored = list(restored)
+        self.failures = list(failures)
+        detail = "; ".join(f"{p}: {exc}" for p, exc in self.failures)
+        super().__init__(
+            f"还原失败 {len(self.failures)} 项（已还原 {len(self.restored)} 项）: {detail}"
+        )
+
+
 @dataclass
 class Backup:
     directory: Path
@@ -53,17 +74,30 @@ class Backup:
         return "\n".join(lines)
 
     def restore(self) -> list[Path]:
-        """还原所有条目。返回被还原或被删除的原始路径。"""
-        touched: list[Path] = []
+        """还原所有条目。返回被还原或被删除的原始路径。
+
+        单个条目失败不会中断还原：尽可能还原其余条目，全部尝试完后若仍有失败，
+        抛出 `BackupRestoreError`，其 `.restored` 保留已成功还原的原始路径，
+        `.failures` 保留失败条目（原始路径, 异常）。调用方必须捕获该异常，
+        否则已还原清单会丢失。
+        """
+        restored: list[Path] = []
+        failures: list[tuple[Path, Exception]] = []
         for e in self.entries:
-            src = self.directory / e.backup
-            if e.existed:
-                e.original.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(src, e.original)
-            else:
-                e.original.unlink(missing_ok=True)
-            touched.append(e.original)
-        return touched
+            try:
+                src = self.directory / e.backup
+                if e.existed:
+                    e.original.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(src, e.original)
+                else:
+                    e.original.unlink(missing_ok=True)
+            except OSError as exc:
+                failures.append((e.original, exc))
+                continue
+            restored.append(e.original)
+        if failures:
+            raise BackupRestoreError(restored, failures)
+        return restored
 
 
 class BackupManager:
@@ -71,7 +105,12 @@ class BackupManager:
         self.base_dir = base_dir
 
     def create(self, targets: list[Path]) -> Backup:
-        """备份目标文件。目录创建或复制失败一律抛异常 —— 调用方必须中止迁移。"""
+        """备份目标文件。目录创建或复制失败一律抛异常 —— 调用方必须中止迁移。
+
+        目标必须是普通文件：目录、符号链接（含悬空链接）、其他特殊文件一律
+        抛 `ValueError`，不得被静默记成"原本不存在"，否则还原时可能删除
+        原本存在的东西。目标确实不存在时记 `existed=False`。
+        """
         stamp = time.strftime("%Y-%m-%dT%H-%M-%SZ", time.gmtime())
         directory = self.base_dir / stamp
         n = 0
@@ -82,28 +121,43 @@ class BackupManager:
 
         entries: list[BackupEntry] = []
         used: set[str] = set()
-        for target in targets:
-            name = target.name or "root"
-            backup_name = f"{name}.bak"
-            i = 1
-            while backup_name in used:
-                i += 1
-                backup_name = f"{name}.{i}.bak"
-            used.add(backup_name)
-            if target.exists() and target.is_file():
-                shutil.copy2(target, directory / backup_name)
-                entries.append(
-                    BackupEntry(
-                        original=target,
-                        backup=backup_name,
-                        existed=True,
-                        sha256=_sha256(target),
+        try:
+            for target in targets:
+                if target.is_symlink() or (target.exists() and not target.is_file()):
+                    raise ValueError(f"备份目标不是普通文件: {target}")
+                name = target.name or "root"
+                backup_name = f"{name}.bak"
+                i = 1
+                while backup_name in used:
+                    i += 1
+                    backup_name = f"{name}.{i}.bak"
+                used.add(backup_name)
+                if target.exists():
+                    copy = directory / backup_name
+                    shutil.copy2(target, copy)
+                    entries.append(
+                        BackupEntry(
+                            original=target,
+                            backup=backup_name,
+                            existed=True,
+                            sha256=_sha256(copy),
+                        )
                     )
+                else:
+                    entries.append(
+                        BackupEntry(original=target, backup=backup_name, existed=False)
+                    )
+        except Exception:
+            # 备份未完成：先打标记再清理半成品目录，避免留下没有 manifest 的孤儿备份
+            try:
+                (directory / "INCOMPLETE").write_text(
+                    "本次备份未完成，已被清理；如目录仍存在说明清理失败，请手动删除。\n",
+                    encoding="utf-8",
                 )
-            else:
-                entries.append(
-                    BackupEntry(original=target, backup=backup_name, existed=False)
-                )
+            except OSError:
+                pass
+            shutil.rmtree(directory, ignore_errors=True)
+            raise
 
         created_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         backup = Backup(directory=directory, created_at=created_at, entries=entries)
