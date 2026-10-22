@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 
 from devproxy.config import Config
@@ -16,6 +18,10 @@ from devproxy.platform.base import Action, Platform, Status
 RESOLVED_CONF_DIR = Path("/etc/systemd/resolved.conf.d")
 RESOLVED_CONF = RESOLVED_CONF_DIR / "devproxy.conf"
 SYSTEM_DNSMASQ_CONF = Path("/etc/dnsmasq.d/devproxy.conf")
+
+# 记录上次写入的路由内容哈希 —— /etc 下的文件普通用户未必读得到，
+# 靠自家 state 目录里的哈希判断“是否已就绪”，让 setup 第二次跑成 no-op。
+STATE_FILE = "dns-route.json"
 
 
 def render_resolved_conf(*, port: int, domains: list[str]) -> str:
@@ -31,6 +37,10 @@ def render_resolved_conf(*, port: int, domains: list[str]) -> str:
 def render_system_dnsmasq_conf(*, suffix: str) -> str:
     s = suffix.lstrip(".")
     return f"address=/.{s}/127.0.0.1\naddress=/.{s}/::1\n"
+
+
+def _sha256(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 class DnsComponent:
@@ -57,9 +67,13 @@ class DnsComponent:
     def target_path(self) -> Path:
         return RESOLVED_CONF if self.resolved_backend else SYSTEM_DNSMASQ_CONF
 
+    @property
+    def backend_key(self) -> str:
+        return "resolved" if self.resolved_backend else "system"
+
     # -- check ---------------------------------------------------------
     def check(self) -> Status:
-        key = "resolved" if self.resolved_backend else "system"
+        key = self.backend_key
         if self.platform.dns_route_installed(key):
             return Status(ok=True, detail=f"DNS 路由已配置（{key} 后端）")
         return Status(
@@ -70,6 +84,8 @@ class DnsComponent:
 
     # -- plan ----------------------------------------------------------
     def plan(self) -> list[Action]:
+        """路由已是预期内容时返回空列表 —— 重复 setup 不该再要 sudo、
+        更不该再重启系统 resolver（那会造成全机 DNS 抖动）。"""
         if self.resolved_backend:
             content = render_resolved_conf(
                 port=self.platform.dns_port, domains=[self.config.domain_suffix]
@@ -90,6 +106,8 @@ class DnsComponent:
                 command=["systemctl", "restart", "dnsmasq"],
                 privileged=True,
             )
+        if self._route_in_place(content):
+            return []
         return [
             Action(description=desc, kind="write", path=self.target_path, content=content, privileged=True),
             reload_action,
@@ -97,19 +115,29 @@ class DnsComponent:
 
     # -- apply ---------------------------------------------------------
     def apply(self, actions: list[Action]) -> None:
-        elevated = self.platform.privilege()
+        """提权会话按需获取 —— 没有特权动作时绝不触发 sudo 密码提示。"""
+        elevated = None
         for action in actions:
             if action.kind == "write" and action.path is not None:
-                elevated.write(action.path, action.content)
+                if action.privileged:
+                    if elevated is None:
+                        elevated = self.platform.privilege()
+                    elevated.write(action.path, action.content)
+                else:
+                    action.path.parent.mkdir(parents=True, exist_ok=True)
+                    action.path.write_text(action.content, encoding="utf-8")
+                self._record_state(action.path, action.content)
                 continue
             if action.privileged:
+                if elevated is None:
+                    elevated = self.platform.privilege()
                 elevated.run(action.command)
                 continue
             raise RuntimeError(f"未知动作: {action.command}")
 
     # -- verify --------------------------------------------------------
     def verify(self) -> Status:
-        key = "resolved" if self.resolved_backend else "system"
+        key = self.backend_key
         if not self.platform.dns_route_installed(key):
             return Status(
                 ok=False,
@@ -117,3 +145,37 @@ class DnsComponent:
                 hint="systemctl restart systemd-resolved",
             )
         return Status(ok=True, detail="DNS 路由已配置")
+
+    # -- 状态记录 ------------------------------------------------------
+    @property
+    def state_path(self) -> Path:
+        return self.paths.state_dir / STATE_FILE
+
+    def _read_state(self) -> dict:
+        path = self.state_path
+        if not path.exists():
+            return {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _record_state(self, path: Path, content: str) -> None:
+        payload = {
+            "backend": self.backend_key,
+            "path": str(path),
+            "content_sha256": _sha256(content),
+        }
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        self.state_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+
+    def _route_in_place(self, content: str) -> bool:
+        """上次写入的内容哈希是否就是现在要写的内容（且路径未变）。"""
+        state = self._read_state()
+        return (
+            state.get("content_sha256") == _sha256(content)
+            and state.get("path") == str(self.target_path)
+        )

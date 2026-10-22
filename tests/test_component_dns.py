@@ -61,10 +61,13 @@ def test_plan_writes_resolved_conf(tmp_path):
 # -- 组件 ---------------------------------------------------------------
 
 
-def _component(tmp_path, backend="resolved"):
+def _component(tmp_path, backend="resolved", suffix="test"):
     paths = Paths(tmp_path / "c", tmp_path / "s", tmp_path / "d")
     platform = FakePlatform()
-    return DnsComponent(platform, paths, Config(), backend=backend), platform
+    return (
+        DnsComponent(platform, paths, Config(domain_suffix=suffix), backend=backend),
+        platform,
+    )
 
 
 def test_resolved_plan_targets_resolved_conf_and_restarts_resolved(tmp_path):
@@ -125,6 +128,88 @@ def test_auto_falls_back_to_system_without_resolved_dir(tmp_path, monkeypatch):
     comp, _platform = _component(tmp_path, backend="auto")
     assert comp.resolved_backend is False
     assert comp.target_path == dns_module.SYSTEM_DNSMASQ_CONF
+
+
+# -- setup 幂等：已就绪时 plan 必须为空（Important C） -------------------
+
+
+def test_plan_empty_when_recorded_hash_matches(tmp_path, monkeypatch):
+    target = tmp_path / "etc" / "resolved.conf.d" / "devproxy.conf"
+    monkeypatch.setattr(dns_module, "RESOLVED_CONF", target)
+    comp, _platform = _component(tmp_path, backend="resolved")
+    assert comp.plan() != []
+    comp.apply(comp.plan())
+    # 路由已按预期写入 → 再次 setup 必须是 no-op（不再要 sudo、不重启 resolved）
+    assert comp.plan() == []
+
+
+def test_plan_non_empty_when_recorded_hash_differs(tmp_path, monkeypatch):
+    target = tmp_path / "etc" / "resolved.conf.d" / "devproxy.conf"
+    monkeypatch.setattr(dns_module, "RESOLVED_CONF", target)
+    comp, _platform = _component(tmp_path, backend="resolved")
+    comp.apply(comp.plan())
+    # 改了域名后缀 → 内容变了 → 必须重写
+    other, _p = _component(tmp_path, backend="resolved", suffix="dev")
+    assert other.plan() != []
+
+
+def test_plan_non_empty_without_state_file(tmp_path, monkeypatch):
+    target = tmp_path / "etc" / "resolved.conf.d" / "devproxy.conf"
+    monkeypatch.setattr(dns_module, "RESOLVED_CONF", target)
+    comp, _platform = _component(tmp_path, backend="resolved")
+    comp.apply(comp.plan())
+    comp.paths.state_dir.joinpath("dns-route.json").unlink()
+    assert comp.plan() != []
+
+
+def test_apply_records_state_in_state_dir(tmp_path, monkeypatch):
+    target = tmp_path / "etc" / "resolved.conf.d" / "devproxy.conf"
+    monkeypatch.setattr(dns_module, "RESOLVED_CONF", target)
+    comp, _platform = _component(tmp_path, backend="resolved")
+    comp.apply(comp.plan())
+    state = tmp_path / "s" / "dns-route.json"
+    assert state.exists()
+    import json
+
+    data = json.loads(state.read_text(encoding="utf-8"))
+    assert data["backend"] == "resolved"
+    assert data["path"] == str(target)
+    assert len(data["content_sha256"]) == 64
+
+
+# -- 提权纪律（两个 minor） -----------------------------------------------
+
+
+def test_apply_without_privileged_actions_does_not_request_privilege(
+    tmp_path, monkeypatch
+):
+    comp, platform = _component(tmp_path, backend="resolved")
+
+    def boom():
+        raise AssertionError("无提权动作时不应请求提权")
+
+    monkeypatch.setattr(platform, "privilege", boom)
+    comp.apply([])
+
+
+def test_non_privileged_write_uses_plain_filesystem(tmp_path):
+    from devproxy.platform.base import Action
+
+    comp, platform = _component(tmp_path, backend="resolved")
+    target = tmp_path / "plain.conf"
+    comp.apply(
+        [
+            Action(
+                description="普通写入",
+                kind="write",
+                path=target,
+                content="hello",
+                privileged=False,
+            )
+        ]
+    )
+    assert target.read_text(encoding="utf-8") == "hello"
+    assert target not in platform.written
 
 
 def test_apply_unknown_action_raises(tmp_path):
