@@ -24,8 +24,12 @@ class FakeElevated:
         return path.read_text(encoding="utf-8")
 
     def copy(self, src: Path, dest: Path) -> None:
+        """与 write 保持一致：真实落盘，并记录 commands 与 written。"""
+        content = src.read_text(encoding="utf-8")
         dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+        dest.write_text(content, encoding="utf-8")
+        self.platform.commands.append(["cp", str(src), str(dest)])
+        self.platform.written[dest] = content
 
 
 class FakePlatform:

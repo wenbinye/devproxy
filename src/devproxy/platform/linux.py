@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 from devproxy.platform.base import ElevatedSession
@@ -35,19 +36,30 @@ class LinuxElevated:
         return _run(["sudo", *argv])
 
     def write(self, path: Path, content: str) -> None:
-        """通过临时文件 + sudo cp 写入，避免 shell 引号问题。"""
-        tmp = path.with_name(path.name + ".devproxy.tmp")
-        tmp.parent.mkdir(parents=True, exist_ok=True)
-        tmp.write_text(content, encoding="utf-8")
-        code, msg = self.run(["cp", str(tmp), str(path)])
-        tmp.unlink(missing_ok=True)
-        if code != 0:
-            raise PermissionError(f"写入 {path} 失败：{msg}")
+        """通过系统临时目录中的文件 + sudo cp 写入，避免 shell 引号问题。
+
+        临时文件必须放在用户可写的系统临时目录（目标目录本身可能不可写），
+        且无论成功失败都要清理。
+        """
+        fd, tmp_name = tempfile.mkstemp(prefix="devproxy-elev-")
+        tmp = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(content)
+            code, msg = self.run(["cp", str(tmp), str(path)])
+            if code != 0:
+                raise PermissionError(f"写入 {path} 失败: {msg}")
+        finally:
+            tmp.unlink(missing_ok=True)
 
     def read(self, path: Path) -> str:
+        """读取特权文件。仅当输出表明文件不存在时抛 FileNotFoundError，
+        其余失败（如权限被拒）抛 PermissionError。"""
         code, out = self.run(["cat", str(path)])
         if code != 0:
-            raise FileNotFoundError(path)
+            if "No such file" in out:
+                raise FileNotFoundError(path)
+            raise PermissionError(f"读取 {path} 失败: {out}")
         return out
 
     def copy(self, src: Path, dest: Path) -> None:
@@ -91,16 +103,23 @@ class LinuxPlatform:
         path = self.service_unit_path(name)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(unit, encoding="utf-8")
-        _run(["systemctl", "--user", "daemon-reload"])
+        code, msg = _run(["systemctl", "--user", "daemon-reload"])
+        if code != 0:
+            raise RuntimeError(f"安装 {name} 后 systemctl daemon-reload 失败: {msg}")
 
     def enable_service(self, name: str) -> None:
-        _run(["systemctl", "--user", "enable", "--now", name])
+        code, msg = _run(["systemctl", "--user", "enable", "--now", name])
+        if code != 0:
+            raise RuntimeError(f"systemctl enable --now {name} 失败: {msg}")
 
     def restart_service(self, name: str) -> None:
-        _run(["systemctl", "--user", "restart", name])
+        code, msg = _run(["systemctl", "--user", "restart", name])
+        if code != 0:
+            raise RuntimeError(f"systemctl restart {name} 失败: {msg}")
 
     def tail_service_log(self, name: str) -> None:
-        _run(["journalctl", "--user", "-u", name, "-f"])
+        """流式跟随服务日志：继承终端 stdio（不捕获），Ctrl-C 自然传播。"""
+        subprocess.run(["journalctl", "--user", "-u", name, "-f"])
 
     def ca_trusted(self, ca: Path) -> bool:
         dest = Path("/usr/local/share/ca-certificates/devproxy-local.crt")
