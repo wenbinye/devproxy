@@ -303,7 +303,7 @@ def test_cli_never_builds_the_real_platform(env, monkeypatch, tmp_path):
     assert res.exit_code == 0, res.output
 
 
-def _fake_setup_platform(monkeypatch, tmp_path):
+def _fake_setup_platform(monkeypatch, tmp_path, patch_dns_route=True):
     """把 setup 依赖的一切换成 tmp_path 里的假东西 —— 绝不碰真实系统。"""
     from devproxy.platform.fake import FakePlatform
 
@@ -312,18 +312,21 @@ def _fake_setup_platform(monkeypatch, tmp_path):
     # 不装配任何组件：迁移本身与组件流程无关，测试只盯迁移与回滚
     monkeypatch.setattr("devproxy.cli._components", lambda *a, **k: [])
     monkeypatch.setattr("devproxy.cli.DNSMASQ_CONF", tmp_path / "dnsmasq.conf")
-    monkeypatch.setattr(
-        "devproxy.cli.default_dns_route", lambda *a, **k: tmp_path / "resolved.conf"
-    )
+    if patch_dns_route:
+        monkeypatch.setattr(
+            "devproxy.cli.default_dns_route", lambda *a, **k: tmp_path / "resolved.conf"
+        )
     return platform
 
 
-def _seed_legacy_unit(platform, tmp_path):
+def _seed_legacy_unit(platform, tmp_path, caddyfile_text=None):
     """造一套遗留环境：单元 + 旧 Caddyfile。"""
     old_cfg = tmp_path / "old" / "Caddyfile"
     old_cfg.parent.mkdir(parents=True, exist_ok=True)
     old_cfg.write_text(
-        "localhost {\n\ttls internal\n}\n\n*.test {\n\trespond 404\n}\n", encoding="utf-8"
+        caddyfile_text
+        or "localhost {\n\ttls internal\n}\n\n*.test {\n\trespond 404\n}\n",
+        encoding="utf-8",
     )
     unit = platform.service_unit_path("caddy")
     unit.parent.mkdir(parents=True, exist_ok=True)
@@ -413,3 +416,68 @@ def test_up_help_text_keeps_charset(env, monkeypatch):
     res = CliRunner().invoke(app, ["up", "--help"])
     assert res.exit_code == 0
     assert "[a-z0-9-]" in res.output
+
+
+def test_setup_backup_targets_follow_dns_backend(env, monkeypatch, tmp_path):
+    """--dns-backend system 时，备份的必须是 /etc/dnsmasq.d 那个文件。
+
+    组件写的是 dnsmasq.d，备份的却是 resolved —— 被改动的文件不在备份里，
+    回滚就删不掉它。
+    """
+    platform = _fake_setup_platform(monkeypatch, tmp_path, patch_dns_route=False)
+    _seed_legacy_unit(platform, tmp_path)
+    res = CliRunner().invoke(app, ["setup", "--yes", "--dns-backend", "system"])
+    assert res.exit_code == 0, res.output
+    manifest = json.loads(
+        (next((env / "state" / "backups").iterdir()) / "manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    originals = [e["original"] for e in manifest["entries"]]
+    assert "/etc/dnsmasq.d/devproxy.conf" in originals
+    assert "/etc/systemd/resolved.conf.d/devproxy.conf" not in originals
+
+
+def test_setup_migration_failure_still_prints_notes(env, monkeypatch, tmp_path):
+    """迁移失败时，已经收集到的提示（丢了哪些块等）必须照样打出来。"""
+    platform = _fake_setup_platform(monkeypatch, tmp_path)
+    _seed_legacy_unit(platform, tmp_path)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("写单元失败")
+
+    monkeypatch.setattr(platform, "install_service", boom)
+    res = CliRunner().invoke(app, ["setup", "--yes"])
+    assert res.exit_code == 1, res.output
+    assert "已丢弃" in res.output
+    assert "devproxy: " in res.output
+    assert "Traceback" not in res.output
+
+
+def test_setup_persists_legacy_storage_for_later_setups(env, monkeypatch, tmp_path):
+    """沿用遗留 storage 之后必须留档 —— 否则下一次 setup 会把 CA 换地方。
+
+    迁移时换了 storage 位置，Caddy 会重新生成 CA：浏览器里的信任与个人
+    站点已有的 tls internal 证书全部失效。留档之后，每次 setup 都要用
+    同一个地方。
+    """
+    platform = _fake_setup_platform(monkeypatch, tmp_path)
+    legacy_storage = tmp_path / "legacy-caddy-data"
+    _seed_legacy_unit(
+        platform,
+        tmp_path,
+        caddyfile_text=(
+            "{\n"
+            f"\tstorage file_system {legacy_storage}\n"
+            "}\n\n"
+            "localhost {\n\ttls internal\n}\n"
+        ),
+    )
+    res = CliRunner().invoke(app, ["setup", "--yes"])
+    assert res.exit_code == 0, res.output
+    saved = env / "state" / "caddy-storage.json"
+    assert saved.exists(), "沿用的 storage 必须留档，否则下次 setup 会换地方"
+    assert str(legacy_storage) in saved.read_text(encoding="utf-8")
+    # Rich 会按终端宽度折行（长路径甚至会被拆断）—— 比对前把空白全去掉
+    squashed = "".join(res.output.split())
+    assert "".join(str(legacy_storage).split()) in squashed, "storage 的差异必须对用户说出来"

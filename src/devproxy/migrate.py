@@ -10,8 +10,10 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
-from dataclasses import dataclass, field
+import tempfile
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from devproxy.backup import Backup, BackupManager, BackupRestoreError
@@ -116,6 +118,25 @@ def split_caddyfile(
     return "\n".join(personal), dropped
 
 
+def legacy_storage_path(text: str) -> Path | None:
+    """遗留 Caddyfile 全局块里的 storage 路径。
+
+    例：`storage file_system /home/u/.local/share/caddy`。
+    迁移时必须沿用它 —— storage 换了位置，Caddy 会重新生成 CA，
+    浏览器里的信任与已有站点的 tls internal 证书全部失效。
+    """
+    global_blocks, _ = _split_blocks(text)
+    for block in global_blocks:
+        for line in block.splitlines():
+            s = line.strip()
+            if not s or s.startswith("#") or not s.startswith("storage"):
+                continue
+            parts = s.split(None, 2)
+            if len(parts) >= 3 and parts[1] == "file_system":
+                return Path(parts[2].strip().strip('"')).expanduser()
+    return None
+
+
 # -- 单元解析 -----------------------------------------------------------------
 
 
@@ -186,6 +207,67 @@ def detect_legacy(
     )
 
 
+# -- storage 连续性：CA 不能换地方 -------------------------------------------
+
+
+def _legacy_storage(state: LegacyState) -> Path | None:
+    """旧 Caddyfile 全局块里声明的 storage 路径（读不到时返回 None）。"""
+    if not state.config_path.exists():
+        return None
+    try:
+        text = state.config_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    return legacy_storage_path(text)
+
+
+def resolve_storage(
+    config: Config, state: LegacyState
+) -> tuple[Config, str | None]:
+    """沿用遗留 Caddyfile 的 storage 路径。
+
+    返回 (生效的配置, 提示语)。没有差异时配置原样返回、提示为 None。
+    差异必须说出来 —— 悄悄换掉 storage 等于让 Caddy 重新生成 CA，
+    浏览器里的信任与个人站点已有的 tls internal 证书全部失效。
+    """
+    legacy = _legacy_storage(state)
+    if legacy is None or legacy == config.storage_path:
+        return config, None
+    note = (
+        f"已沿用遗留 Caddyfile 的 storage 路径 {legacy}"
+        f"（当前配置是 {config.storage_path}）：换了位置 Caddy 会重新生成 CA，"
+        f"浏览器信任与已有站点证书都会失效"
+    )
+    return replace(config, storage=str(legacy)), note
+
+
+def save_legacy_storage(paths: Paths, storage: Path | None) -> None:
+    """留档生效的 storage 路径 —— 之后的 setup 必须用同一个地方。"""
+    path = paths.caddy_storage
+    if storage is None:
+        path.unlink(missing_ok=True)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"storage": str(storage)}, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def load_legacy_storage(paths: Paths) -> Path | None:
+    """读回留档的 storage 路径（读不到或损坏时返回 None）。"""
+    try:
+        data = json.loads(paths.caddy_storage.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    value = data.get("storage")
+    if not isinstance(value, str) or not value:
+        return None
+    return Path(value).expanduser()
+
+
 # -- 备份辅助：/etc 下的文件普通用户读不到 -------------------------------------
 
 
@@ -231,15 +313,23 @@ def _make_restorer(platform: Platform):
 # -- 迁移 ---------------------------------------------------------------------
 
 
-def default_dns_route(platform: Platform, paths: Paths, config: Config) -> Path:
+def default_dns_route(
+    platform: Platform, paths: Paths, config: Config, backend: str | None = None
+) -> Path:
     """本次迁移要备份的 DNS 路由文件（/etc 下的 drop-in）。
 
     与 DnsComponent 写的是同一个文件 —— 迁移后的 setup 会改写它，
     所以必须在迁移前备份。
+
+    backend 必须与组件流程实际使用的后端一致：用户显式指定
+    `--dns-backend system` 时，组件写的是 /etc/dnsmasq.d/devproxy.conf，
+    备份的却是 resolved 那个文件 —— 被改动的文件不在备份里，回滚删不掉。
     """
     from devproxy.components.dns import DnsComponent
 
-    comp = DnsComponent(platform, paths, config, backend=config.dns_backend)
+    comp = DnsComponent(
+        platform, paths, config, backend=backend or config.dns_backend
+    )
     return comp.target_path
 
 
@@ -270,8 +360,11 @@ def _write_sites_caddy(
     legacy = state.config_path.read_text(encoding="utf-8")
     personal, dropped = split_caddyfile(legacy, suffix=config.domain_suffix)
     if dropped:
+        addresses = [a for a in (_block_address(b) for b in dropped) if a]
         notes.append(
-            f"已丢弃 {len(dropped)} 个由工具接管的 .{config.domain_suffix} 站点块"
+            f"已丢弃 {len(dropped)} 个 .{config.domain_suffix} 站点块"
+            f"（由工具接管）：{', '.join(addresses)}；"
+            f"旧 Caddyfile 未被改动且已完整备份，需要可从备份里取回"
         )
     if not personal.strip():
         return
@@ -288,18 +381,48 @@ def _write_sites_caddy(
     paths.sites_caddy.write_text(personal, encoding="utf-8")
 
 
-def _write_main_caddyfile(paths: Paths, config: Config) -> None:
-    """生成工具自己的主 Caddyfile（全局块 + 两个 import）。"""
+def _main_caddyfile_content(paths: Paths, config: Config) -> str:
+    """工具自己的主 Caddyfile（全局块 + 两个 import）。"""
     from devproxy.proxy.caddy import build_main_caddyfile
 
-    content = build_main_caddyfile(
+    return build_main_caddyfile(
         admin_addr=config.admin_addr,
         storage=config.storage_path,
         routes_caddy=paths.routes_caddy,
         sites_caddy=paths.sites_caddy,
     )
+
+
+def _write_main_caddyfile(paths: Paths, config: Config) -> None:
     paths.caddyfile.parent.mkdir(parents=True, exist_ok=True)
-    paths.caddyfile.write_text(content, encoding="utf-8")
+    paths.caddyfile.write_text(_main_caddyfile_content(paths, config), encoding="utf-8")
+
+
+def _validate_caddyfile(
+    platform: Platform, paths: Paths, config: Config, notes: list[str]
+) -> None:
+    """换单元之前先让 caddy 验一遍配置。
+
+    个人站点块是从用户自己的 Caddyfile 原样搬过来的 —— 语法冲突、重复站点
+    都可能让 Caddy 起不来。校验不通过就不能换单元：否则服务起不来，
+    用户连"是哪一行的错"都看不到。
+    """
+    binary = config.caddy_bin_path
+    if not binary.exists():
+        notes.append("caddy 二进制不存在，跳过配置校验（setup 下载后仍会校验）")
+        return
+    fd, tmp_name = tempfile.mkstemp(prefix="devproxy-validate-", suffix=".Caddyfile")
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(_main_caddyfile_content(paths, config))
+        code, msg = platform.run([str(binary), "validate", "--config", str(tmp)])
+    finally:
+        tmp.unlink(missing_ok=True)
+    if code != 0:
+        raise MigrationError(
+            f"caddy 配置校验未通过，迁移已中止（单元未改动）：{msg or '校验失败'}"
+        )
 
 
 def _save_extra_env(paths: Paths, env: dict[str, str]) -> None:
@@ -375,6 +498,7 @@ def migrate(
     *,
     dnsmasq_conf: Path | None = None,
     dns_route: Path | None = None,
+    backend: str | None = None,
     notes: list[str] | None = None,
 ) -> Backup:
     """执行迁移。返回备份对象，调用方可据此回滚。
@@ -387,8 +511,13 @@ def migrate(
     route = (
         dns_route
         if dns_route is not None
-        else default_dns_route(platform, paths, config)
+        else default_dns_route(platform, paths, config, backend)
     )
+    # storage 连续性：沿用遗留 Caddyfile 的 storage —— CA 不能换地方
+    legacy = _legacy_storage(state)
+    config, storage_note = resolve_storage(config, state)
+    if storage_note:
+        notes.append(storage_note)
     targets = [
         state.unit_path,  # 会被改写
         state.config_path,  # 旧 Caddyfile —— 留存副本，回滚要用
@@ -397,12 +526,22 @@ def migrate(
         conf,  # 用户的 dnsmasq 配置（后续 setup 会合并改写）
         platform.service_unit_path("dnsmasq"),  # 后续 setup 会重装这个单元
         route,  # /etc 下的 DNS 路由 drop-in
+        paths.caddy_env,  # 迁移留下的单元环境变量留档
+        paths.caddy_storage,  # 迁移留下的 storage 留档
     ]
     backup = _create_backup(platform, paths, targets)
     try:
+        # 主 Caddyfile 会 import 这两个文件 —— 校验之前必须先在，
+        # 否则 caddy 只会报 "file not found"，迁移被自己的校验拦死。
+        paths.ensure_files()
         _write_sites_caddy(paths, state, config, notes)
+        _validate_caddyfile(platform, paths, config, notes)
         _write_main_caddyfile(paths, config)
         _install_caddy_unit(platform, paths, config, state)
+        # 生效的 storage 就是遗留的 storage 时必须留档：之后的 setup
+        # 换了位置，Caddy 会重新生成 CA。
+        if legacy is not None and legacy == config.storage_path:
+            save_legacy_storage(paths, legacy)
     except Exception as exc:
         _restore_after_failure(platform, backup, exc)
     _restart_caddy(platform, notes)
@@ -431,18 +570,22 @@ def _restore_after_failure(
     platform: Platform, backup: Backup, exc: Exception
 ) -> None:
     """改写失败 → 按备份还原，绝不把机器留在半迁移状态。"""
+    hint = (
+        f"备份目录：{backup.directory}"
+        f"（可手动还原：devproxy setup --rollback {backup.directory}）"
+    )
     try:
         backup.restorer = _make_restorer(platform)
         backup.restore()
     except BackupRestoreError as restore_exc:
         raise MigrationError(
-            f"迁移失败且还原不完整：{exc}；还原失败：{restore_exc}"
+            f"迁移失败且还原不完整：{exc}；还原失败：{restore_exc}；{hint}"
         ) from exc
     except OSError as restore_exc:
         raise MigrationError(
-            f"迁移失败且还原失败：{exc}；还原失败：{restore_exc}"
+            f"迁移失败且还原失败：{exc}；还原失败：{restore_exc}；{hint}"
         ) from exc
-    raise MigrationError(f"迁移失败，已按备份还原：{exc}") from exc
+    raise MigrationError(f"迁移失败，已按备份还原：{exc}；{hint}") from exc
 
 
 def rollback(backup: Backup, *, platform: Platform | None = None) -> list[Path]:

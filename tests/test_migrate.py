@@ -13,8 +13,11 @@ from devproxy.config import Config
 from devproxy.migrate import (
     LegacyState,
     MigrationError,
+    default_dns_route,
     detect_legacy,
+    legacy_storage_path,
     migrate,
+    resolve_storage,
     rollback,
     split_caddyfile,
     unit_config_path,
@@ -49,7 +52,7 @@ def _legacy_state(tmp_path, unit_text=None, caddyfile_text=None):
     return LegacyState(unit_path=unit_path, config_path=old_cfg, env={"MINIKUBE_IP": "1.2.3.4"})
 
 
-def _migrate(platform, paths, config, state, tmp_path):
+def _migrate(platform, paths, config, state, tmp_path, notes=None):
     """迁移，但把 dnsmasq 配置与 DNS 路由文件指向 tmp_path（绝不碰真实系统）。"""
     return migrate(
         platform,
@@ -58,6 +61,7 @@ def _migrate(platform, paths, config, state, tmp_path):
         state,
         dnsmasq_conf=tmp_path / "dnsmasq.conf",
         dns_route=tmp_path / "resolved.conf",
+        notes=notes,
     )
 
 
@@ -454,3 +458,234 @@ def test_rollback_from_loaded_backup(tmp_path):
     state.unit_path.write_text("CLOBBERED\n")
     rollback(loaded)
     assert "ExecStart" in state.unit_path.read_text(encoding="utf-8")
+
+
+# -- DNS 后端一致性（备份的必须是真正会被改动的那个文件）--------------------
+
+
+def test_default_dns_route_follows_explicit_backend(tmp_path):
+    """用户显式指定后端时，备份的 drop-in 必须跟着换。
+
+    组件写 /etc/dnsmasq.d/devproxy.conf，备份的却是 resolved 那个文件 ——
+    被改动的文件不在备份里，回滚就删不掉它。
+    """
+    paths = _paths(tmp_path)
+    platform = FakePlatform()
+    config = Config()
+    system = default_dns_route(platform, paths, config, "system")
+    resolved = default_dns_route(platform, paths, config, "resolved")
+    assert system.as_posix().endswith("/etc/dnsmasq.d/devproxy.conf")
+    assert resolved.as_posix().endswith("/etc/systemd/resolved.conf.d/devproxy.conf")
+    assert system != resolved
+
+
+# -- 配置校验：换单元之前必须让 caddy 自己验一遍 ------------------------------
+
+
+def test_migrate_aborts_when_caddy_validate_fails(tmp_path, monkeypatch):
+    """个人站点里有语法错误时，迁移必须中止 —— 单元一个字都不能改。"""
+    paths = _paths(tmp_path)
+    paths.ensure_files()
+    platform = FakePlatform()
+    state = _legacy_state(tmp_path)
+    original_unit = state.unit_path.read_text(encoding="utf-8")
+
+    # 造一个"存在但校验不过"的 caddy 二进制
+    binary = tmp_path / "caddy"
+    binary.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    config = Config(caddy_bin=str(binary))
+
+    def fake_run(argv):
+        if "validate" in argv:
+            return 1, "Caddyfile:3 - Error during parsing: unexpected token"
+        return 0, ""
+
+    monkeypatch.setattr(platform, "run", fake_run)
+
+    with pytest.raises(MigrationError) as ei:
+        migrate(
+            platform,
+            paths,
+            config,
+            state,
+            dnsmasq_conf=tmp_path / "dnsmasq.conf",
+            dns_route=tmp_path / "resolved.conf",
+        )
+    assert "校验" in str(ei.value)
+    assert state.unit_path.read_text(encoding="utf-8") == original_unit
+    assert not paths.caddyfile.exists(), "校验不过就不该写主 Caddyfile"
+    assert paths.sites_caddy.read_text(encoding="utf-8").strip() == "", "sites.caddy 必须被还原"
+
+
+def test_migrate_skips_validation_when_binary_missing(tmp_path):
+    """二进制还没下载时不能因此判定迁移失败 —— setup 会下载后再校验。"""
+    paths = _paths(tmp_path)
+    paths.ensure_files()
+    platform = FakePlatform()
+    state = _legacy_state(tmp_path)
+    notes: list[str] = []
+    config = Config(caddy_bin=str(tmp_path / "absent"))
+    migrate(
+        platform,
+        paths,
+        config,
+        state,
+        dnsmasq_conf=tmp_path / "dnsmasq.conf",
+        dns_route=tmp_path / "resolved.conf",
+        notes=notes,
+    )
+    assert any("跳过配置校验" in n for n in notes)
+    assert paths.caddyfile.exists()
+
+
+# -- storage 连续性：CA 不能换地方 -------------------------------------------
+
+
+def test_legacy_storage_path_parsed():
+    legacy = "{\n\tstorage file_system /home/u/.local/share/caddy\n}\n\nlocalhost {\n}\n"
+    assert legacy_storage_path(legacy) == Path("/home/u/.local/share/caddy")
+
+
+def test_legacy_storage_path_none_without_global_block():
+    assert legacy_storage_path("localhost {\n}\n") is None
+
+
+def test_migrate_keeps_legacy_storage_so_ca_stays(tmp_path):
+    """遗留 storage 与配置不同时必须沿用遗留的 —— 换了 CA 浏览器就不信任了。"""
+    paths = _paths(tmp_path)
+    paths.ensure_files()
+    platform = FakePlatform()
+    legacy_storage = tmp_path / "legacy-caddy-data"
+    state = _legacy_state(
+        tmp_path,
+        caddyfile_text=(
+            "{\n"
+            f"\tstorage file_system {legacy_storage}\n"
+            "}\n\n"
+            "localhost {\n\ttls internal\n}\n"
+        ),
+    )
+    notes: list[str] = []
+    migrate(
+        platform,
+        paths,
+        Config(storage=str(tmp_path / "config-caddy-data")),
+        state,
+        dnsmasq_conf=tmp_path / "dnsmasq.conf",
+        dns_route=tmp_path / "resolved.conf",
+        notes=notes,
+    )
+    caddyfile = paths.caddyfile.read_text(encoding="utf-8")
+    assert f"storage file_system {legacy_storage}" in caddyfile
+    assert any("storage" in n and str(legacy_storage) in n for n in notes), "差异必须说出来"
+    # 留档：之后的 setup 必须用同一个地方，否则 CA 会重新生成
+    assert str(legacy_storage) in paths.caddy_storage.read_text(encoding="utf-8")
+
+
+def test_resolve_storage_keeps_config_when_same(tmp_path):
+    paths = _paths(tmp_path)
+    state = _legacy_state(
+        tmp_path,
+        caddyfile_text="{\n\tstorage file_system /same\n}\n\nlocalhost {\n}\n",
+    )
+    config = Config(storage="/same")
+    same, note = resolve_storage(config, state)
+    assert note is None
+    assert same.storage_path == config.storage_path
+
+
+# -- 失败路径要给出备份位置（I5）--------------------------------------------
+
+
+def test_failure_message_points_at_backup_dir(tmp_path, monkeypatch):
+    """还原失败时用户最需要知道的是：备份在哪、怎么手动还原。"""
+    paths = _paths(tmp_path)
+    paths.ensure_files()
+    platform = FakePlatform()
+    state = _legacy_state(tmp_path)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("写单元失败")
+
+    monkeypatch.setattr(platform, "install_service", boom)
+    with pytest.raises(MigrationError) as ei:
+        _migrate(platform, paths, Config(), state, tmp_path)
+    message = str(ei.value)
+    assert "backups" in message, message
+    assert "devproxy setup --rollback" in message, message
+
+
+# -- 备份目标与丢弃提示 -------------------------------------------------------
+
+
+def test_backup_covers_caddy_env_and_storage(tmp_path):
+    """迁移留下的留档（环境变量、storage）也必须进备份 —— 否则回滚后还在。"""
+    paths = _paths(tmp_path)
+    paths.ensure_files()
+    platform = FakePlatform()
+    state = _legacy_state(tmp_path)
+    backup = _migrate(platform, paths, Config(), state, tmp_path)
+    originals = {e.original for e in backup.entries}
+    assert paths.caddy_env in originals
+    assert paths.caddy_storage in originals
+
+
+def test_dropped_blocks_note_lists_addresses(tmp_path):
+    """丢弃哪些块必须点名 —— 用户得能看出里面有没有自己手写的 *.test 块。"""
+    paths = _paths(tmp_path)
+    paths.ensure_files()
+    platform = FakePlatform()
+    state = _legacy_state(
+        tmp_path,
+        caddyfile_text=(
+            "localhost {\n\ttls internal\n}\n\n"
+            "*.test {\n\trespond 404\n}\n\n"
+            "http://*.test {\n\tredir https://{host}{uri} permanent\n}\n"
+        ),
+    )
+    notes: list[str] = []
+    _migrate(platform, paths, Config(), state, tmp_path, notes=notes)
+    dropped_notes = [n for n in notes if "丢弃" in n]
+    assert dropped_notes, notes
+    assert "*.test" in dropped_notes[0]
+    assert "http://*.test" in dropped_notes[0]
+    assert "备份" in dropped_notes[0]
+
+
+def test_migrate_creates_import_targets_before_validation(tmp_path, monkeypatch):
+    """校验之前 import 目标必须已经存在 —— caddy 遇到缺失的 import 会直接拒绝。
+
+    迁移是 API，不能假设调用方已经建好 sites.caddy / routes.caddy：
+    校验用的主 Caddyfile 里就 import 这两个文件，缺一个 caddy 必然报
+    "file not found"，迁移会被自己的校验拦死。
+    """
+    paths = _paths(tmp_path)  # 故意不 ensure_files()
+    platform = FakePlatform()
+    state = _legacy_state(tmp_path)
+    binary = tmp_path / "caddy"
+    binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    config = Config(caddy_bin=str(binary))
+    seen: dict[str, list[str]] = {}
+
+    def fake_run(argv):
+        if "validate" in argv:
+            text = Path(argv[-1]).read_text(encoding="utf-8")
+            targets = [
+                line.split(None, 1)[1].strip()
+                for line in text.splitlines()
+                if line.strip().startswith("import ")
+            ]
+            seen["missing"] = [t for t in targets if not Path(t).exists()]
+            return (1, "import 目标不存在") if seen["missing"] else (0, "")
+        return 0, ""
+
+    monkeypatch.setattr(platform, "run", fake_run)
+    migrate(
+        platform,
+        paths,
+        config,
+        state,
+        dnsmasq_conf=tmp_path / "dnsmasq.conf",
+        dns_route=tmp_path / "resolved.conf",
+    )
+    assert seen.get("missing") == [], "校验时 import 目标必须已经存在"

@@ -52,6 +52,15 @@ class Paths:
         return self.state_dir / "caddy-env.json"
 
     @property
+    def caddy_storage(self) -> Path:
+        """迁移时生效的 Caddy storage 路径（CA 所在目录）。
+
+        沿用遗留环境的 storage 之后必须留档：之后的 setup 若换回配置里的
+        路径，Caddy 会重新生成 CA，浏览器信任与已有证书全部失效。
+        """
+        return self.state_dir / "caddy-storage.json"
+
+    @property
     def log_dir(self) -> Path:
         return self.state_dir / "logs"
 

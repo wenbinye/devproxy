@@ -30,7 +30,9 @@ from devproxy.migrate import (
     MigrationError,
     default_dns_route,
     detect_legacy,
+    load_legacy_storage,
     migrate,
+    resolve_storage,
     rollback as do_rollback,
 )
 from devproxy.paths import Paths, default_paths
@@ -105,6 +107,11 @@ def build_context(
     paths = paths or default_paths()
     config = config or load_config(paths.config_toml)
     paths.ensure_files()
+    # 迁移时沿用了遗留 Caddyfile 的 storage（CA 还在那儿）—— 别换回去，
+    # 换了 Caddy 会重新生成 CA，浏览器信任与已有证书全部失效。
+    storage = load_legacy_storage(paths)
+    if storage is not None:
+        config = replace(config, storage=str(storage))
     caddy = CaddyConfig(
         caddy_bin=config.caddy_bin_path,
         caddyfile=paths.caddyfile,
@@ -362,7 +369,22 @@ def _interactive() -> bool:
     return sys.stdin.isatty()
 
 
-def _migrate_legacy(platform, paths, config, state: LegacyState, *, yes: bool) -> None:
+def _print_notes(notes: list[str]) -> None:
+    """把迁移过程中的提示逐条打出来。"""
+    for note in notes:
+        console.print(f"  · {note}")
+
+
+def _migrate_legacy(
+    platform,
+    paths,
+    config,
+    state: LegacyState,
+    *,
+    yes: bool,
+    backend: str | None = None,
+    notes: list[str] | None = None,
+) -> None:
     """把遗留的 caddy 服务迁到本工具管理之下。
 
     迁移会改写用户的单元与 Caddyfile —— 非交互环境必须显式 --yes。
@@ -379,7 +401,7 @@ def _migrate_legacy(platform, paths, config, state: LegacyState, *, yes: bool) -
         if not typer.confirm("即将迁移上述遗留环境（会改写单元与 Caddyfile），继续？", default=True):
             console.print("已取消。")
             raise typer.Exit(EXIT_OK)
-    notes: list[str] = []
+    collected = list(notes or [])
     try:
         backup = migrate(
             platform,
@@ -387,13 +409,15 @@ def _migrate_legacy(platform, paths, config, state: LegacyState, *, yes: bool) -
             config,
             state,
             dnsmasq_conf=DNSMASQ_CONF.expanduser(),
-            dns_route=default_dns_route(platform, paths, config),
-            notes=notes,
+            dns_route=default_dns_route(platform, paths, config, backend),
+            backend=backend,
+            notes=collected,
         )
     except MigrationError as e:
+        # 失败路径也要把提示打出来：用户得知道丢了哪些块、sites.caddy 有没有被覆盖
+        _print_notes(collected)
         fail(str(e), EXIT_FAIL)
-    for note in notes:
-        console.print(f"  · {note}")
+    _print_notes(collected)
     console.print(f"已备份到: {backup.directory}")
     console.print(f"回滚命令: devproxy setup --rollback {backup.directory}")
 
@@ -453,10 +477,19 @@ def setup(
             fail(str(e), EXIT_USAGE)
 
     platform = _platform()
-    # 迁移必须先于组件流程：组件会读迁移留下的状态（如单元环境变量）
+    # 迁移必须先于组件流程：组件会读迁移留下的状态（单元环境变量、storage）
     state = detect_legacy(platform, paths)
     if state is not None:
-        _migrate_legacy(platform, paths, config, state, yes=yes)
+        config, storage_note = resolve_storage(config, state)
+        _migrate_legacy(
+            platform,
+            paths,
+            config,
+            state,
+            yes=yes,
+            backend=backend,
+            notes=[storage_note] if storage_note else [],
+        )
 
     components = _components(paths, config, backend, platform)
     if no_trust:
