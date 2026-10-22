@@ -1,3 +1,8 @@
+# ⚠️ 迁移前的手工配置。**在 devproxy 的迁移真正跑过之前，现役的 caddy.service
+#    仍指向这份配置**（仓库根目录的 Caddyfile），改动它仍会影响现网。
+#    迁移完成（devproxy setup 检测到遗留 caddy 服务、备份并改写单元）之后，
+#    生效的配置变成 ~/.config/devproxy/Caddyfile，这份文件不再被读取。
+#
 # 本地开发服务器配置
 # 数据与证书默认存放在 ~/.local/share/caddy（纯用户目录，无需 root 运行）
 # 绑定 80/443 低位端口依赖一次性授权：

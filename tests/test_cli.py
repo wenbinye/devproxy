@@ -538,3 +538,43 @@ def test_cli_setup_reports_the_storage_override(env, monkeypatch, tmp_path):
     assert res.exit_code == 0, res.output
     assert "/tmp/from-legacy" in res.output
     assert "/tmp/from-config-toml" in res.output
+
+
+# ------------------------------------- setup 结束提示里的示例命令
+
+
+def test_setup_example_command_actually_uses_port():
+    """setup 结束时的示例命令必须真的用上 $PORT。
+
+    `python3 -m http.server` 不读 PORT（永远绑 8000）：照抄示例的用户会
+    等满 60 秒后看到「就绪超时」。示例必须是跑得通的那种写法。
+    """
+    from devproxy.cli import UP_EXAMPLE
+
+    assert "sh -c" in UP_EXAMPLE, "示例必须用 sh -c 把 $PORT 推迟展开"
+    assert "$PORT" in UP_EXAMPLE, "示例必须真的把 PORT 交给应用"
+
+
+def test_setup_prints_the_working_example(env, monkeypatch):
+    """终端上打出来的示例必须是同一个能跑通的写法。"""
+    from devproxy.cli import UP_EXAMPLE
+    from devproxy.platform.base import Action, Status
+    from devproxy.setup import ComponentReport, SetupPlan
+
+    report = ComponentReport(
+        name="caddy",
+        status=Status(ok=True, detail="已就绪"),
+        actions=[Action(description="noop", kind="run", command=["noop"])],
+    )
+    monkeypatch.setattr("devproxy.cli._components", lambda *a, **k: [])
+    monkeypatch.setattr(
+        "devproxy.cli.build_plan", lambda comps: SetupPlan(reports=[report])
+    )
+    monkeypatch.setattr(
+        "devproxy.cli.apply_plan",
+        lambda plan: [("caddy", Status(ok=True, detail="已就绪"))],
+    )
+    res = CliRunner().invoke(app, ["setup", "--yes"])
+    assert res.exit_code == 0, res.output
+    assert UP_EXAMPLE in res.output
+    assert "$PORT" in res.output

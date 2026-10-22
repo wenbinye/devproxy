@@ -51,15 +51,22 @@
 
 ## 安装
 
-```bash
-uv tool install devproxy
-```
-
-本地开发（从源码装成可编辑）：
+**当前项目尚未发布到 PyPI**，只能从源码安装：
 
 ```bash
+git clone <仓库地址>
+cd <仓库地址>
 uv tool install -e .
 ```
+
+或者用 pipx：
+
+```bash
+pipx install .
+```
+
+发布到 PyPI 之后，`uv tool install devproxy` 才可用 —— 在那之前这条命令会失败
+（PyPI 上没有这个包，且这个名字将来可能与别的包冲突）。
 
 依赖：Python ≥ 3.11，运行时依赖只有 `typer` 与 `rich`。
 
@@ -71,7 +78,7 @@ uv tool install -e .
 
 ```bash
 devproxy setup     # 部署 Caddy + dnsmasq + DNS 路由 + 服务自启（幂等，可重复执行）
-devproxy doctor    # 体检：缺什么给什么修复命令
+devproxy doctor    # 体检（静态检查，不做 DNS 解析）：缺什么给什么修复命令
 ```
 
 `setup` 之后：
@@ -88,12 +95,14 @@ devproxy down codeup        # 注销路由（子进程也一并收掉）
 devproxy logs caddy         # 跟随日志（Ctrl-C 退出，不会自己结束）
 ```
 
-### CA 根证书是在第一次 `up` 之后才存在的
+### CA 根证书是在第一条路由注册之后才存在的
 
-Caddy 的内部 CA **在第一次加载 `tls internal` 站点时**才生成。所以在一台干净的机器上：
+Caddy 的内部 CA **在第一次加载 `tls internal` 站点时**才生成 —— 也就是**第一条路由被注册时**
+（`devproxy up` 或 `devproxy expose` 都算）。所以在一台干净的机器上：
 
 1. `devproxy setup` 成功，但此时系统里**还没有 CA 根证书**（`setup` 结束时会把这条提示打出来）；
-2. 第一次 `devproxy up <name> -- ...` 之后，Caddy 才生成 CA；
+2. 第一次注册路由（`devproxy up <name> -- ...` 或 `devproxy expose <name> --port N`）之后，
+   Caddy 才生成 CA；
 3. **这时还需要跑一次 `devproxy trust`**，curl / Chrome 才会信任它。
 
 `devproxy doctor` 在 CA 尚未生成时显示「尚无 CA 根证书（将在首条路由注册时由 Caddy 生成）」，
@@ -107,7 +116,7 @@ Caddy 的内部 CA **在第一次加载 `tls internal` 站点时**才生成。�
 |---|---|
 | `devproxy setup` | 部署本地开发环境（幂等，可重复执行） |
 | `devproxy setup --rollback <备份目录>` | 按备份目录回滚（见「迁移与回滚」） |
-| `devproxy doctor` | 体检所有前置条件，缺什么给什么修复命令 |
+| `devproxy doctor` | 体检所有前置条件（静态检查：文件在位、服务在跑、证书已装、单元指向本工具），缺什么给什么修复命令 |
 | `devproxy up <name> [--port N] [--ready-timeout S] -- CMD...` | 分配端口、启动命令、注册 `https://<name>.test` |
 | `devproxy expose <name> --port N` | 给已在运行的服务开域名，注册后立即返回，路由常驻（上游暂时无响应时只告警，路由照样注册） |
 | `devproxy down <name>` | 注销路由；若该路由的子进程还在，一并收掉 |
@@ -142,6 +151,10 @@ Caddy 的内部 CA **在第一次加载 `tls internal` 站点时**才生成。�
 
 注意两个特例：`up` 缺少 `--` 或 `--` 后没有命令，按「运行失败」退出 **1**；
 `up` 的退出码在命令正常结束时**就是子进程的退出码**。
+
+还有一处不对称容易踩：同一个非法值，写在 `config.toml` 里与用命令行传，退出码不同 ——
+写在 `config.toml` 里属于**配置错误**（退出码 **1**），用 `--domain-suffix` /
+`--dns-backend` 传属于**参数错误**（退出码 **2**）。
 
 ---
 
@@ -217,7 +230,21 @@ dnsmasq 的配置是**增量合并**的：你的 `~/.config/dnsmasq/dnsmasq.conf
 `listen-address=127.0.0.1`、`bind-interfaces`、`no-resolv` 与缺失的全局上游存在。
 它**只监听回环地址**，不会在局域网里变成一个开放递归解析器。
 
-`devproxy doctor` 会真的解析一次 `foo.<后缀>`，确认系统解析器确实把它指向本机。
+### `doctor` 与 `setup` 各查什么
+
+- **`devproxy doctor` 只做静态检查**：DNS 路由文件在不在、服务在不在跑、CA 在不在、
+  单元是否指向本工具的 Caddyfile 与二进制。**它不做 DNS 解析** —— 不发起任何
+  `resolvectl` / `dig` 查询。
+- **「解析是否真的生效」由 `setup` 的自检阶段负责**：`setup` 执行完变更后会做 verify，
+  真的解析一次 `foo.<后缀>` 并确认结果指向本机。注意这只发生在 **setup 确实做了变更**的时候；
+  `setup` 走「所有组件已就绪」的 no-op 分支时，这次自检**不会**发生。
+
+要立刻确认解析是否生效，可以自己查一次：
+
+```bash
+resolvectl query foo.test          # Linux
+dscacheutil -q host -a name foo.test   # macOS
+```
 
 ### 证书：精确站点块，不是通配符
 
@@ -310,7 +337,8 @@ devproxy config
 ### storage 留档：为什么改了 `config.toml` 的 storage 也不生效
 
 迁移遗留环境时，devproxy 会把**遗留 Caddyfile 里声明的 storage 路径**（CA 所在目录）
-留档到 `~/.local/state/devproxy/caddy-storage.json`，并在之后的每次 setup 里继续沿用它。
+留档到 `~/.local/state/devproxy/caddy-storage.json`，并在**之后的每一条命令**里继续沿用它
+（storage 留档在每次构建运行时上下文时都会被读到 —— `setup`、`up`、`ls`、`config` 都一样）。
 换了 storage 位置，Caddy 会重新生成 CA，浏览器里的信任与个人站点已有的 `tls internal`
 证书全部失效。
 
@@ -418,8 +446,9 @@ http `14480`，独立 storage 与独立配置目录），完整跑一遍注册 �
   Linux 上若报缺 `certutil`，先 `sudo apt install libnss3-tools`。
 - **`doctor` 说「caddy 版本不符」**：setup 会替换为固定版本，重跑 `devproxy setup`。
 - **改了 `config.toml` 的 `storage` 却没生效**：看上面「storage 留档」一节。
-- **域名解析到别的 IP**：`devproxy doctor` 会检查系统解析器；Linux 上必要时
-  `sudo systemctl restart systemd-resolved`。
+- **域名解析到别的 IP**：`doctor` 不查解析（它只做静态检查），自己查一次
+  `resolvectl query <name>.test`（macOS 用 `dscacheutil -q host -a name <name>.test`）；
+  确认路由文件在位之后，Linux 上必要时 `sudo systemctl restart systemd-resolved`。
 - **`devproxy logs caddy` 打印了一堆东西但没有退出**：这是预期行为 —— 它是流式跟随，
   Ctrl-C 退出。
 - **路由残留**（devproxy 被 `kill -9`）：`devproxy ls` 会把不可达的路由标出来，
@@ -434,6 +463,8 @@ http `14480`，独立 storage 与独立配置目录），完整跑一遍注册 �
 
 ## 仓库里的历史文件
 
-仓库根目录的 `Caddyfile` 是**迁移前**的手工配置，仅作历史参考保留，**当前不生效**；
-实际生效的是 `~/.config/devproxy/Caddyfile`。根目录的 `devp` 脚本与 `Justfile`
-同理（`Justfile` 现在只是转发到 `devproxy` 的兼容壳）。
+仓库根目录的 `Caddyfile` 是**迁移前**的手工配置。**在 `devproxy setup` 的迁移真正跑过之前，
+现役的 `caddy.service` 仍然指向它**（迁移会先备份它、再把单元改指向
+`~/.config/devproxy/Caddyfile`）；迁移完成后它才只剩历史参考价值。
+
+根目录的 `devp` 脚本与 `Justfile` 同理（`Justfile` 现在只是转发到 `devproxy` 的兼容壳）。

@@ -216,7 +216,11 @@
 - 检查：
   1. 造一个遗留环境：`~/.config/systemd/user/caddy.service` 指向另一个 Caddyfile，
      `ExecStart` 里带 `Environment=MINIKUBE_IP=1.2.3.4`；
-  2. 把该单元改成 `chmod 000`（普通用户与 `sudo` 都被拒的极端情形用 `chmod 000` + 无 sudo 缓存模拟）；
+  2. 把该单元改成普通用户读不到的状态（`chmod 000`）。
+     **注意：root 能绕过权限位** —— 只要 `sudo` 可用，提权读取照样成功，
+     这条「连提权都读不到」的分支在有正常 sudo 的 Linux 上**基本不可达**；
+     要真正走到它，得制造「提权不可用」的环境（无可用 sudo 凭据 / sudo 被拒）。
+     否则本项只能验证「提权回退生效」这一半（普通用户读不到 → 提权读到 → 仍识别出遗留环境）；
   3. 跑 `devproxy setup`，看它是否报告「检测到遗留的 caddy 服务」。
 - 预期：**要么**正确检测到遗留环境并给出备份与回滚提示，**要么**明确提示
   「遗留单元读不到，无法确认是否有遗留环境」而不是静默接管。
@@ -256,8 +260,10 @@
 
 ### D5. `curl` 对真实的 `https://<name>.test`
 
-- 检查：先 `devproxy up demo -- python3 -m http.server`，
+- 检查：先 `devproxy up demo -- sh -c 'python3 -m http.server $PORT'`，
   再 `curl -v https://demo.test`；再 `curl -v https://not-registered.test`。
+  （`python3 -m http.server` **不读 `$PORT`** —— 它只认命令行上的端口参数，
+  不加 `sh -c` 就永远绑在 8000 上，`up` 会等满就绪超时、什么路由都注册不了。）
 - 预期：已注册域名握手成功、证书由 devproxy 的 CA 签发；
   **未注册域名握手失败**（拿不到任何证书），这正是安全属性的体现。
 

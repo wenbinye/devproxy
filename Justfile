@@ -6,9 +6,11 @@
 #   just setup   →  devproxy setup
 #   just doctor  →  devproxy doctor
 #
-# 注意：`devproxy up` 依赖 `--` 分隔符把启动命令原样交给子进程，
-# 经由 just 转发会丢掉引号与分隔符语义，因此本文件不提供 `up` 目标 ——
-# 请直接执行 `devproxy up <name> -- CMD...`。
+# 注意：本文件不提供 `up` 目标。just 的 variadic `{{args}}` 确实会把 `--`
+# 原样带过去，但**引号在转发时会被丢掉**（'sh -c "…"' 被拆成一个个独立的词，
+# 交给子进程时语义已经变了）；而定长 recipe 遇到 `--` 会被 just 当成目标名
+# 直接报错（Justfile does not contain recipe '--'）。两种做法都会改变
+# `devproxy up` 的语义，因此请直接执行 `devproxy up <name> -- CMD...`。
 
 # 默认：显示 devproxy 的帮助
 default:

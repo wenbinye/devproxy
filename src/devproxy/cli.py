@@ -59,9 +59,15 @@ EXIT_PRECONDITION = 3
 EXIT_SUDO = 4
 
 TRUST_HINT = (
-    "提示：首次 devproxy up 会生成 CA，之后请运行 devproxy trust "
+    "提示：首次注册路由（devproxy up / expose）会生成 CA，之后请运行 devproxy trust "
     "让 curl/Chrome 信任。"
 )
+
+# setup 结束时的示例命令。
+# 必须用 sh -c 把 $PORT 推迟到子进程里展开：python3 -m http.server 不读 PORT
+# 环境变量（它只认命令行上的端口参数），直接写 `python3 -m http.server` 会一直
+# 绑在 8000 上 —— 用户照抄示例就会等满就绪超时才看到失败。
+UP_EXAMPLE = "devproxy up demo -- sh -c 'python3 -m http.server $PORT'"
 
 
 def fail(msg: str, code: int = EXIT_FAIL) -> None:
@@ -573,7 +579,7 @@ def setup(
                 console.print(f"    修复: {escape(status.hint)}")
     if not ok:
         raise typer.Exit(EXIT_FAIL)
-    console.print("完成。试试: devproxy up demo -- python3 -m http.server")
+    console.print(f"完成。试试: {UP_EXAMPLE}")
     console.print(TRUST_HINT)
 
 
