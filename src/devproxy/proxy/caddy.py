@@ -49,29 +49,43 @@ class CaddyConfig:
     caddyfile: Path
     admin_addr: str = "127.0.0.1:2019"
 
-    def validate(self, caddyfile: Path | None = None) -> tuple[bool, str]:
+    def validate(self, caddyfile: Path | None = None, timeout: float = 30.0) -> tuple[bool, str]:
+        """校验配置；二进制缺失/不可执行或超时同样返回 (False, 说明)，不抛异常。"""
         path = caddyfile or self.caddyfile
-        proc = subprocess.run(
-            [str(self.caddy_bin), "validate", "--config", str(path)],
-            capture_output=True,
-            text=True,
-        )
+        try:
+            proc = subprocess.run(
+                [str(self.caddy_bin), "validate", "--config", str(path)],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except (FileNotFoundError, PermissionError):
+            return False, f"caddy 二进制不存在或不可执行: {self.caddy_bin}"
+        except subprocess.TimeoutExpired:
+            return False, f"caddy validate 超时（{timeout}s）"
         return proc.returncode == 0, (proc.stderr or proc.stdout).strip()
 
-    def reload(self, caddyfile: Path | None = None) -> tuple[bool, str]:
+    def reload(self, caddyfile: Path | None = None, timeout: float = 30.0) -> tuple[bool, str]:
+        """热加载配置；二进制缺失/不可执行或超时同样返回 (False, 说明)，不抛异常。"""
         path = caddyfile or self.caddyfile
-        proc = subprocess.run(
-            [
-                str(self.caddy_bin),
-                "reload",
-                "--config",
-                str(path),
-                "--address",
-                self.admin_addr,
-            ],
-            capture_output=True,
-            text=True,
-        )
+        try:
+            proc = subprocess.run(
+                [
+                    str(self.caddy_bin),
+                    "reload",
+                    "--config",
+                    str(path),
+                    "--address",
+                    self.admin_addr,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except (FileNotFoundError, PermissionError):
+            return False, f"caddy 二进制不存在或不可执行: {self.caddy_bin}"
+        except subprocess.TimeoutExpired:
+            return False, f"caddy reload 超时（{timeout}s）"
         return proc.returncode == 0, (proc.stderr or proc.stdout).strip()
 
 

@@ -94,6 +94,40 @@ def test_reload_passes_address(tmp_path):
     assert "--address" in msg and "127.0.0.1:2019" in msg
 
 
+def test_validate_missing_binary_returns_false(tmp_path):
+    cfg = CaddyConfig(caddy_bin=tmp_path / "absent", caddyfile=tmp_path / "Caddyfile")
+    ok, msg = cfg.validate(tmp_path / "Caddyfile")
+    assert ok is False
+    assert str(tmp_path / "absent") in msg
+
+
+def test_reload_missing_binary_returns_false(tmp_path):
+    cfg = CaddyConfig(caddy_bin=tmp_path / "absent", caddyfile=tmp_path / "Caddyfile")
+    ok, msg = cfg.reload(tmp_path / "Caddyfile")
+    assert ok is False
+    assert str(tmp_path / "absent") in msg
+
+
+def test_validate_timeout_returns_false(tmp_path):
+    fake = tmp_path / "caddy"
+    fake.write_text("#!/bin/sh\nsleep 5\n")
+    fake.chmod(0o755)
+    cfg = CaddyConfig(caddy_bin=fake, caddyfile=tmp_path / "Caddyfile")
+    ok, msg = cfg.validate(tmp_path / "Caddyfile", timeout=0.5)
+    assert ok is False
+    assert "超时" in msg
+
+
+def test_reload_timeout_returns_false(tmp_path):
+    fake = tmp_path / "caddy"
+    fake.write_text("#!/bin/sh\nsleep 5\n")
+    fake.chmod(0o755)
+    cfg = CaddyConfig(caddy_bin=fake, caddyfile=tmp_path / "Caddyfile")
+    ok, msg = cfg.reload(tmp_path / "Caddyfile", timeout=0.5)
+    assert ok is False
+    assert "超时" in msg
+
+
 def test_build_main_caddyfile_shape(tmp_path):
     out = build_main_caddyfile(
         admin_addr="127.0.0.1:2019",
