@@ -1699,7 +1699,7 @@ git commit -m "📝 docs(devproxy): 重写 README、瘦身 Justfile、补真机�
 
 - [x] **迁移旧测试资产**：`tests/test_devp.py`（967 行）逐条对照下表确认新测试已覆盖，确认后删除旧文件
       —— 已完成（2026-10-23）：旧文件与其覆盖的 68 个用例已删除，删除前的单元套件为
-      609 + 18 subtests，删除后为 541 + 18 subtests。
+      609 + 18 subtests，删除后为 541 —— 18 个 subtests 全部写在该文件里，随它一并消失。
 
 | 旧用例（`tests/test_devp.py`） | 新归属 |
 |---|---|
