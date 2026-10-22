@@ -44,6 +44,14 @@ class Paths:
         return self.state_dir / "backups"
 
     @property
+    def caddy_env(self) -> Path:
+        """迁移来的 caddy 单元环境变量（如 MINIKUBE_IP）。
+
+        用户站点里的 {$MINIKUBE_IP:…} 依赖它 —— 重装单元时必须带上。
+        """
+        return self.state_dir / "caddy-env.json"
+
+    @property
     def log_dir(self) -> Path:
         return self.state_dir / "logs"
 

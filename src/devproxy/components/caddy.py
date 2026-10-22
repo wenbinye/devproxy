@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Callable
 
 from devproxy.config import Config
+from devproxy.migrate import load_extra_env
 from devproxy.paths import Paths
 from devproxy.platform.base import Action, Platform, Status
 
@@ -143,7 +144,7 @@ class CaddyComponent:
         self._downloader = downloader or download_caddy
         # 迁移来的环境变量（如 MINIKUBE_IP）—— 用户站点里的 {$MINIKUBE_IP:…}
         # 依赖它，重装单元时必须一并带上。
-        self.extra_env: dict[str, str] = {}
+        self.extra_env: dict[str, str] = load_extra_env(paths)
 
     # -- 判据 ----------------------------------------------------------
     def _caddyfile_current(self) -> bool:

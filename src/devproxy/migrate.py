@@ -1,0 +1,456 @@
+"""遗留环境检测与迁移。
+
+迁移的铁律：先备份，再动手。任何一步失败都能按备份还原。
+
+被迁移的是用户**手工维护**的环境：自己写的 caddy.service、自己写的 Caddyfile、
+自己写的 dnsmasq 配置。工具接管它们之前必须先把原件完整备份下来 ——
+备份失败就一步都不动。
+"""
+
+from __future__ import annotations
+
+import json
+import shutil
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from devproxy.backup import Backup, BackupManager, BackupRestoreError
+from devproxy.config import Config
+from devproxy.paths import Paths
+from devproxy.platform.base import Platform
+
+# .test 相关的通配块由工具接管（精确域名由 routes.caddy 动态生成）——
+# 迁移时必须丢掉，否则与工具生成的站点重复定义，Caddy 直接起不来。
+TEST_BLOCK_MARKERS = ("*.test", "http://*.test", "http://*.local.test")
+
+
+class MigrationError(RuntimeError):
+    """迁移失败。
+
+    备份失败时迁移根本没开始；改写失败时已按备份还原，机器不会停在半迁移状态。
+    """
+
+
+@dataclass
+class LegacyState:
+    """检测到的遗留环境。"""
+
+    unit_path: Path
+    config_path: Path
+    env: dict[str, str] = field(default_factory=dict)
+
+
+# -- Caddyfile 拆分 ------------------------------------------------------------
+
+
+def _block_head(block: str) -> str:
+    """块的首个有效行（跳过注释与空行）。"""
+    for line in block.splitlines():
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        return s
+    return ""
+
+
+def _block_address(block: str) -> str:
+    """块声明的站点地址；全局块（以 "{" 开头）返回空串。"""
+    head = _block_head(block)
+    if head.startswith("{"):
+        return ""
+    return head.split("{")[0].strip()
+
+
+def _split_blocks(text: str) -> tuple[list[str], list[str]]:
+    """按大括号深度切分顶层块。返回 (全局块列表, 站点块列表)。
+
+    站点块前面的注释归入该块 —— 用户 Caddyfile 里每个站点都带一段说明，
+    拆开丢掉等于丢掉用户的文档。注释里的花括号不参与深度计算。
+    """
+    global_blocks: list[str] = []
+    site_blocks: list[str] = []
+    current: list[str] = []
+    depth = 0
+    for line in text.splitlines():
+        current.append(line)
+        stripped = line.strip()
+        if not stripped.startswith("#"):
+            depth += line.count("{") - line.count("}")
+        if depth <= 0 and current:
+            block = "\n".join(current).rstrip() + "\n"
+            current = []
+            depth = 0
+            if _block_address(block) == "" and _block_head(block).startswith("{"):
+                global_blocks.append(block)
+            else:
+                site_blocks.append(block)
+    if current and any(line.strip() for line in current):
+        # 结尾没有闭合的残留内容：原样保留，不吞掉用户的配置
+        site_blocks.append("\n".join(current).rstrip() + "\n")
+    return global_blocks, site_blocks
+
+
+def split_caddyfile(
+    text: str, suffix: str = "test"
+) -> tuple[str, list[str]]:
+    """拆出个人站点块。返回 (个人站点文本, 被丢弃的 .test 相关块)。
+
+    只做块级切分，不解析 Caddyfile 语法 —— 站点块原样保留。
+    """
+    _, sites = _split_blocks(text)
+    markers = TEST_BLOCK_MARKERS
+    if suffix and suffix != "test":
+        markers = (
+            f"*.{suffix}",
+            f"http://*.{suffix}",
+            f"http://*.local.{suffix}",
+        )
+    personal: list[str] = []
+    dropped: list[str] = []
+    for block in sites:
+        address = _block_address(block)
+        if address and any(address.startswith(m) for m in markers):
+            dropped.append(block)
+        else:
+            personal.append(block)
+    return "\n".join(personal), dropped
+
+
+# -- 单元解析 -----------------------------------------------------------------
+
+
+def unit_config_path(unit_text: str, home: Path) -> Path | None:
+    """从 ExecStart= 里解析 --config 指向的路径（展开 %h）。"""
+    for raw in unit_text.splitlines():
+        line = raw.strip()
+        if not line.startswith("ExecStart="):
+            continue
+        args = line[len("ExecStart="):].split()
+        if "--config" in args:
+            i = args.index("--config")
+            if i + 1 < len(args):
+                return Path(args[i + 1].replace("%h", str(home))).expanduser()
+    return None
+
+
+def unit_env(unit_text: str) -> dict[str, str]:
+    """提取单元里的 Environment= 键值。"""
+    env: dict[str, str] = {}
+    for raw in unit_text.splitlines():
+        line = raw.strip()
+        if not line.startswith("Environment="):
+            continue
+        for item in line[len("Environment="):].split():
+            if "=" in item:
+                k, v = item.split("=", 1)
+                env[k] = v
+    return env
+
+
+# -- 遗留检测 -----------------------------------------------------------------
+
+
+def _home(platform: Platform, home: Path | None = None) -> Path:
+    if home is not None:
+        return home
+    return getattr(platform, "user_home", None) or Path.home()
+
+
+def detect_legacy(
+    platform: Platform,
+    paths: Paths,
+    unit_dir: Path | None = None,
+    *,
+    home: Path | None = None,
+) -> LegacyState | None:
+    """检测是否存在本工具未管理的 caddy 服务。"""
+    unit_path = (
+        unit_dir / "caddy.service" if unit_dir else platform.service_unit_path("caddy")
+    )
+    if not unit_path.exists():
+        return None
+    try:
+        unit_text = unit_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    config_path = unit_config_path(unit_text, _home(platform, home))
+    if config_path is None:
+        return None
+    try:
+        if config_path.resolve() == paths.caddyfile.resolve():
+            return None  # 已经是本工具管理的
+    except OSError:
+        pass
+    return LegacyState(
+        unit_path=unit_path, config_path=config_path, env=unit_env(unit_text)
+    )
+
+
+# -- 备份辅助：/etc 下的文件普通用户读不到 -------------------------------------
+
+
+def _make_copier(platform: Platform):
+    """备份用的复制函数：普通文件直接复制，读不到的（/etc 下的）走提权会话。"""
+
+    def copy(src: Path, dest: Path) -> None:
+        try:
+            shutil.copy2(src, dest)
+        except PermissionError:
+            # /etc 下的 drop-in 是 root 拥有的：用提权会话读出内容，
+            # 再以用户身份写进备份目录（否则备份副本也归 root，用户删不掉）
+            text = platform.privilege().read(src)
+            dest.write_text(text, encoding="utf-8")
+
+    return copy
+
+
+def _make_restorer(platform: Platform):
+    """还原用的文件操作：src 为 None 表示删除 dest。
+
+    /etc 下的文件普通用户写不了也删不了 —— 权限不够时走提权会话。
+    """
+
+    def restore(src: Path | None, dest: Path) -> None:
+        if src is None:
+            try:
+                dest.unlink(missing_ok=True)
+                return
+            except PermissionError:
+                code, msg = platform.privilege().run(["rm", "-f", str(dest)])
+                if code != 0:
+                    raise OSError(f"删除 {dest} 失败: {msg}")
+                return
+        try:
+            shutil.copy2(src, dest)
+        except PermissionError:
+            platform.privilege().write(dest, src.read_text(encoding="utf-8"))
+
+    return restore
+
+
+# -- 迁移 ---------------------------------------------------------------------
+
+
+def default_dns_route(platform: Platform, paths: Paths, config: Config) -> Path:
+    """本次迁移要备份的 DNS 路由文件（/etc 下的 drop-in）。
+
+    与 DnsComponent 写的是同一个文件 —— 迁移后的 setup 会改写它，
+    所以必须在迁移前备份。
+    """
+    from devproxy.components.dns import DnsComponent
+
+    comp = DnsComponent(platform, paths, config, backend=config.dns_backend)
+    return comp.target_path
+
+
+def _default_dnsmasq_conf() -> Path:
+    from devproxy.components.dnsmasq import DNSMASQ_CONF
+
+    return DNSMASQ_CONF.expanduser()
+
+
+def _has_content(text: str) -> bool:
+    """文本里有没有实质内容（注释与空行不算）。"""
+    return any(
+        line.strip() and not line.strip().startswith("#") for line in text.splitlines()
+    )
+
+
+def _write_sites_caddy(
+    paths: Paths, state: LegacyState, config: Config, notes: list[str]
+) -> None:
+    """把个人站点写进 sites.caddy。
+
+    工具只 import sites.caddy，绝不覆盖已有内容 —— 用户自己写的站点不能被
+    迁移冲掉（重复的站点块还会让 Caddy 直接起不来）。
+    """
+    if not state.config_path.exists():
+        notes.append(f"遗留 Caddyfile 不存在，跳过站点拆分：{state.config_path}")
+        return
+    legacy = state.config_path.read_text(encoding="utf-8")
+    personal, dropped = split_caddyfile(legacy, suffix=config.domain_suffix)
+    if dropped:
+        notes.append(
+            f"已丢弃 {len(dropped)} 个由工具接管的 .{config.domain_suffix} 站点块"
+        )
+    if not personal.strip():
+        return
+    existing = ""
+    if paths.sites_caddy.exists():
+        existing = paths.sites_caddy.read_text(encoding="utf-8")
+    if _has_content(existing):
+        notes.append(
+            f"sites.caddy 已有内容，未覆盖；个人站点仍在旧 Caddyfile 里："
+            f"{state.config_path}"
+        )
+        return
+    paths.sites_caddy.parent.mkdir(parents=True, exist_ok=True)
+    paths.sites_caddy.write_text(personal, encoding="utf-8")
+
+
+def _write_main_caddyfile(paths: Paths, config: Config) -> None:
+    """生成工具自己的主 Caddyfile（全局块 + 两个 import）。"""
+    from devproxy.proxy.caddy import build_main_caddyfile
+
+    content = build_main_caddyfile(
+        admin_addr=config.admin_addr,
+        storage=config.storage_path,
+        routes_caddy=paths.routes_caddy,
+        sites_caddy=paths.sites_caddy,
+    )
+    paths.caddyfile.parent.mkdir(parents=True, exist_ok=True)
+    paths.caddyfile.write_text(content, encoding="utf-8")
+
+
+def _save_extra_env(paths: Paths, env: dict[str, str]) -> None:
+    """把遗留单元的环境变量留档。
+
+    用户站点里的 {$MINIKUBE_IP:…} 依赖它 —— 后续 setup 重装单元时必须带上，
+    否则个人站点会指向错误的网关。
+    """
+    path = paths.caddy_env
+    if not env:
+        path.unlink(missing_ok=True)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(env, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+
+
+def load_extra_env(paths: Paths) -> dict[str, str]:
+    """读回遗留单元的环境变量（读不到或损坏时返回空）。"""
+    try:
+        data = json.loads(paths.caddy_env.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(k): str(v) for k, v in data.items()}
+
+
+def _install_caddy_unit(
+    platform: Platform, paths: Paths, config: Config, state: LegacyState
+) -> None:
+    """改写单元：指向工具的 Caddyfile，保留原有 Environment=。"""
+    binary = config.caddy_bin_path
+    was_active = platform.service_active("caddy")
+    platform.install_service(
+        "caddy",
+        exec_start=[str(binary), "run", "--config", str(paths.caddyfile)],
+        exec_reload=[
+            str(binary),
+            "reload",
+            "--config",
+            str(paths.caddyfile),
+            "--address",
+            config.admin_addr,
+        ],
+        exec_stop=[str(binary), "stop"],
+        env=state.env,
+        description="Caddy local HTTP/HTTPS server (managed by devproxy)",
+    )
+    _save_extra_env(paths, state.env)
+
+
+def _restart_caddy(platform: Platform, notes: list[str]) -> None:
+    """重启 caddy，让新配置真正生效。
+
+    单元换了但进程没重启的话，跑的还是旧配置 —— 这种"看起来迁移完了"的
+    状态比迁移失败更难查。启动失败不阻断迁移：setup 随后的组件流程会
+    把服务拉起来。
+    """
+    try:
+        platform.enable_service("caddy")
+        platform.restart_service("caddy")
+    except Exception as exc:  # noqa: BLE001 —— 服务起不来不该回滚文件迁移
+        notes.append(f"caddy 服务未能重启（{exc}）；devproxy setup 会继续处理")
+
+
+def migrate(
+    platform: Platform,
+    paths: Paths,
+    config: Config,
+    state: LegacyState,
+    *,
+    dnsmasq_conf: Path | None = None,
+    dns_route: Path | None = None,
+    notes: list[str] | None = None,
+) -> Backup:
+    """执行迁移。返回备份对象，调用方可据此回滚。
+
+    顺序是铁律：先备份，再动手。备份失败 → 一个文件都不改；改写失败 →
+    按备份还原后再抛。
+    """
+    notes = notes if notes is not None else []
+    conf = dnsmasq_conf if dnsmasq_conf is not None else _default_dnsmasq_conf()
+    route = (
+        dns_route
+        if dns_route is not None
+        else default_dns_route(platform, paths, config)
+    )
+    targets = [
+        state.unit_path,  # 会被改写
+        state.config_path,  # 旧 Caddyfile —— 留存副本，回滚要用
+        paths.caddyfile,  # 工具的主 Caddyfile
+        paths.sites_caddy,  # 个人站点
+        conf,  # 用户的 dnsmasq 配置（后续 setup 会合并改写）
+        platform.service_unit_path("dnsmasq"),  # 后续 setup 会重装这个单元
+        route,  # /etc 下的 DNS 路由 drop-in
+    ]
+    backup = _create_backup(platform, paths, targets)
+    try:
+        _write_sites_caddy(paths, state, config, notes)
+        _write_main_caddyfile(paths, config)
+        _install_caddy_unit(platform, paths, config, state)
+    except Exception as exc:
+        _restore_after_failure(platform, backup, exc)
+    _restart_caddy(platform, notes)
+    return backup
+
+
+def _create_backup(
+    platform: Platform, paths: Paths, targets: list[Path]
+) -> Backup:
+    """备份全部待改动的文件。失败即中止迁移。"""
+    try:
+        return BackupManager(paths.backup_dir, copier=_make_copier(platform)).create(
+            targets
+        )
+    except ValueError as e:
+        raise MigrationError(
+            f"备份目标不是普通文件（可能是符号链接或目录），迁移已中止：{e}"
+        ) from e
+    except OSError as e:
+        raise MigrationError(
+            f"备份失败，迁移已中止（未改动任何文件）：{e}"
+        ) from e
+
+
+def _restore_after_failure(
+    platform: Platform, backup: Backup, exc: Exception
+) -> None:
+    """改写失败 → 按备份还原，绝不把机器留在半迁移状态。"""
+    try:
+        backup.restorer = _make_restorer(platform)
+        backup.restore()
+    except BackupRestoreError as restore_exc:
+        raise MigrationError(
+            f"迁移失败且还原不完整：{exc}；还原失败：{restore_exc}"
+        ) from exc
+    except OSError as restore_exc:
+        raise MigrationError(
+            f"迁移失败且还原失败：{exc}；还原失败：{restore_exc}"
+        ) from exc
+    raise MigrationError(f"迁移失败，已按备份还原：{exc}") from exc
+
+
+def rollback(backup: Backup, *, platform: Platform | None = None) -> list[Path]:
+    """按备份还原。返回被还原（或被删除）的原始路径。
+
+    部分条目失败时抛 BackupRestoreError —— 调用方必须捕获它，
+    否则"已还原了哪些"会随异常一起丢掉。
+    """
+    if platform is not None:
+        backup.restorer = _make_restorer(platform)
+    return backup.restore()

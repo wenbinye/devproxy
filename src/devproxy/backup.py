@@ -11,6 +11,14 @@ import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
+
+# 备份用的复制函数：把源文件复制到备份目录。默认 shutil.copy2；
+# /etc 下的文件普通用户读不到，迁移场景要换成走提权会话的实现。
+Copier = Callable[[Path, Path], None]
+
+# 还原用的文件操作：src 为 None 表示"删除 dest"。
+Restorer = Callable[[Path | None, Path], None]
 
 
 def _sha256(path: Path) -> str:
@@ -55,6 +63,9 @@ class Backup:
     directory: Path
     created_at: str
     entries: list[BackupEntry] = field(default_factory=list)
+    # 还原时的文件操作。默认 shutil.copy2（不存在则删除）；/etc 下的文件
+    # 普通用户写不了也删不了，迁移场景要换成走提权会话的实现。
+    restorer: Restorer | None = None
 
     def manifest_text(self) -> str:
         lines = [
@@ -83,14 +94,21 @@ class Backup:
         """
         restored: list[Path] = []
         failures: list[tuple[Path, Exception]] = []
+        restore = self.restorer
         for e in self.entries:
             try:
                 src = self.directory / e.backup
                 if e.existed:
                     e.original.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(src, e.original)
+                    if restore is None:
+                        shutil.copy2(src, e.original)
+                    else:
+                        restore(src, e.original)
                 else:
-                    e.original.unlink(missing_ok=True)
+                    if restore is None:
+                        e.original.unlink(missing_ok=True)
+                    else:
+                        restore(None, e.original)
             except OSError as exc:
                 failures.append((e.original, exc))
                 continue
@@ -101,8 +119,11 @@ class Backup:
 
 
 class BackupManager:
-    def __init__(self, base_dir: Path):
+    def __init__(self, base_dir: Path, *, copier: Copier | None = None):
         self.base_dir = base_dir
+        # copier(src, dest)：把源文件复制进备份目录。默认 shutil.copy2；
+        # 迁移场景里 /etc 下的文件普通用户读不到，要换成走提权会话的实现。
+        self._copier: Copier = copier or (lambda src, dest: shutil.copy2(src, dest))
 
     def create(self, targets: list[Path]) -> Backup:
         """备份目标文件。目录创建或复制失败一律抛异常 —— 调用方必须中止迁移。
@@ -134,7 +155,7 @@ class BackupManager:
                 used.add(backup_name)
                 if target.exists():
                     copy = directory / backup_name
-                    shutil.copy2(target, copy)
+                    self._copier(target, copy)
                     entries.append(
                         BackupEntry(
                             original=target,
