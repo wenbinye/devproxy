@@ -79,7 +79,46 @@ class FakePlatform:
     def service_active(self, name: str) -> bool:
         return name in self.active
 
-    def install_service(self, name: str, unit: str) -> None:
+    def install_service(
+        self,
+        name: str,
+        *,
+        exec_start: list[str],
+        exec_reload: list[str] | None = None,
+        exec_stop: list[str] | None = None,
+        env: dict[str, str],
+        description: str = "",
+    ) -> None:
+        """渲染单元并落盘到隔离目录。
+
+        单元文本保留 systemd 的字段形态（Type= / ExecReload= / WantedBy= …），
+        组件测试要断言的就是这些字段 —— 压成一行摘要会让断言失去意义。
+        """
+        program = Path(exec_start[0]).name if exec_start else ""
+        service_type = "notify" if program.startswith("caddy") else "simple"
+        lines = [
+            f"# {name}",
+            "[Unit]",
+            f"Description={description or f'{name} (managed by devproxy)'}",
+            "",
+            "[Service]",
+            f"Type={service_type}",
+        ]
+        lines += [f"Environment={k}={v}" for k, v in env.items()]
+        lines.append(f"ExecStart={' '.join(exec_start)}")
+        if exec_reload:
+            lines.append(f"ExecReload={' '.join(exec_reload)}")
+        if exec_stop:
+            lines.append(f"ExecStop={' '.join(exec_stop)}")
+        lines += [
+            "Restart=on-failure",
+            "RestartSec=2s",
+            "",
+            "[Install]",
+            "WantedBy=default.target",
+            "",
+        ]
+        unit = "\n".join(lines)
         self.services[name] = unit
         path = self.service_unit_path(name)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -120,5 +159,5 @@ class FakePlatform:
         """NSS 库是另一份信任库，单独记 —— 与系统信任库互不相干。"""
         return ca in self.nss
 
-    def dns_route_installed(self, backend: str) -> bool:
+    def dns_route_installed(self, backend: str, suffix: str) -> bool:
         return backend in self.dns_backends

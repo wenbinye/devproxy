@@ -171,7 +171,13 @@ class DnsmasqComponent:
                 action.path.write_text(action.content, encoding="utf-8")
                 continue
             if action.command[:1] == ["install-service"]:
-                self.platform.install_service("dnsmasq", self._unit())
+                self.platform.install_service(
+                    "dnsmasq",
+                    exec_start=self._exec_start(),
+                    exec_reload=self._exec_reload(),
+                    env={},
+                    description="dnsmasq for devproxy (user scope)",
+                )
                 self.platform.enable_service("dnsmasq")
                 continue
             raise RuntimeError(f"未知动作: {action.command}")
@@ -231,27 +237,20 @@ class DnsmasqComponent:
             return str(conf_dir)
         return "%h" if str(rel) == "." else f"%h/{rel}"
 
-    def _unit(self) -> str:
-        """systemd user 单元。
+    def _exec_start(self) -> list[str]:
+        """dnsmasq 的启动命令。
 
         dnsmasq 默认 fork 后父进程退出 —— Type=simple 会认为主进程立刻结束，
         单元随即变 inactive。必须 `--keep-in-foreground` 让 systemd 盯住真实
         进程。配合 `--keep-in-foreground` 不再需要 pid 文件（也顺带去掉对
         `~/.cache` 目录存在的依赖）。
         """
-        return (
-            "[Unit]\n"
-            "Description=dnsmasq for devproxy (user scope)\n"
-            "After=network.target\n"
-            "\n"
-            "[Service]\n"
-            "Type=simple\n"
-            "ExecStart=/usr/sbin/dnsmasq --keep-in-foreground "
-            f"--conf-dir={self._conf_dir_spec()}\n"
-            "ExecReload=/bin/kill -HUP $MAINPID\n"
-            "Restart=on-failure\n"
-            "RestartSec=2s\n"
-            "\n"
-            "[Install]\n"
-            "WantedBy=default.target\n"
-        )
+        return [
+            "/usr/sbin/dnsmasq",
+            "--keep-in-foreground",
+            f"--conf-dir={self._conf_dir_spec()}",
+        ]
+
+    def _exec_reload(self) -> list[str]:
+        """重载配置：给 dnsmasq 发 HUP，让它重读 conf-dir。"""
+        return ["/bin/kill", "-HUP", "$MAINPID"]

@@ -13,7 +13,6 @@ from devproxy.components.caddy import (
     caddy_asset_name,
     current_platform_key,
     download_caddy,
-    render_unit,
 )
 from devproxy.config import Config
 from devproxy.paths import Paths
@@ -50,11 +49,22 @@ def _make_ready(comp, platform, cfg) -> None:
     comp.paths.caddyfile.write_text(comp._main_caddyfile(), encoding="utf-8")
     platform.install_service(
         "caddy",
-        render_unit(
-            caddy_bin=binary,
-            caddyfile=comp.paths.caddyfile,
-            admin_addr=cfg.admin_addr,
-        ),
+        exec_start=[
+            str(binary),
+            "run",
+            "--config",
+            str(comp.paths.caddyfile),
+        ],
+        exec_reload=[
+            str(binary),
+            "reload",
+            "--config",
+            str(comp.paths.caddyfile),
+            "--address",
+            cfg.admin_addr,
+        ],
+        exec_stop=[str(binary), "stop"],
+        env={},
     )
     platform.active.add("caddy")
     platform.linger = True
@@ -122,11 +132,13 @@ def test_plan_reinstalls_unit_when_execstart_points_elsewhere(tmp_path):
     _make_ready(comp, platform, cfg)
     platform.install_service(
         "caddy",
-        render_unit(
-            caddy_bin=Path(cfg.caddy_bin),
-            caddyfile=tmp_path / "old" / "Caddyfile",
-            admin_addr=cfg.admin_addr,
-        ),
+        exec_start=[
+            str(Path(cfg.caddy_bin)),
+            "run",
+            "--config",
+            str(tmp_path / "old" / "Caddyfile"),
+        ],
+        env={},
     )
     assert comp.check().ok is False
     actions = comp.plan()
@@ -257,21 +269,6 @@ def test_plan_replans_setcap_when_binary_present_but_service_inactive(tmp_path):
 
 
 # -- 单元、平台、下载的下限校验 ---------------------------------------------
-
-
-def test_render_unit_rejects_whitespace_in_paths():
-    with pytest.raises(RuntimeError, match="空白"):
-        render_unit(
-            caddy_bin=Path("/opt/my caddy/caddy"),
-            caddyfile=Path("/home/u/.config/devproxy/Caddyfile"),
-            admin_addr="127.0.0.1:2019",
-        )
-    with pytest.raises(RuntimeError, match="空白"):
-        render_unit(
-            caddy_bin=Path("/opt/caddy"),
-            caddyfile=Path("/home/u/my config/Caddyfile"),
-            admin_addr="127.0.0.1:2019",
-        )
 
 
 def test_current_platform_key_rejects_unknown_arch(monkeypatch):

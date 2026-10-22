@@ -50,6 +50,63 @@ def _first_ip(text: str) -> str | None:
     return None
 
 
+def render_systemd_unit(
+    name: str,
+    exec_start: list[str],
+    exec_reload: list[str] | None,
+    exec_stop: list[str] | None,
+    env: dict[str, str],
+    description: str = "",
+    service_type: str | None = None,
+) -> str:
+    """生成 systemd user 单元。形态与现有的 caddy.service 保持一致。
+
+    systemd 单元不做 shell 引号解析：参数里的空白会截断命令行。
+    路径来自配置（用户可改），必须在这里拦住。
+
+    service_type 默认按被拉起的程序判断：只有 caddy 会发 sd_notify，
+    dnsmasq 这类程序硬套 Type=notify 会永远卡在 "start timed out"。
+    """
+    for label, args in (
+        ("ExecStart", exec_start),
+        ("ExecReload", exec_reload),
+        ("ExecStop", exec_stop),
+    ):
+        for value in args or []:
+            if any(c.isspace() for c in value):
+                raise RuntimeError(f"{label} 参数不能包含空白字符: {value}")
+    if service_type is None:
+        program = Path(exec_start[0]).name if exec_start else ""
+        service_type = "notify" if program.startswith("caddy") else "simple"
+    lines = [
+        "[Unit]",
+        f"Description={description or f'{name} (managed by devproxy)'}",
+        "After=network-online.target",
+        "Wants=network-online.target",
+        "",
+        "[Service]",
+        f"Type={service_type}",
+    ]
+    for k, v in env.items():
+        lines.append(f"Environment={k}={v}")
+    lines.append(f"ExecStart={' '.join(exec_start)}")
+    if exec_reload:
+        lines.append(f"ExecReload={' '.join(exec_reload)}")
+    if exec_stop:
+        lines.append(f"ExecStop={' '.join(exec_stop)}")
+    lines += [
+        "TimeoutStopSec=5s",
+        "LimitNOFILE=1048576",
+        "Restart=on-failure",
+        "RestartSec=2s",
+        "",
+        "[Install]",
+        "WantedBy=default.target",
+        "",
+    ]
+    return "\n".join(lines)
+
+
 class LinuxElevated:
     """提权会话。构造时执行一次 `sudo -v` 完成预认证。"""
 
@@ -136,10 +193,24 @@ class LinuxPlatform:
         code, out = _run(["systemctl", "--user", "is-active", name])
         return code == 0 and out.strip() == "active"
 
-    def install_service(self, name: str, unit: str) -> None:
+    def install_service(
+        self,
+        name: str,
+        *,
+        exec_start: list[str],
+        exec_reload: list[str] | None = None,
+        exec_stop: list[str] | None = None,
+        env: dict[str, str],
+        description: str = "",
+    ) -> None:
         path = self.service_unit_path(name)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(unit, encoding="utf-8")
+        path.write_text(
+            render_systemd_unit(
+                name, exec_start, exec_reload, exec_stop, env, description
+            ),
+            encoding="utf-8",
+        )
         code, msg = _run(["systemctl", "--user", "daemon-reload"])
         if code != 0:
             raise RuntimeError(f"安装 {name} 后 systemctl daemon-reload 失败: {msg}")
@@ -237,7 +308,8 @@ class LinuxPlatform:
             return False
         return _pem_digest(stored) == _pem_digest(expected)
 
-    def dns_route_installed(self, backend: str) -> bool:
+    def dns_route_installed(self, backend: str, suffix: str) -> bool:
+        """Linux 的两个后端都是固定路径，不看域名后缀（macOS 才按后缀分文件）。"""
         if backend == "resolved":
             return Path("/etc/systemd/resolved.conf.d/devproxy.conf").exists()
         if backend == "system":

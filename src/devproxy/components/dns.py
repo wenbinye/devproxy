@@ -72,14 +72,20 @@ class DnsComponent:
     def target_path(self) -> Path:
         return RESOLVED_CONF if self.resolved_backend else SYSTEM_DNSMASQ_CONF
 
-    @property
-    def backend_key(self) -> str:
+    def _backend_key(self) -> str:
+        """本次要写/要查的 DNS 路由后端。
+
+        macOS 没有 systemd-resolved，用 launchd 之外的 resolver 机制
+        （/etc/resolver/<suffix>），后端名是 "resolver"。
+        """
+        if self.platform.name == "mac":
+            return "resolver"
         return "resolved" if self.resolved_backend else "system"
 
     # -- check ---------------------------------------------------------
     def check(self) -> Status:
-        key = self.backend_key
-        if self.platform.dns_route_installed(key):
+        key = self._backend_key()
+        if self.platform.dns_route_installed(key, self.config.domain_suffix):
             return Status(ok=True, detail=f"DNS 路由已配置（{key} 后端）")
         return Status(
             ok=False,
@@ -153,8 +159,8 @@ class DnsComponent:
     # -- verify --------------------------------------------------------
     def verify(self) -> Status:
         """路由文件在位还不够 —— 必须真的能经系统解析器解析到本机。"""
-        key = self.backend_key
-        if not self.platform.dns_route_installed(key):
+        key = self._backend_key()
+        if not self.platform.dns_route_installed(key, self.config.domain_suffix):
             return Status(
                 ok=False,
                 detail="DNS 路由未生效",
@@ -190,7 +196,7 @@ class DnsComponent:
 
     def _record_state(self, path: Path, content: str) -> None:
         payload = {
-            "backend": self.backend_key,
+            "backend": self._backend_key(),
             "path": str(path),
             "content_sha256": _sha256(content),
         }

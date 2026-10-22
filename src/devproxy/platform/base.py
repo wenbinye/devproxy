@@ -60,7 +60,21 @@ class Platform(Protocol):
 
     def service_active(self, name: str) -> bool: ...
 
-    def install_service(self, name: str, unit: str) -> None: ...
+    def install_service(
+        self,
+        name: str,
+        *,
+        exec_start: list[str],
+        exec_reload: list[str] | None = None,
+        exec_stop: list[str] | None = None,
+        env: dict[str, str],
+        description: str = "",
+    ) -> None:
+        """安装并注册一个服务。单元格式由平台自己决定（systemd / launchd）。
+
+        组件层只给"跑什么、带什么环境变量"，不碰单元格式 ——
+        否则 systemd 与 launchd 的差异会渗进组件里。
+        """
 
     def enable_service(self, name: str) -> None: ...
 
@@ -94,4 +108,9 @@ class Platform(Protocol):
         旧条目仍在，只按 nickname 判定会误报“已信任”。
         """
 
-    def dns_route_installed(self, backend: str) -> bool: ...
+    def dns_route_installed(self, backend: str, suffix: str) -> bool:
+        """DNS 路由是否已配置。backend 取 "resolved" / "system" / "resolver"。
+
+        suffix 是域名后缀：macOS 的解析器文件按后缀命名（/etc/resolver/<suffix>），
+        Linux 的两个后端不关心它，但接口保持一致。
+        """

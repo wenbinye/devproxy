@@ -7,7 +7,7 @@ import pytest
 from devproxy.platform import linux as linux_mod
 from devproxy.platform.base import Action, Status
 from devproxy.platform.fake import FakePlatform
-from devproxy.platform.linux import LinuxPlatform
+from devproxy.platform.linux import LinuxPlatform, render_systemd_unit
 
 
 def test_status_defaults():
@@ -56,11 +56,28 @@ def test_fake_platform_records_writes(tmp_path):
 
 def test_fake_platform_service_lifecycle():
     p = FakePlatform()
-    p.install_service("caddy", "[Service]\n")
+    p.install_service("caddy", exec_start=["/bin/caddy", "run"], env={})
     assert p.service_active("caddy") is False
     p.active.add("caddy")
     assert p.service_active("caddy") is True
     assert "caddy.service" in p.service_unit_path("caddy").name
+
+
+def test_fake_platform_install_service_renders_unit_and_env():
+    """单元由平台渲染：exec_start / env 都要落到单元文本里。"""
+    p = FakePlatform()
+    p.install_service(
+        "caddy",
+        exec_start=["/bin/caddy", "run", "--config", "/tmp/Caddyfile"],
+        exec_reload=["/bin/caddy", "reload"],
+        env={"MINIKUBE_IP": "1.2.3.4"},
+    )
+    unit = p.services["caddy"]
+    assert "ExecStart=/bin/caddy run --config /tmp/Caddyfile" in unit
+    assert "Environment=MINIKUBE_IP=1.2.3.4" in unit
+    assert "ExecReload=/bin/caddy reload" in unit
+    # 单元也落盘 —— 组件的“单元是否过期”判据要读它
+    assert p.service_unit_path("caddy").read_text(encoding="utf-8") == unit
 
 
 def test_fake_platform_privilege_session_is_cached():
@@ -142,9 +159,73 @@ def test_linux_service_mutations_raise_on_failure(monkeypatch, tmp_path):
     assert "caddy" in str(ei.value) and "unit not found" in str(ei.value)
 
     with pytest.raises(RuntimeError) as ei:
-        p.install_service("caddy", "[Service]\n")
+        p.install_service("caddy", exec_start=["/bin/caddy", "run"], env={})
     assert "caddy" in str(ei.value) and "daemon-reload" in str(ei.value)
     assert "unit not found" in str(ei.value)
+
+
+# -- 单元渲染：平台自己决定单元长什么样 -------------------------------------
+
+
+def test_render_systemd_unit_contains_exec_and_env():
+    unit = render_systemd_unit(
+        "caddy",
+        ["/home/u/.local/bin/caddy", "run", "--config", "/home/u/.config/devproxy/Caddyfile"],
+        ["/home/u/.local/bin/caddy", "reload"],
+        ["/home/u/.local/bin/caddy", "stop"],
+        {"MINIKUBE_IP": "192.168.49.2"},
+        "Caddy local HTTP/HTTPS server (managed by devproxy)",
+    )
+    assert "ExecStart=/home/u/.local/bin/caddy run --config /home/u/.config/devproxy/Caddyfile" in unit
+    assert "ExecReload=/home/u/.local/bin/caddy reload" in unit
+    assert "ExecStop=/home/u/.local/bin/caddy stop" in unit
+    assert "Environment=MINIKUBE_IP=192.168.49.2" in unit
+    assert "WantedBy=default.target" in unit
+
+
+def test_render_systemd_unit_rejects_whitespace_in_args():
+    """systemd 单元不做 shell 引号解析 —— 参数里的空白会截断命令行。"""
+    with pytest.raises(RuntimeError, match="空白"):
+        render_systemd_unit(
+            "caddy",
+            ["/opt/my caddy/caddy", "run"],
+            None,
+            None,
+            {},
+        )
+    with pytest.raises(RuntimeError, match="空白"):
+        render_systemd_unit(
+            "caddy",
+            ["/opt/caddy", "run", "--config", "/home/u/my config/Caddyfile"],
+            None,
+            None,
+            {},
+        )
+
+
+def test_render_systemd_unit_service_type_follows_program():
+    """只有 caddy 会发 sd_notify；dnsmasq 硬套 Type=notify 会永远起不来。"""
+    caddy = render_systemd_unit("caddy", ["/usr/bin/caddy", "run"], None, None, {})
+    dnsmasq = render_systemd_unit(
+        "dnsmasq", ["/usr/sbin/dnsmasq", "--keep-in-foreground"], None, None, {}
+    )
+    assert "Type=notify" in caddy
+    assert "Type=simple" in dnsmasq
+
+
+def test_linux_install_service_writes_unit_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(linux_mod, "_run", lambda argv: (0, ""))
+    p = LinuxPlatform(user_home=tmp_path)
+    p.install_service(
+        "caddy",
+        exec_start=["/bin/caddy", "run", "--config", "/tmp/Caddyfile"],
+        env={"MINIKUBE_IP": "1.2.3.4"},
+    )
+    unit = (tmp_path / ".config" / "systemd" / "user" / "caddy.service").read_text(
+        encoding="utf-8"
+    )
+    assert "ExecStart=/bin/caddy run --config /tmp/Caddyfile" in unit
+    assert "Environment=MINIKUBE_IP=1.2.3.4" in unit
 
 
 def test_linux_elevated_read_distinguishes_missing_from_permission(monkeypatch):
@@ -456,6 +537,19 @@ def test_linux_http_ok_uses_bounded_curl(monkeypatch):
 def test_linux_http_ok_false_on_curl_failure(monkeypatch):
     monkeypatch.setattr(linux_mod, "_run", lambda argv: (7, "connection refused"))
     assert LinuxPlatform().http_ok("https://localhost") is False
+
+
+def test_linux_dns_route_installed_accepts_suffix():
+    """接口带域名后缀 —— macOS 要按后缀查 /etc/resolver/<suffix>。"""
+    assert LinuxPlatform().dns_route_installed("resolved", "test") in (True, False)
+    assert LinuxPlatform().dns_route_installed("unknown-backend", "test") is False
+
+
+def test_fake_platform_dns_route_installed_uses_backend():
+    p = FakePlatform()
+    assert p.dns_route_installed("resolved", "test") is False
+    p.dns_backends.add("resolved")
+    assert p.dns_route_installed("resolved", "test") is True
 
 
 # -- linger -----------------------------------------------------------------

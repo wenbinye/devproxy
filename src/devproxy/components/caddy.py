@@ -125,49 +125,6 @@ def download_caddy(dest: Path, version: str = CADDY_VERSION) -> None:
         tmp_dest.unlink(missing_ok=True)
 
 
-def render_unit(
-    *,
-    caddy_bin: Path,
-    caddyfile: Path,
-    admin_addr: str,
-    env: dict[str, str] | None = None,
-) -> str:
-    """生成 systemd user 单元。形态与现有的 caddy.service 保持一致。
-
-    systemd 单元不做 shell 引号解析：路径里的空白会截断 ExecStart 的参数。
-    caddy_bin / caddyfile 来自配置（用户可改），必须在这里拦住。
-    """
-    for label, value in (("caddy_bin", caddy_bin), ("caddyfile", caddyfile)):
-        if any(c.isspace() for c in str(value)):
-            raise RuntimeError(f"{label} 路径不能包含空白字符: {value}")
-    lines = [
-        "[Unit]",
-        "Description=Caddy local HTTP/HTTPS server (managed by devproxy)",
-        "Documentation=https://caddyserver.com/docs/",
-        "After=network-online.target",
-        "Wants=network-online.target",
-        "",
-        "[Service]",
-        "Type=notify",
-    ]
-    for k, v in (env or {}).items():
-        lines.append(f"Environment={k}={v}")
-    lines += [
-        f"ExecStart={caddy_bin} run --config {caddyfile}",
-        f"ExecReload={caddy_bin} reload --config {caddyfile} --address {admin_addr}",
-        f"ExecStop={caddy_bin} stop",
-        "TimeoutStopSec=5s",
-        "LimitNOFILE=1048576",
-        "Restart=on-failure",
-        "RestartSec=2s",
-        "",
-        "[Install]",
-        "WantedBy=default.target",
-        "",
-    ]
-    return "\n".join(lines)
-
-
 class CaddyComponent:
     name = "caddy"
 
@@ -183,6 +140,9 @@ class CaddyComponent:
         self.config = config
         # 下载属网络操作，默认走真实下载器；测试可注入假实现，保持离线。
         self._downloader = downloader or download_caddy
+        # 迁移来的环境变量（如 MINIKUBE_IP）—— 用户站点里的 {$MINIKUBE_IP:…}
+        # 依赖它，重装单元时必须一并带上。
+        self.extra_env: dict[str, str] = {}
 
     # -- 判据 ----------------------------------------------------------
     def _caddyfile_current(self) -> bool:
@@ -330,12 +290,26 @@ class CaddyComponent:
                 continue
             if action.command[:1] == ["install-service"]:
                 was_active = self.platform.service_active("caddy")
-                unit = render_unit(
-                    caddy_bin=binary,
-                    caddyfile=self.paths.caddyfile,
-                    admin_addr=self.config.admin_addr,
+                self.platform.install_service(
+                    "caddy",
+                    exec_start=[
+                        str(binary),
+                        "run",
+                        "--config",
+                        str(self.paths.caddyfile),
+                    ],
+                    exec_reload=[
+                        str(binary),
+                        "reload",
+                        "--config",
+                        str(self.paths.caddyfile),
+                        "--address",
+                        self.config.admin_addr,
+                    ],
+                    exec_stop=[str(binary), "stop"],
+                    env=self.extra_env,
+                    description="Caddy local HTTP/HTTPS server (managed by devproxy)",
                 )
-                self.platform.install_service("caddy", unit)
                 self.platform.enable_service("caddy")
                 if was_active:
                     # 单元文件已换（如 ExecStart 指向新 Caddyfile），
