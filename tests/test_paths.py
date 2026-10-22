@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from devproxy.paths import Paths, default_paths
 
 
@@ -37,3 +39,15 @@ def test_default_paths_honours_env(tmp_path, monkeypatch):
     assert p.config_dir == tmp_path / "cfg"
     assert p.state_dir == tmp_path / "st"
     assert p.data_dir == tmp_path / "data"
+
+
+def test_default_paths_stay_inside_isolated_home():
+    """家目录被夹具指向临时目录后，默认路径绝不能落在真实 HOME 里。
+
+    否则一次 ensure_files() 就会在用户真实的 ~/.config/devproxy 与
+    ~/.local/state/devproxy 里凭空造出文件。
+    """
+    home = Path.home()
+    p = default_paths()
+    for path in (p.config_dir, p.state_dir, p.data_dir):
+        assert str(path).startswith(str(home)), f"{path} 跑到了 HOME 之外"

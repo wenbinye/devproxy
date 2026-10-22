@@ -10,6 +10,13 @@ from devproxy.platform.fake import FakePlatform
 from devproxy.platform.linux import LinuxPlatform, render_systemd_unit
 
 
+@pytest.fixture
+def allow_platform_mutation(monkeypatch):
+    """本文件专门验证平台的写操作：_run 已被替换、路径指向 tmp_path，
+    可以安全地关掉"测试期禁写"护栏。"""
+    monkeypatch.setattr(linux_mod, "_ALLOW_MUTATION", True)
+
+
 def test_status_defaults():
     s = Status(ok=True)
     assert s.detail == ""
@@ -145,7 +152,9 @@ def test_linux_tail_service_log_streams_to_terminal(monkeypatch):
     assert "capture_output" not in recorded["kwargs"], "不得捕获输出，须流式写到终端"
 
 
-def test_linux_service_mutations_raise_on_failure(monkeypatch, tmp_path):
+def test_linux_service_mutations_raise_on_failure(
+    monkeypatch, tmp_path, allow_platform_mutation
+):
     """enable/restart/daemon-reload 失败必须立即抛 RuntimeError，带上服务名与 stderr。"""
     monkeypatch.setattr(linux_mod, "_run", lambda argv: (1, "unit not found"))
     p = LinuxPlatform(user_home=tmp_path)
@@ -213,7 +222,9 @@ def test_render_systemd_unit_service_type_follows_program():
     assert "Type=simple" in dnsmasq
 
 
-def test_linux_install_service_writes_unit_file(tmp_path, monkeypatch):
+def test_linux_install_service_writes_unit_file(
+    tmp_path, monkeypatch, allow_platform_mutation
+):
     monkeypatch.setattr(linux_mod, "_run", lambda argv: (0, ""))
     p = LinuxPlatform(user_home=tmp_path)
     p.install_service(
@@ -555,7 +566,7 @@ def test_fake_platform_dns_route_installed_uses_backend():
 # -- linger -----------------------------------------------------------------
 
 
-def test_linux_enable_linger_uses_sudo_loginctl(monkeypatch):
+def test_linux_enable_linger_uses_sudo_loginctl(monkeypatch, allow_platform_mutation):
     calls = []
     monkeypatch.setattr(
         linux_mod,
@@ -587,3 +598,46 @@ def test_linux_linger_enabled_true_when_loginctl_unavailable(monkeypatch):
     """
     monkeypatch.setattr(linux_mod, "_run", lambda argv: (127, "命令不可用: loginctl"))
     assert LinuxPlatform().linger_enabled() is True
+
+
+# -- 测试期护栏：真实平台不许改系统 -------------------------------------------
+
+
+def test_linux_platform_refuses_mutation_under_test(tmp_path, monkeypatch):
+    """护栏：测试进程里，真实平台的写操作一律拒绝。
+
+    平台对象一旦拿到真实 HOME，就能改写 ~/.config/systemd/user/ 下的单元、
+    启停真实服务、甚至 sudo 写 /etc —— 隔离漏掉一处就会改掉用户机器。
+    """
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "test_x")
+    p = LinuxPlatform(user_home=tmp_path)
+    with pytest.raises(RuntimeError, match="禁止"):
+        p.install_service("caddy", exec_start=["/bin/caddy", "run"], env={})
+    with pytest.raises(RuntimeError, match="禁止"):
+        p.enable_service("caddy")
+    with pytest.raises(RuntimeError, match="禁止"):
+        p.restart_service("caddy")
+    with pytest.raises(RuntimeError, match="禁止"):
+        p.enable_linger()
+    with pytest.raises(RuntimeError, match="禁止"):
+        p.privilege()
+
+
+def test_linux_platform_refuses_mutation_when_flag_set(tmp_path, monkeypatch):
+    """显式开关同样能禁写（不依赖 pytest 环境变量）。"""
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setenv("DEVPROXY_NO_MUTATION", "1")
+    p = LinuxPlatform(user_home=tmp_path)
+    with pytest.raises(RuntimeError, match="禁止"):
+        p.install_service("caddy", exec_start=["/bin/caddy", "run"], env={})
+
+
+def test_linux_platform_read_only_calls_still_work_under_test(tmp_path, monkeypatch):
+    """只读探测不受护栏影响 —— doctor 的体检还得能跑。"""
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "test_x")
+    p = LinuxPlatform(user_home=tmp_path)
+    assert p.service_unit_path("caddy") == (
+        tmp_path / ".config" / "systemd" / "user" / "caddy.service"
+    )
+    assert p.binary_version(tmp_path / "absent") == ""
+    assert p.linger_enabled() in (True, False)

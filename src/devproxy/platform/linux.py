@@ -50,6 +50,27 @@ def _first_ip(text: str) -> str | None:
     return None
 
 
+# 平台自身单元测试的显式豁免：那些用例要把 _run 换成假的、路径指向
+# tmp_path，覆盖的正是写操作的失败处理 —— 不需要护栏拦着。
+_ALLOW_MUTATION = False
+
+
+def _assert_may_mutate() -> None:
+    """测试里禁止改动真实系统。
+
+    平台对象一旦拿到真实 HOME，就能改写 ~/.config/systemd/user/ 下的单元、
+    启停真实服务、甚至 sudo 写 /etc。隔离一旦漏掉一处，就会静默改掉用户机器
+    （曾经真的覆盖过用户自己的 caddy.service）。
+
+    护栏放在平台层而不是测试夹具里：只有平台知道哪些调用会动系统。
+    只读探测（service_active / dns_query / http_ok …）不受影响。
+    """
+    if _ALLOW_MUTATION:
+        return
+    if "PYTEST_CURRENT_TEST" in os.environ or os.environ.get("DEVPROXY_NO_MUTATION"):
+        raise RuntimeError("测试中禁止调用真实平台的写操作")
+
+
 def render_systemd_unit(
     name: str,
     exec_start: list[str],
@@ -171,6 +192,7 @@ class LinuxPlatform:
         self._elevated: LinuxElevated | None = None
 
     def privilege(self) -> ElevatedSession:
+        _assert_may_mutate()
         if self._elevated is None:
             self._elevated = LinuxElevated()
         return self._elevated
@@ -203,6 +225,7 @@ class LinuxPlatform:
         env: dict[str, str],
         description: str = "",
     ) -> None:
+        _assert_may_mutate()
         path = self.service_unit_path(name)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
@@ -216,11 +239,13 @@ class LinuxPlatform:
             raise RuntimeError(f"安装 {name} 后 systemctl daemon-reload 失败: {msg}")
 
     def enable_service(self, name: str) -> None:
+        _assert_may_mutate()
         code, msg = _run(["systemctl", "--user", "enable", "--now", name])
         if code != 0:
             raise RuntimeError(f"systemctl enable --now {name} 失败: {msg}")
 
     def restart_service(self, name: str) -> None:
+        _assert_may_mutate()
         code, msg = _run(["systemctl", "--user", "restart", name])
         if code != 0:
             raise RuntimeError(f"systemctl restart {name} 失败: {msg}")
@@ -230,6 +255,7 @@ class LinuxPlatform:
         subprocess.run(["journalctl", "--user", "-u", name, "-f"])
 
     def enable_linger(self) -> tuple[int, str]:
+        _assert_may_mutate()
         return _run(["sudo", "loginctl", "enable-linger", getpass.getuser()])
 
     def linger_enabled(self) -> bool:

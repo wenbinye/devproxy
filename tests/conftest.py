@@ -13,6 +13,22 @@ def paths(tmp_path) -> Paths:
 
 
 @pytest.fixture(autouse=True)
+def isolated_home(tmp_path_factory, monkeypatch):
+    """把 HOME 指向临时目录 —— 测试绝不写进用户家目录。
+
+    Path.home() 与 os.path.expanduser("~") 都认 HOME：这挡住了
+    default_paths() 在真实的 ~/.config/devproxy、~/.local/state/devproxy
+    里凭空造文件，也挡住了 dnsmasq 配置、~/.pki/nssdb 这类家目录路径。
+    """
+    home = tmp_path_factory.mktemp("home")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(home / ".local" / "state"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(home / ".local" / "share"))
+    return home
+
+
+@pytest.fixture(autouse=True)
 def isolated_cli_platform(monkeypatch):
     """把 CLI 用的平台换成 FakePlatform —— 测试绝不允许碰真实系统。
 
