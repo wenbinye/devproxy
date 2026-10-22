@@ -102,15 +102,23 @@ def build_main_caddyfile(
     storage: Path,
     routes_caddy: Path,
     sites_caddy: Path,
+    http_port: int = 80,
+    https_port: int = 443,
 ) -> str:
     """生成主 Caddyfile：唯一全局块 + 两个 import。
 
     被 import 的文件不能含全局块 —— 全局块只能有一个。
+
+    http_port / https_port 是 Caddy 的全局选项，写在这里才真正生效；
+    不写就永远是 Caddy 的默认 80/443，配置里的这两个键形同虚设。
+    默认值就是 80/443，所以生成结果与旧行为一致。
     """
     return (
         "{\n"
         f"\tadmin {admin_addr}\n"
         f"\tstorage file_system {storage}\n"
+        f"\thttp_port {http_port}\n"
+        f"\thttps_port {https_port}\n"
         "}\n"
         "\n"
         f"import {routes_caddy}\n"

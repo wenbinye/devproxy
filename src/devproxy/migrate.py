@@ -452,6 +452,8 @@ def _main_caddyfile_content(paths: Paths, config: Config) -> str:
         storage=config.storage_path,
         routes_caddy=paths.routes_caddy,
         sites_caddy=paths.sites_caddy,
+        http_port=config.http_port,
+        https_port=config.https_port,
     )
 
 

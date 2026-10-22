@@ -142,6 +142,32 @@ def test_build_main_caddyfile_shape(tmp_path):
     assert out.count("{") == 1, "全局块只能有一个（被 import 的文件不能再有全局块）"
 
 
+def test_build_main_caddyfile_emits_ports(tmp_path):
+    """http_port / https_port 必须真的进 Caddyfile —— 否则配置里的键形同虚设。"""
+    out = build_main_caddyfile(
+        admin_addr="127.0.0.1:2019",
+        storage=Path("/data/caddy"),
+        routes_caddy=Path("/state/routes.caddy"),
+        sites_caddy=Path("/config/sites.caddy"),
+        http_port=8080,
+        https_port=8443,
+    )
+    assert "http_port 8080" in out
+    assert "https_port 8443" in out
+
+
+def test_build_main_caddyfile_default_ports(tmp_path):
+    """默认值 80/443 —— 生成结果与旧行为一致。"""
+    out = build_main_caddyfile(
+        admin_addr="127.0.0.1:2019",
+        storage=Path("/data/caddy"),
+        routes_caddy=Path("/state/routes.caddy"),
+        sites_caddy=Path("/config/sites.caddy"),
+    )
+    assert "http_port 80" in out
+    assert "https_port 443" in out
+
+
 # ------------------------------------------ 边界：畸形二进制 / 畸形 Admin 响应
 
 

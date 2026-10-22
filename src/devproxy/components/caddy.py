@@ -347,6 +347,17 @@ class CaddyComponent:
                     privileged=True,
                 )
             )
+        if need_binary and not need_unit and self.platform.service_active("caddy"):
+            # 二进制被换掉了，但单元与服务都不用动 —— 跑着的还是旧版本，
+            # "已固定到 2.11.7" 的承诺要等到下次重启才兑现。显式重启一次。
+            # 放在最后：setcap 必须先做完，否则重启后绑不上 80/443。
+            actions.append(
+                Action(
+                    description=f"重启 caddy 服务以使用新下载的 {CADDY_VERSION}",
+                    kind="run",
+                    command=["restart-service", "caddy"],
+                )
+            )
         return actions
 
     # -- apply ---------------------------------------------------------
@@ -403,6 +414,9 @@ class CaddyComponent:
                 code, msg = self.platform.enable_linger()
                 if code != 0:
                     raise RuntimeError(f"loginctl enable-linger 失败: {msg}")
+                continue
+            if action.command[:2] == ["restart-service", "caddy"]:
+                self.platform.restart_service("caddy")
                 continue
             raise RuntimeError(f"未知动作: {action.command}")
 
@@ -504,4 +518,6 @@ class CaddyComponent:
             storage=self.config.storage_path,
             routes_caddy=self.paths.routes_caddy,
             sites_caddy=self.paths.sites_caddy,
+            http_port=self.config.http_port,
+            https_port=self.config.https_port,
         )

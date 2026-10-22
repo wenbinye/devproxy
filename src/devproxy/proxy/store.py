@@ -97,6 +97,8 @@ class RouteStore:
                 storage=self.config.storage_path,
                 routes_caddy=tmp_routes,
                 sites_caddy=self.paths.sites_caddy,
+                http_port=self.config.http_port,
+                https_port=self.config.https_port,
             ),
         )
         return self.caddy.validate(tmp_main)

@@ -505,6 +505,41 @@ def test_check_and_plan_agree_when_version_matches(tmp_path):
     assert not any("下载" in a.description for a in comp.plan())
 
 
+def test_plan_restarts_service_when_binary_is_replaced(tmp_path):
+    """换了二进制却不重启 —— 跑着的还是旧版本，"已固定版本"只在下次重启兑现。"""
+    comp, paths, cfg = _component(tmp_path)
+    platform = FakePlatform()
+    comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
+    _make_ready(comp, platform, cfg)
+    # 版本不符（但路径没变、单元也没变）→ 只换二进制
+    platform.binary_version = lambda binary: "v2.10.0"
+    actions = comp.plan()
+    assert any(a.command[:1] == ["download-caddy"] for a in actions)
+    assert any(a.command[:2] == ["restart-service", "caddy"] for a in actions), actions
+    # 重启必须排在 setcap 之后 —— 否则重启后绑不上 80/443
+    idx_cap = next(
+        i for i, a in enumerate(actions) if a.command[:1] == ["setcap"]
+    )
+    idx_restart = next(
+        i for i, a in enumerate(actions) if a.command[:2] == ["restart-service", "caddy"]
+    )
+    assert idx_cap < idx_restart
+
+
+def test_apply_restarts_service_after_replacing_binary(tmp_path):
+    """重启动作必须真的重启服务。"""
+    comp, paths, cfg = _component(tmp_path)
+    platform = FakePlatform()
+    comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
+    _make_ready(comp, platform, cfg)
+    platform.binary_version = lambda binary: "v2.10.0"
+    actions = comp.plan()
+    restarted = []
+    platform.restart_service = lambda name: restarted.append(name)
+    comp.apply(actions)
+    assert "caddy" in restarted
+
+
 # -- N6: 单元判据要看 ExecStart 里的二进制路径 -----------------------------
 
 
