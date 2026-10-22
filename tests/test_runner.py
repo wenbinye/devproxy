@@ -25,6 +25,8 @@ from devproxy.proxy.runner import (
 )
 from devproxy.proxy.store import RouteStore
 
+from .support import wait_until
+
 # 信号测试要在独立 python 子进程里 import devproxy —— 告诉它源码在哪
 SRC_DIR = str(Path(devproxy.__file__).resolve().parent.parent)
 
@@ -121,14 +123,12 @@ def test_stop_process_group_kills_grandchildren(tmp_path):
     proc = subprocess.Popen(
         [str(script)], start_new_session=True, stdout=subprocess.DEVNULL
     )
-    deadline = time.time() + 5
-    while time.time() < deadline and not marker.exists():
-        time.sleep(0.05)
-    assert marker.exists(), "孙进程 pid 未写出"
+    assert wait_until(
+        lambda: marker.exists() and marker.read_text().strip()
+    ), "孙进程 pid 未写出"
     gpid = int(marker.read_text().strip())
     stop_process_group(proc, proc.pid)
-    time.sleep(0.5)
-    assert not _process_running(gpid), "孙进程应已被按组清理"
+    assert wait_until(lambda: not _process_running(gpid)), "孙进程应已被按组清理"
 
 
 def test_run_requires_caddy_alive(paths):
@@ -233,13 +233,14 @@ def test_run_kills_process_on_ready_timeout(paths, tmp_path):
         )
     assert "就绪超时" in str(cm.value)
     assert not paths.routes_json.exists(), "超时不得留下路由"
-    deadline = time.time() + 5
-    while time.time() < deadline and not marker.exists():
-        time.sleep(0.05)
+    assert wait_until(
+        lambda: marker.exists() and marker.read_text().strip()
+    ), "子进程没写出 pid 标记"
     child_pid, grandchild_pid = (int(x) for x in marker.read_text().split())
-    time.sleep(0.3)
-    assert not _process_running(child_pid), "超时后子进程必须被杀"
-    assert not _process_running(grandchild_pid), "超时后孙进程必须被按组清理"
+    assert wait_until(
+        lambda: not _process_running(child_pid)
+        and not _process_running(grandchild_pid)
+    ), "超时后子进程与孙进程必须被杀（子进程按组清理）"
 
 
 def test_watch_re_registers_when_route_lost_from_caddy(paths):
@@ -264,10 +265,10 @@ def test_watch_re_registers_when_route_lost_from_caddy(paths):
     stop = threading.Event()
     t = threading.Thread(target=runner._watch, args=(route, stop), daemon=True)
     t.start()
-    time.sleep(0.5)
+    # 事件驱动：等到自检真的重新注册了为止，而不是「睡 0.5 秒就当它发生了」
+    assert wait_until(lambda: caddy.reloads > before), "路由丢失时应触发重新注册"
     stop.set()
-    t.join(timeout=2)
-    assert caddy.reloads > before, "路由丢失时应触发重新注册"
+    t.join(timeout=10)
 
 
 def test_watch_does_not_revive_removed_route(paths):
@@ -293,9 +294,11 @@ def test_watch_does_not_revive_removed_route(paths):
     stop = threading.Event()
     t = threading.Thread(target=runner._watch, args=(route, stop), daemon=True)
     t.start()
-    time.sleep(0.4)
+    # 给自检至少跑一轮的机会（heartbeat_interval=0.1）—— 这里必须留够余量：
+    # 负载高时守护线程的第一轮可能晚到，睡太短会误判成「没复活」
+    time.sleep(1.0)
     stop.set()
-    t.join(timeout=2)
+    t.join(timeout=10)
     assert caddy.reloads == before, "用户已注销的路由不应被复活"
 
 
@@ -330,10 +333,11 @@ def test_watch_re_registers_when_only_prefixed_domain_remains(paths):
     stop = threading.Event()
     t = threading.Thread(target=runner._watch, args=(route, stop), daemon=True)
     t.start()
-    time.sleep(0.5)
+    assert wait_until(lambda: caddy.reloads > before), (
+        "前缀域名（ax.test）不得让 x.test 伪装成存活"
+    )
     stop.set()
-    t.join(timeout=2)
-    assert caddy.reloads > before, "前缀域名（ax.test）不得让 x.test 伪装成存活"
+    t.join(timeout=10)
 
 
 def test_run_deregisters_when_signal_lands_during_registration(paths):
@@ -446,7 +450,8 @@ def test_run_signal_forwards_to_group_and_deregisters(paths, tmp_path):
     child_pid = None
     try:
         # 等注册完成（拿到子进程 pid）且孙进程 pid 已写出
-        deadline = time.time() + 20
+        # 超时给到 60s：负载高的机器上 python 子进程启动本身就要好几秒
+        deadline = time.time() + 60
         table = None
         while time.time() < deadline and (
             table is None or not grandchild_pid_file.exists()
@@ -457,19 +462,20 @@ def test_run_signal_forwards_to_group_and_deregisters(paths, tmp_path):
                 if loaded.get("routes"):
                     table = loaded
             time.sleep(0.1)
-        assert table is not None, "20s 内路由未注册"
+        assert table is not None, "60s 内路由未注册"
         child_pid = table["routes"][0]["pid"]
         grandchild_pid = int(grandchild_pid_file.read_text())
 
         proc.send_signal(signal.SIGTERM)
-        rc = proc.wait(timeout=20)
+        rc = proc.wait(timeout=60)
         assert rc == 143, f"被 SIGTERM 杀死应以 128+15 退出，实际 {rc}"
 
         table = json.loads(paths.routes_json.read_text())
         assert table["routes"] == [], "信号退出后路由必须注销"
-        time.sleep(0.3)
-        assert not _process_running(child_pid), "子进程应被按组清理"
-        assert not _process_running(grandchild_pid), "孙进程应被按组清理"
+        assert wait_until(
+            lambda: not _process_running(child_pid)
+            and not _process_running(grandchild_pid)
+        ), "子进程与孙进程应被按组清理"
     finally:
         if proc.poll() is None:
             proc.kill()
@@ -500,10 +506,7 @@ def test_kill_pid_group_kills_when_identity_matches():
     proc = _spawn_sleeper()
     try:
         assert kill_pid_group(proc.pid, proc_start_time(proc.pid)) is True
-        deadline = time.time() + 5
-        while time.time() < deadline and _process_running(proc.pid):
-            time.sleep(0.05)
-        assert not _process_running(proc.pid)
+        assert wait_until(lambda: not _process_running(proc.pid)), "进程组应已被杀"
     finally:
         stop_process_group(proc, proc.pid)
 
@@ -591,7 +594,9 @@ def test_watch_does_not_resurrect_route_removed_between_check_and_write(
     stop = threading.Event()
     t = threading.Thread(target=runner._watch, args=(route, stop), daemon=True)
     t.start()
-    t.join(timeout=5)
+    # 守护线程必须自己结束（路由没了就该退出）—— 给足超时，负载高时
+    # 第一轮心跳可能晚到
+    t.join(timeout=30)
     stop.set()
     assert not t.is_alive(), "路由已不存在，守护线程应结束"
     table = json.loads(paths.routes_json.read_text())

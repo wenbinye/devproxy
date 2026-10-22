@@ -485,6 +485,22 @@ http `14480`，独立 storage 与独立配置目录），完整跑一遍注册 �
 
 ---
 
+## 开发与 CI
+
+单元测试是**封闭的**：不碰真实系统、不需要 caddy 二进制、不需要网络，
+也不会写进你的家目录（`HOME` 在测试里被指向临时目录）。
+
+```bash
+python3 -m pytest -q --ignore=tests/test_integration.py   # 单元套件
+python3 -m pytest -q tests/test_integration.py             # 真机集成（需要真实 caddy）
+```
+
+CI 在 `.github/workflows/ci.yml`：push 到 `main`、提 PR 或手动触发时，
+在 Python 3.11 / 3.12 / 3.13 上跑**单元套件**（真机集成测试不进 CI ——
+它依赖真实 caddy 二进制与真实网络）。
+
+---
+
 ## 仓库里的历史文件
 
 仓库根目录的 `Caddyfile` 是**迁移前**的手工配置。**在 `devproxy setup` 的迁移真正跑过之前，

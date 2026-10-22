@@ -6,7 +6,30 @@ macOS 的 system scope 单元在 /Library/LaunchDaemons —— 权限或归属�
 手工维护的环境悄悄接管掉。
 """
 
+import time
 from pathlib import Path
+
+
+def wait_until(predicate, timeout=30.0, interval=0.02) -> bool:
+    """轮询直到条件成立；超时返回 False。
+
+    「先 sleep N 秒、再断言」这种写法在负载高的机器上会随机翻车：睡够了
+    不代表另一端的动作真的发生了（子进程可能还没起来、守护线程可能还没跑
+    到第一轮）。这里改成**等到事情发生为止**，并给出明确的超时上限 ——
+    正常路径立刻返回，异常路径才会等到超时（测试因此变慢，但不会误报）。
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        if predicate():
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(interval)
+
+
+def wait_for_file(path, timeout=30.0) -> bool:
+    """等文件出现（子进程写标记文件之类）。"""
+    return wait_until(lambda: Path(path).exists(), timeout=timeout)
 
 
 class UnreadablePath(Path):
