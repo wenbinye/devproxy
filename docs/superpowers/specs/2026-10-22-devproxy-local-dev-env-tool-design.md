@@ -442,6 +442,9 @@ storage = "~/.local/share/caddy"
 
 # up 的就绪等待超时（秒）
 ready_timeout = 60
+
+# caddy 二进制路径（setup 把固定版本下载到此处；改了它要重跑 setup 让服务单元指向新路径）
+caddy_bin = "~/.local/bin/caddy"
 ```
 
 **优先级**：CLI 参数 > `config.toml` > 内置默认值。**不生成默认配置文件** —— 避免"工具写了文件、用户改了、工具又覆盖"的困惑。看当前生效配置：`devproxy config`。
