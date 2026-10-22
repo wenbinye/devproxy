@@ -1,5 +1,6 @@
 import os
 import shutil
+import socket
 import ssl
 import subprocess
 import tempfile
@@ -15,9 +16,27 @@ from devproxy.proxy.routes import Route, RouteTable, render_caddyfile
 
 CADDY = Path(os.environ.get("DEVPROXY_TEST_CADDY", Path.home() / ".local" / "bin" / "caddy"))
 
-pytestmark = pytest.mark.skipif(
-    not CADDY.exists(), reason=f"需要 caddy 二进制：{CADDY}"
-)
+
+def _test_domain_resolves() -> bool:
+    """*.test 必须解析到本机 —— 自检要靠真实主机名做 TLS 主机名校验。"""
+    try:
+        infos = socket.getaddrinfo(
+            "devproxy-selftest-probe.test", 443, type=socket.SOCK_STREAM
+        )
+    except OSError:
+        return False
+    return any(info[4][0] in ("127.0.0.1", "::1") for info in infos)
+
+
+pytestmark = [
+    pytest.mark.skipif(
+        not CADDY.exists(), reason=f"需要 caddy 二进制：{CADDY}"
+    ),
+    pytest.mark.skipif(
+        not _test_domain_resolves(),
+        reason="需要 *.test 解析到 127.0.0.1/::1（如 dnsmasq address=/.test/127.0.0.1）",
+    ),
+]
 
 
 class _Handler(BaseHTTPRequestHandler):

@@ -13,6 +13,7 @@ import http.client
 import http.server
 import json
 import os
+import re
 import shutil
 import ssl
 import subprocess
@@ -31,6 +32,15 @@ HTTPS_PORT = 14443
 HTTP_PORT = 14480
 
 UPSTREAM_BODY = b"hello-from-upstream"
+
+# pki app（以及它的 install_trust 开关）自 Caddy 2.7 起才有。
+# 更老的 caddy 会静默忽略 JSON 里的 install_trust 字段 —— 那时沙箱 CA
+# 会被装进宿主的系统/NSS/Java 信任库，正是本任务要避免的事。
+MIN_CADDY_VERSION = (2, 7, 0)
+
+# Caddy 在 install_trust=false 时会打这行日志（modules/caddypki/pki.go）。
+# 它是「宿主信任库安装确实被关掉了」的唯一外部可见证据。
+TRUST_DISABLED_LOG = "root certificate trust store installation disabled"
 
 
 @dataclass
@@ -105,6 +115,28 @@ def _wait_file(path: Path, timeout: float = 15.0) -> bool:
     return False
 
 
+def _caddy_version(caddy_bin: Path) -> tuple[int, int, int] | None:
+    """解析 `caddy version` 的输出，形如 "v2.11.7 h1:..."。"""
+    try:
+        proc = subprocess.run(
+            [str(caddy_bin), "version"], capture_output=True, text=True, timeout=15
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    m = re.search(r"v?(\d+)\.(\d+)\.(\d+)", (proc.stdout or "") + (proc.stderr or ""))
+    if not m:
+        return None
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+
+
+def _read_log_tail(path: Path, limit: int = 800) -> str:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return "(读不到 caddy 日志)"
+    return text[-limit:].strip()
+
+
 def _adapt(caddy_bin: Path, caddyfile: Path, config_json: Path) -> tuple[bool, str]:
     """Caddyfile → JSON，并把沙箱 CA 的「装进系统信任库」关掉。
 
@@ -158,6 +190,29 @@ def run_selftest(caddy_bin: Path) -> SelftestResult:
     threading.Thread(target=upstream.serve_forever, daemon=True).start()
     uport = upstream.server_address[1]
 
+    # 版本地板：老于 2.7 的 caddy 没有 pki app，install_trust 会被静默忽略，
+    # 沙箱 CA 就会装进宿主信任库 —— 这种情况下宁可不跑。
+    version = _caddy_version(caddy_bin)
+    if version is None:
+        result.record("读取 caddy 版本", False)
+        upstream.shutdown()
+        upstream.server_close()
+        shutil.rmtree(tmp, ignore_errors=True)
+        return result
+    ver_str = ".".join(str(x) for x in version)
+    if version < MIN_CADDY_VERSION:
+        floor = ".".join(str(x) for x in MIN_CADDY_VERSION)
+        result.record(
+            f"caddy 版本 {ver_str} 过旧（需要 ≥ {floor}：更老的 caddy 没有 pki app，"
+            "沙箱 CA 会被装进宿主信任库）",
+            False,
+        )
+        upstream.shutdown()
+        upstream.server_close()
+        shutil.rmtree(tmp, ignore_errors=True)
+        return result
+    result.record(f"caddy 版本 {ver_str}（≥ {'.'.join(str(x) for x in MIN_CADDY_VERSION)}）", True)
+
     routes_file = tmp / "routes.caddy"
     sites_file = tmp / "sites.caddy"
     sites_file.write_text("", encoding="utf-8")
@@ -198,14 +253,18 @@ def run_selftest(caddy_bin: Path) -> SelftestResult:
         "XDG_CONFIG_HOME": str(tmp / "xdg-config"),
         "XDG_DATA_HOME": str(tmp / "xdg-data"),
     }
+    # caddy 的输出不丢：install_trust 是否真的生效，只能从它自己的日志里看出来
+    log_path = tmp / "caddy.log"
+    log_file = open(log_path, "wb")
     try:
         proc = subprocess.Popen(
             [str(caddy_bin), "run", "--config", str(config_json)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=log_file,
+            stderr=log_file,
             env=env,
         )
     except OSError as e:
+        log_file.close()
         result.record(f"沙箱 caddy 启动（{e}）", False)
         upstream.shutdown()
         upstream.server_close()
@@ -218,6 +277,23 @@ def run_selftest(caddy_bin: Path) -> SelftestResult:
             result.record("沙箱 caddy 启动", False)
             return result
         result.record("沙箱 caddy 启动", True)
+
+        # 「没污染宿主」是本自检的核心承诺之一，必须有证据，不能靠假设。
+        # 老版本 caddy 会静默忽略 install_trust，那时这行日志不会出现。
+        disabled = False
+        deadline = time.time() + 10
+        while time.time() < deadline and not disabled:
+            disabled = TRUST_DISABLED_LOG in _read_log_tail(log_path, limit=100000)
+            if not disabled:
+                time.sleep(0.2)
+        if disabled:
+            result.record("已确认禁用宿主信任库安装（caddy 日志佐证）", True)
+        else:
+            result.record(
+                "无法确认已禁用宿主信任库安装（Caddy 版本过旧？）—— caddy 输出尾部："
+                + _read_log_tail(log_path),
+                False,
+            )
 
         ctx = None
         if _wait_file(cafile):
@@ -232,16 +308,17 @@ def run_selftest(caddy_bin: Path) -> SelftestResult:
         if ctx is None:
             return result
 
-        # 未注册域名：注册前还没有任何被托管的主机名，拿不到证书
+        # 注册前：沙箱还不该对外服务 —— 明确断言「连接被拒绝」。
+        # 这一项断言的是隔离性（此刻没有站点块，14443 上没人监听），
+        # 真正验证「未注册域名拿不到证书」的是注册之后那一项。
         probe = _probe_context()
         try:
             _fetch("unregistered.test", HTTPS_PORT, probe)
-            result.record("未注册域名不签发证书", False)
-        except ssl.SSLError:
-            result.record("未注册域名不签发证书", True)
-        except OSError:
-            # 尚无被托管的主机名时 Caddy 干脆不监听 https 端口，连不上也算没发证书
-            result.record("未注册域名不签发证书", True)
+            result.record("注册前沙箱未对外服务（连接应被拒绝）", False)
+        except ConnectionRefusedError:
+            result.record("注册前沙箱未对外服务（连接应被拒绝）", True)
+        except (ssl.SSLError, OSError, http.client.HTTPException) as e:
+            result.record(f"注册前沙箱未对外服务（连接应被拒绝）：{e}", False)
 
         # 已注册域名：精确块 + tls internal
         write_routes(
@@ -270,7 +347,7 @@ def run_selftest(caddy_bin: Path) -> SelftestResult:
                 hit = status == 200 and body == UPSTREAM_BODY.decode()
                 if not hit:
                     last_err = f"状态 {status}"
-            except (ssl.SSLError, OSError) as e:
+            except (ssl.SSLError, OSError, http.client.HTTPException) as e:
                 last_err = str(e)
             if not hit:
                 time.sleep(0.3)
@@ -284,7 +361,8 @@ def run_selftest(caddy_bin: Path) -> SelftestResult:
             result.record("已注册后未注册域名仍拿不到证书", False)
         except ssl.SSLError:
             result.record("已注册后未注册域名仍拿不到证书", True)
-        except OSError as e:
+        except (OSError, http.client.HTTPException) as e:
+            # 连不上或响应异常：服务器要么没起来，要么真的给出了证书
             result.record(f"已注册后未注册域名仍拿不到证书（{e}）", False)
 
         # 80 → 443 跳转（必须在注销之前测：注销后 Caddy 不再管理该域名的跳转）
@@ -298,7 +376,7 @@ def run_selftest(caddy_bin: Path) -> SelftestResult:
                 location = r.getheader("Location")
                 r.read()
                 conn.close()
-            except OSError:
+            except (OSError, http.client.HTTPException):
                 time.sleep(0.3)
         result.record(
             "http 跳转 https",
@@ -314,7 +392,7 @@ def run_selftest(caddy_bin: Path) -> SelftestResult:
         try:
             status, body = _fetch("foo.test", HTTPS_PORT, ctx)
             result.record("注销后不再有路由", body != UPSTREAM_BODY.decode())
-        except (ssl.SSLError, OSError):
+        except (ssl.SSLError, OSError, http.client.HTTPException):
             result.record("注销后不再有路由", True)
     finally:
         proc.terminate()
@@ -322,6 +400,12 @@ def run_selftest(caddy_bin: Path) -> SelftestResult:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
+            # 杀掉之后也要回收，否则留下僵尸进程
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+        log_file.close()
         upstream.shutdown()
         upstream.server_close()
         shutil.rmtree(tmp, ignore_errors=True)
