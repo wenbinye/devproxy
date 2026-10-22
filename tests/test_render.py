@@ -1,0 +1,98 @@
+import json
+
+from devproxy.proxy.routes import (
+    Route,
+    RouteTable,
+    atomic_write,
+    load_table,
+    render_caddyfile,
+    save_table,
+)
+
+
+def _route(name="codeup", port=42133, mode="up"):
+    return Route(
+        name=name,
+        domain=f"{name}.test",
+        port=port,
+        mode=mode,
+        upstream=f"127.0.0.1:{port}",
+    )
+
+
+def test_render_empty_table_is_header_only():
+    out = render_caddyfile(RouteTable())
+    assert out == "# 由 devproxy 自动生成 —— 请勿手工编辑\n"
+
+
+def test_render_single_route():
+    out = render_caddyfile(RouteTable(routes=[_route()]))
+    assert out == (
+        "# 由 devproxy 自动生成 —— 请勿手工编辑\n"
+        "\n"
+        "codeup.test {\n"
+        "\ttls internal\n"
+        "\treverse_proxy 127.0.0.1:42133\n"
+        "}\n"
+    )
+
+
+def test_render_two_routes_separated_by_blank_line():
+    out = render_caddyfile(RouteTable(routes=[_route(), _route("legacy", 3000, "expose")]))
+    assert out.count("tls internal") == 2
+    assert "\n}\n\nlegacy.test {" in out
+
+
+def test_render_is_deterministic():
+    table = RouteTable(routes=[_route()])
+    assert render_caddyfile(table) == render_caddyfile(table)
+
+
+def test_render_contains_no_timestamp():
+    out = render_caddyfile(RouteTable(routes=[_route()]))
+    assert "生成于" not in out, "渲染必须确定性，不能含时间戳"
+
+
+def test_route_roundtrip():
+    r = _route()
+    r.command = ["sh", "-c", "npx vite"]
+    r.pid = 12345
+    assert Route.from_dict(r.to_dict()) == r
+
+
+def test_table_roundtrip():
+    t = RouteTable(routes=[_route()], domain_suffix="test")
+    assert RouteTable.from_dict(t.to_dict()) == t
+
+
+def test_table_upsert_replaces_same_name():
+    t = RouteTable(routes=[_route(port=1)])
+    t.upsert(_route(port=2))
+    assert len(t.routes) == 1
+    assert t.routes[0].port == 2
+
+
+def test_table_remove_returns_whether_removed():
+    t = RouteTable(routes=[_route()])
+    assert t.remove("codeup") is True
+    assert t.remove("codeup") is False
+
+
+def test_save_and_load_roundtrip(tmp_path):
+    p = tmp_path / "routes.json"
+    t = RouteTable(routes=[_route()])
+    save_table(p, t)
+    assert load_table(p) == t
+
+
+def test_load_missing_file_returns_empty_table(tmp_path):
+    t = load_table(tmp_path / "absent.json")
+    assert t.routes == []
+    assert t.version == 1
+
+
+def test_atomic_write_leaves_no_tmp_file(tmp_path):
+    p = tmp_path / "x.txt"
+    atomic_write(p, "hello")
+    assert p.read_text() == "hello"
+    assert list(tmp_path.iterdir()) == [p]
