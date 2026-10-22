@@ -132,6 +132,8 @@ class LinuxElevated:
     """提权会话。构造时执行一次 `sudo -v` 完成预认证。"""
 
     def __init__(self) -> None:
+        # 护栏也必须拦构造函数：直接 new 一个提权会话会真的跑 sudo -v。
+        _assert_may_mutate()
         self._authenticated = False
         self._authenticate()
 

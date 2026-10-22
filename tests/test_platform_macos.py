@@ -293,7 +293,7 @@ def test_service_active_system_scope_uses_launchctl_print(tmp_path, monkeypatch)
     monkeypatch.setattr(
         macos_mod,
         "_run",
-        lambda argv, timeout=None: (calls.append(list(argv)) or (0, "")),
+        lambda argv, timeout=None: (calls.append(list(argv)) or (0, "state = running")),
     )
     assert MacOSPlatform(user_home=tmp_path).service_active("caddy") is True
     assert calls[0] == ["launchctl", "print", "system/com.devproxy.caddy"]
@@ -621,3 +621,147 @@ def test_get_platform_returns_linux_elsewhere(monkeypatch):
 
     monkeypatch.setattr(macos_mod.sys, "platform", "linux")
     assert isinstance(get_platform(), LinuxPlatform)
+
+
+# ---------- service_active：必须是"真的在跑"，不只是"已加载" ----------
+
+
+def test_service_active_requires_running_state(tmp_path, monkeypatch):
+    """launchctl print 对"已注册但进程已退出"的服务也返回 0。
+
+    只有 state 才是"进程真的在跑"的证据 —— 否则 doctor 会把崩溃的
+    caddy 报成"在运行"。
+    """
+    monkeypatch.setattr(
+        macos_mod,
+        "_run",
+        lambda argv, timeout=None: (0, "com.devproxy.caddy = {\n\tstate = running\n}\n"),
+    )
+    assert MacOSPlatform(user_home=tmp_path).service_active("caddy") is True
+
+
+def test_service_active_false_when_loaded_but_exited(tmp_path, monkeypatch):
+    """已加载但已退出 → 不算在运行。"""
+    monkeypatch.setattr(
+        macos_mod,
+        "_run",
+        lambda argv, timeout=None: (0, "com.devproxy.caddy = {\n\tstate = not running\n}\n"),
+    )
+    assert MacOSPlatform(user_home=tmp_path).service_active("caddy") is False
+
+
+def test_service_active_false_when_state_line_missing(tmp_path, monkeypatch):
+    """输出里没有 state 行 → fail closed（按没跑处理）。
+
+    宁可报"没起来"让用户去查，也不能把没跑的服务报成在运行。
+    """
+    monkeypatch.setattr(
+        macos_mod,
+        "_run",
+        lambda argv, timeout=None: (0, "com.devproxy.caddy = {\n\tpid = 42\n}\n"),
+    )
+    assert MacOSPlatform(user_home=tmp_path).service_active("caddy") is False
+
+
+# ---------- system scope：单元权限与日志目录 ----------
+
+
+def test_install_service_system_scope_makes_plist_readable(
+    tmp_path, monkeypatch, allow_platform_mutation
+):
+    """单元落盘后必须用户可读 —— 工具自己要读它来判断"单元是不是当前的"。
+
+    特权写入走"临时文件 + sudo cp"：临时文件是 0600，cp 把权限带过来，
+    单元于是变成 0600 root。launchd 读得了，工具读不了 → doctor 永远
+    报"单元过期"，每次 setup 都要重装并再要一次密码。
+    """
+    calls = []
+    target = tmp_path / "LaunchDaemons" / "com.devproxy.caddy.plist"
+
+    def fake_run(argv, timeout=None):
+        calls.append(list(argv))
+        return 0, ""
+
+    monkeypatch.setattr(macos_mod, "_run", fake_run)
+    p = MacOSPlatform(user_home=tmp_path)
+    monkeypatch.setattr(p, "service_unit_path", lambda name: target)
+    p.install_service("caddy", exec_start=["/opt/caddy", "run"], env={})
+
+    chmod = [c for c in calls if c[:3] == ["sudo", "chmod", "644"]]
+    chown = [c for c in calls if c[:3] == ["sudo", "chown", "root:wheel"]]
+    assert chmod and chmod[0][3] == str(target), "单元必须改成 0644"
+    assert chown and chown[0][3] == str(target), "单元归属应为 root:wheel"
+    cp = [c for c in calls if c[:2] == ["sudo", "cp"]]
+    assert cp and calls.index(cp[0]) < calls.index(chmod[0]), "改权限必须在写入之后"
+
+
+def test_install_service_system_scope_creates_log_dir(
+    tmp_path, monkeypatch, allow_platform_mutation
+):
+    """launchd 打开 StandardOutPath 时父目录必须已经存在。
+
+    组件顺序是 caddy → dnsmasq → …，caddy 最先装 —— 那时日志目录
+    还不存在，launchd 起不来（第二次 setup 才会自愈，第一次已经失败）。
+    """
+    target = tmp_path / "LaunchDaemons" / "com.devproxy.caddy.plist"
+    monkeypatch.setattr(macos_mod, "_run", lambda argv, timeout=None: (0, ""))
+    p = MacOSPlatform(user_home=tmp_path)
+    monkeypatch.setattr(p, "service_unit_path", lambda name: target)
+    p.install_service("caddy", exec_start=["/opt/caddy", "run"], env={})
+    assert p.log_path("caddy").parent.is_dir(), "日志目录必须在 bootstrap 之前建好"
+
+
+def test_install_service_user_scope_creates_log_dir(tmp_path, fake_run):
+    p = MacOSPlatform(user_home=tmp_path)
+    p.install_service("dnsmasq", exec_start=["/usr/local/sbin/dnsmasq"], env={})
+    assert p.log_path("dnsmasq").parent.is_dir()
+
+
+def test_log_path_follows_the_shared_state_dir(tmp_path, monkeypatch):
+    """状态目录只有一个来源（paths.default_state_dir）—— 平台不自己拼路径。"""
+    monkeypatch.setenv("DEVPROXY_STATE_DIR", str(tmp_path / "state"))
+    p = MacOSPlatform(user_home=tmp_path)
+    assert p.log_path("caddy") == tmp_path / "state" / "logs" / "caddy.log"
+
+
+# ---------- 提权会话的护栏 ----------
+
+
+def test_elevated_session_cannot_be_constructed_under_test(monkeypatch):
+    """直接构造提权会话会真的跑 sudo -v —— 护栏必须连构造函数一起拦。"""
+    monkeypatch.setattr(
+        macos_mod, "_run", lambda argv, timeout=None: pytest.fail("不该执行 sudo")
+    )
+    with pytest.raises(RuntimeError, match="禁止"):
+        MacOSElevated()
+
+
+# ---------- 共享的单元解析 ----------
+
+
+def test_unit_exec_argv_reads_both_unit_formats():
+    """systemd 的 ExecStart= 行与 launchd 的 ProgramArguments 数组都要认。"""
+    from devproxy.platform.base import unit_exec_argv
+
+    systemd = "[Service]\nExecStart=/opt/caddy run --config /etc/Caddyfile\n"
+    assert unit_exec_argv(systemd) == [
+        "/opt/caddy",
+        "run",
+        "--config",
+        "/etc/Caddyfile",
+    ]
+    plist = plistlib.dumps(
+        {
+            "Label": "com.devproxy.caddy",
+            "ProgramArguments": ["/opt/caddy", "run", "--config", "/etc/Caddyfile"],
+        }
+    ).decode("utf-8")
+    assert unit_exec_argv(plist) == [
+        "/opt/caddy",
+        "run",
+        "--config",
+        "/etc/Caddyfile",
+    ]
+    assert unit_exec_argv("什么都不像") is None
+
+

@@ -95,7 +95,9 @@ def test_fake_platform_privilege_session_is_cached():
 # ---------- Fix round 1: 提权写入 / 日志流式 / 服务操作失败即抛 ----------
 
 
-def test_linux_elevated_write_uses_system_temp_then_sudo_cp(monkeypatch, tmp_path):
+def test_linux_elevated_write_uses_system_temp_then_sudo_cp(
+    monkeypatch, tmp_path, allow_platform_mutation
+):
     """内容须在系统临时目录备好，再 sudo cp 到目标；临时文件不得落在目标目录里。"""
     calls = []
 
@@ -120,7 +122,9 @@ def test_linux_elevated_write_uses_system_temp_then_sudo_cp(monkeypatch, tmp_pat
     assert not tmp_used.exists(), "成功后临时文件应清理"
 
 
-def test_linux_elevated_write_failure_raises_and_cleans_temp(monkeypatch, tmp_path):
+def test_linux_elevated_write_failure_raises_and_cleans_temp(
+    monkeypatch, tmp_path, allow_platform_mutation
+):
     """sudo cp 失败时抛 PermissionError，且临时文件也必须清理（try/finally）。"""
     seen_tmp = []
 
@@ -239,7 +243,9 @@ def test_linux_install_service_writes_unit_file(
     assert "Environment=MINIKUBE_IP=1.2.3.4" in unit
 
 
-def test_linux_elevated_read_distinguishes_missing_from_permission(monkeypatch):
+def test_linux_elevated_read_distinguishes_missing_from_permission(
+    monkeypatch, allow_platform_mutation
+):
     """文件缺失抛 FileNotFoundError，其余失败（如权限）抛 PermissionError。"""
 
     def fake_run(argv):
@@ -442,7 +448,9 @@ def test_fake_platform_nss_trusted_tracks_its_own_set(tmp_path):
 # -- 特权写入前建父目录（干净机器上 /etc/... 目录可能不存在） ----------------
 
 
-def test_linux_elevated_write_creates_parent_dir_before_cp(monkeypatch, tmp_path):
+def test_linux_elevated_write_creates_parent_dir_before_cp(
+    monkeypatch, tmp_path, allow_platform_mutation
+):
     calls = []
 
     def fake_run(argv):
@@ -460,7 +468,9 @@ def test_linux_elevated_write_creates_parent_dir_before_cp(monkeypatch, tmp_path
     assert calls.index(install[0]) < calls.index(cp[0]), "install -d 必须在 cp 之前"
 
 
-def test_linux_elevated_write_raises_when_mkdir_fails(monkeypatch, tmp_path):
+def test_linux_elevated_write_raises_when_mkdir_fails(
+    monkeypatch, tmp_path, allow_platform_mutation
+):
     monkeypatch.setattr(
         linux_mod,
         "_run",

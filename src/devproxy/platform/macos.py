@@ -14,11 +14,13 @@ from __future__ import annotations
 import ipaddress
 import os
 import plistlib
+import re
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
+from devproxy.paths import default_state_dir
 from devproxy.platform.base import (
     RESOLVER_DIR,
     ElevatedSession,
@@ -31,6 +33,9 @@ LAUNCH_DAEMONS = "/Library/LaunchDaemons"
 
 # DNS 解析的超时上限（秒）：解析器挂住不能把 doctor 拖死。
 DNS_QUERY_TIMEOUT = 3
+
+# launchctl print 里的服务状态行（"state = running" / "state = not running"）。
+_LAUNCHD_STATE = re.compile(r"^\s*state\s*=\s*(\S+)", re.MULTILINE)
 
 
 def _run(argv: list[str], timeout: float | None = None) -> tuple[int, str]:
@@ -58,6 +63,24 @@ def _first_ip(text: str) -> str | None:
             except ValueError:
                 continue
     return None
+
+
+def _launchd_running(text: str) -> bool:
+    """launchctl print 的输出里，服务是否**真的在跑**。
+
+    输出形如::
+
+        com.devproxy.caddy = {
+            active count = 1
+            path = /Library/LaunchDaemons/com.devproxy.caddy.plist
+            state = running
+
+    launchctl print 对"已注册但进程已退出"的服务也返回 0 —— 只有 state
+    才是"进程在跑"的证据。看不到 running 就按没跑处理（fail closed）：
+    宁可让用户去查，也不能把崩溃的服务报成在运行。
+    """
+    match = _LAUNCHD_STATE.search(text)
+    return bool(match) and match.group(1) == "running"
 
 
 # 平台自身单元测试的显式豁免：那些用例要把 _run 换成假的、路径指向
@@ -123,6 +146,9 @@ class MacOSElevated:
     """提权会话。构造时执行一次 `sudo -v` 完成预认证。"""
 
     def __init__(self) -> None:
+        # 护栏也必须拦构造函数：直接 new 一个提权会话会真的跑 sudo -v，
+        # 后面还可能往系统钥匙串里写东西。
+        _assert_may_mutate()
         code, msg = _run(["sudo", "-v"])
         if code != 0:
             raise PermissionError(f"提权失败：{msg}")
@@ -200,8 +226,17 @@ class MacOSPlatform:
         return out.split()[0] if out else ""
 
     def service_active(self, name: str) -> bool:
-        code, _ = _run(["launchctl", "print", f"{self._domain(name)}/com.devproxy.{name}"])
-        return code == 0
+        """服务是否**真的在跑**（不只是"已加载"）。
+
+        launchctl print 对已注册但已退出的服务同样返回 0 —— 直接拿退出码
+        当"在运行"，doctor 会把崩溃的 caddy 报成好的。
+        """
+        code, out = _run(
+            ["launchctl", "print", f"{self._domain(name)}/com.devproxy.{name}"]
+        )
+        if code != 0:
+            return False
+        return _launchd_running(out)
 
     def resolved_active(self) -> bool:
         """macOS 没有 systemd-resolved —— auto 后端绝不能选它。"""
@@ -289,9 +324,23 @@ class MacOSPlatform:
         content = render_plist(name, args, env, self.log_path(name), description)
         domain = self._domain(name)
         target = f"{domain}/com.devproxy.{name}"
+        # 日志目录必须在 bootstrap 之前就存在：launchd 打开 StandardOutPath
+        # 时父目录不存在就直接起不来。组件顺序是 caddy → dnsmasq → …，
+        # caddy 最先装 —— 那时日志目录还没人建。目录在用户家目录下，
+        # 用用户身份建即可（root 进程照样写得进去）。
+        self.log_path(name).parent.mkdir(parents=True, exist_ok=True)
         if self._is_system_scope(name):
             # /Library/LaunchDaemons 归 root —— 必须走特权写入
             self.privilege().write(path, content)
+            # 特权写入是"临时文件 + sudo cp"：临时文件是 0600，cp 会把权限
+            # 带过来，单元于是变成 0600 root。launchd 读得了，工具自己读不了
+            # —— doctor 会永远报"单元过期"，每次 setup 都要重装并再要一次密码。
+            # 归属改成 root:wheel 是锦上添花（wheel 是 macOS 的标准组），
+            # 失败不阻断安装；权限 0644 才是关键。
+            self.privilege().run(["chown", "root:wheel", str(path)])
+            code, msg = self.privilege().run(["chmod", "644", str(path)])
+            if code != 0:
+                raise RuntimeError(f"设置单元权限失败（chmod 644）: {msg}")
             self.privilege().run(["launchctl", "bootout", target])
             code, msg = self.privilege().run(
                 ["launchctl", "bootstrap", "system", str(path)]
@@ -299,7 +348,6 @@ class MacOSPlatform:
         else:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content, encoding="utf-8")
-            self.log_path(name).parent.mkdir(parents=True, exist_ok=True)
             # bootout 只是"卸掉可能存在的旧实例"，没装过时失败是正常的
             _run(["launchctl", "bootout", target])
             code, msg = _run(["launchctl", "bootstrap", domain, str(path)])
@@ -341,10 +389,8 @@ class MacOSPlatform:
         return f"gui/{os.getuid()}"
 
     def _state_dir(self) -> Path:
-        env = os.environ.get("DEVPROXY_STATE_DIR")
-        if env:
-            return Path(env).expanduser()
-        return self.user_home / ".local" / "state" / "devproxy"
+        """状态目录 —— 唯一来源是 paths.default_state_dir，平台不自己拼路径。"""
+        return default_state_dir(self.user_home)
 
     def _expand(self, arg: str) -> str:
         """展开参数里的 ~ —— launchd 认不出它。

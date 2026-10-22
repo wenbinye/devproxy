@@ -76,15 +76,28 @@ class Paths:
             f.touch(exist_ok=True)
 
 
+def default_state_dir(home: Path | None = None) -> Path:
+    """状态目录（默认 ~/.local/state/devproxy）。
+
+    状态目录只有一个来源 —— 平台层（macOS 的日志目录等）也走这里，
+    不许自己拼路径：拼两份就迟早对不上，日志写一半、状态存一半。
+
+    环境变量 DEVPROXY_STATE_DIR 优先（测试与多实例场景用）。
+    """
+    env = os.environ.get("DEVPROXY_STATE_DIR")
+    if env:
+        return Path(env).expanduser()
+    base = home or Path.home()
+    return base / ".local" / "state" / "devproxy"
+
+
 def default_paths() -> Paths:
     """默认路径；环境变量可整体覆盖（测试与多实例场景用）。"""
     home = Path.home()
     config_dir = Path(
         os.environ.get("DEVPROXY_CONFIG_DIR", home / ".config" / "devproxy")
     )
-    state_dir = Path(
-        os.environ.get("DEVPROXY_STATE_DIR", home / ".local" / "state" / "devproxy")
-    )
+    state_dir = default_state_dir(home)
     data_dir = Path(
         os.environ.get("DEVPROXY_DATA_DIR", home / ".local" / "share" / "caddy")
     )

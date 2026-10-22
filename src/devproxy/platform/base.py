@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import plistlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol, runtime_checkable
@@ -34,6 +35,35 @@ def render_resolver_file(port: int) -> str:
     放在这里是因为组件层（DNS 组件）也要用它 —— 组件不直接依赖某个平台实现。
     """
     return f"nameserver 127.0.0.1\nport {port}\n"
+
+
+def unit_exec_argv(text: str) -> list[str] | None:
+    """从服务单元文本里解析出启动命令行。
+
+    两种格式都要认：
+    - systemd：``ExecStart=/path/caddy run --config /path/Caddyfile``
+    - launchd plist：``ProgramArguments`` 数组
+
+    组件判断"单元是不是当前的"靠它 —— 只做子串匹配会把顺序与参数配对
+    都放过（"run --config" 和 "--config … run" 都能蒙混过关），单元
+    指向别的 Caddyfile 时就判不出来了。
+    """
+    try:
+        data = plistlib.loads(text.encode("utf-8"))
+    except Exception:  # noqa: BLE001 —— 不是 plist 就当 systemd 单元看
+        data = None
+    if isinstance(data, dict):
+        argv = data.get("ProgramArguments")
+        if isinstance(argv, list) and argv and all(isinstance(a, str) for a in argv):
+            return list(argv)
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line.startswith("ExecStart="):
+            continue
+        args = line[len("ExecStart="):].split()
+        if args:
+            return args
+    return None
 
 
 @dataclass

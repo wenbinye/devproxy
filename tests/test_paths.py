@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from devproxy.paths import Paths, default_paths
+from devproxy.paths import Paths, default_paths, default_state_dir
 
 
 def test_derived_paths(tmp_path):
@@ -51,3 +51,17 @@ def test_default_paths_stay_inside_isolated_home():
     p = default_paths()
     for path in (p.config_dir, p.state_dir, p.data_dir):
         assert str(path).startswith(str(home)), f"{path} 跑到了 HOME 之外"
+
+
+def test_default_state_dir_is_the_single_source_of_truth(tmp_path, monkeypatch):
+    """状态目录只有一个来源 —— 平台层不许自己拼路径。"""
+    monkeypatch.setenv("DEVPROXY_STATE_DIR", str(tmp_path / "st"))
+    assert default_state_dir() == tmp_path / "st"
+    assert default_paths().state_dir == tmp_path / "st"
+
+
+def test_default_state_dir_defaults_under_home(tmp_path, monkeypatch):
+    monkeypatch.delenv("DEVPROXY_STATE_DIR", raising=False)
+    assert default_state_dir(tmp_path) == tmp_path / ".local" / "state" / "devproxy"
+    assert default_state_dir() == Path.home() / ".local" / "state" / "devproxy"
+
