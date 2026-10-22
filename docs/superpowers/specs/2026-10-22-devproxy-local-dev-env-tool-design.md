@@ -78,6 +78,8 @@ devproxy up codeup -- sh -c 'npx vite --port $PORT'
 | D16 | 服务单元命名 | 沿用 `caddy.service` / `dnsmasq.service` | 现有 systemctl 习惯不变，迁移只改 `ExecStart` |
 | D17 | 日志后端 | Linux 走 journald（保持现状），macOS 写文件 | 切换到文件会让 Linux 丢失 journald 的结构化能力 |
 | D18 | 端口分配 | `bind(':0')` 探测后释放（沿用现有实现） | 竞态窗口极小，实现简单 |
+| D19 | Caddy 下载源 | GitHub release 固定版本 + **源码内置 sha256** 校验 | 上游 `caddy_2.11.7_checksums.txt` 与实际托管的 tar.gz/deb 均不一致（实测），不能信任该文件；改为内置观测到的哈希（TOFU 于实现时），并额外校验解包后 `caddy version` |
+| D20 | 迁移备份 | 迁移前强制备份所有将被修改的配置文件到 `~/.local/state/devproxy/backups/<UTC时间戳>/`，附 `MANIFEST.txt` | 迁移动的是正在用的服务配置；备份失败则整个迁移中止 |
 
 ### 2.1 已实测的技术前提
 
@@ -92,6 +94,21 @@ devproxy up codeup -- sh -c 'npx vite --port $PORT'
 | S5 | 多个 `import` 片段可组合（被 import 文件不含全局块） | ✅ |
 
 **S2 是 D5 的依据**，S3 是 D5 的额外收益（未注册域名无法获得被信任的证书）。
+
+### 2.2 Caddy 发布包观测哈希（v2.11.7）
+
+上游 `caddy_2.11.7_checksums.txt` 与 GitHub 实际托管的资产**均不一致**（tar.gz 与 deb 都对不上，说明上游在校验和文件生成后重打了包）。因此**不信任该文件**，改为在源码中内置实测哈希：
+
+| 资产 | sha256 |
+|---|---|
+| `caddy_2.11.7_linux_amd64.tar.gz` | `727b91701a392de6ebc5027509f548bf39979e5216340d0faed8fa5e69c84f8b` |
+| `caddy_2.11.7_linux_arm64.tar.gz` | `d8fc6d179a5d283028a472a5618564f6ad8a86fed513e64f032b3b0b7cc45e42` |
+| `caddy_2.11.7_mac_arm64.tar.gz` | `cda3030e5d5b13eb9f0b6fb541037f633bddd958c070c5f561d7a5cccb581665` |
+| `caddy_2.11.7_mac_amd64.tar.gz` | `110c53e5c093e4cfce6eda787f94f23bef913c309f620fab26b4f678031841ad` |
+
+资产命名规则：`caddy_{version}_{os}_{arch}.tar.gz`，其中 `os ∈ {linux, mac}`（**macOS 是 `mac` 不是 `darwin`**）、`arch ∈ {amd64, arm64}`。tarball 内含 `caddy`、`LICENSE`、`README.md` 三个文件，二进制在根目录。
+
+下载源：`https://github.com/caddyserver/caddy/releases/download/v{version}/{asset}`。校验分两层：内置 sha256 比对 + 解包后 `caddy version` 输出的版本号比对。
 
 ---
 
@@ -259,7 +276,6 @@ devproxy selftest
 
 ```caddyfile
 # 由 devproxy 自动生成 —— 请勿手工编辑
-# 生成于 2026-10-22T10:03:11Z
 
 codeup.test {
 	tls internal
@@ -271,6 +287,8 @@ legacy.test {
 	reverse_proxy 127.0.0.1:3000
 }
 ```
+
+**渲染必须是确定性的**（不含时间戳等易变内容）—— 同样的路由表必须渲染出逐字节相同的文本，否则幂等性无法验证、diff 噪音也无法消除。
 
 **一个路由 = 一个精确站点块**。这是 D5 的落地形态。
 
@@ -378,7 +396,7 @@ devproxy setup
 
 | 组件 | check() 看什么 | install() 做什么 | verify() 验什么 |
 |---|---|---|---|
-| **Caddy** | 二进制存在？版本？`getcap` 有 `cap_net_bind_service`？user unit 存在且指向工具的 Caddyfile？active？ | 下载二进制（固定版本 + sha256 校验）；`sudo setcap`；写 `~/.config/devproxy/Caddyfile`；装 systemd user unit + `enable-linger` | `curl https://localhost` TLS 握手成功 |
+| **Caddy** | 二进制存在？版本？`getcap` 有 `cap_net_bind_service`？user unit 存在且指向工具的 Caddyfile？active？ | 二进制已存在则复用；否则从 GitHub release 下载固定版本 tarball，按**内置 sha256** 校验后解包；`sudo setcap`；写 `~/.config/devproxy/Caddyfile`；装 systemd user unit + `enable-linger` | `curl https://localhost` TLS 握手成功 |
 | **Dnsmasq** | `~/.config/dnsmasq/dnsmasq.conf` 存在？用户级 dnsmasq 在跑且监听 5353？ | 写配置（`port=5353`、`address=/.test/127.0.0.1`、上游 `server=…`、`no-resolv`）；装 user unit | `dig @127.0.0.1 -p 5353 foo.test` → `127.0.0.1` |
 | **Dns** | resolved 后端：`/etc/systemd/resolved.conf.d/devproxy.conf` 内容正确？system 后端：`/etc/dnsmasq.d/` 有对应段？ | 写 resolved conf（`DNS=127.0.0.1:5353` + `Domains=~.test`）或系统 dnsmasq 段；system 后端需处理 53 冲突 | `resolvectl query foo.test` → `127.0.0.1` |
 | **Cert** | 根证书在系统信任库？在 NSS 库？ | Linux：`update-ca-certificates` + `certutil -A`；macOS：`security add-trusted-cert` | `openssl verify` + 一次真实 HTTPS 请求 |
@@ -498,14 +516,22 @@ localhost {
 `setup` 检测到遗留布局（非本工具管理的 caddy 服务）时：
 
 ```
-1. 备份 caddy.service → caddy.service.bak
-        Caddyfile     → Caddyfile.bak
+1. 备份所有将被修改的原始配置文件
+   → ~/.local/state/devproxy/backups/<UTC时间戳>/
+     caddy.service.bak        ← ~/.config/systemd/user/caddy.service
+     Caddyfile.bak            ← <repo>/Caddyfile
+     dnsmasq.conf.bak         ← ~/.config/dnsmasq/dnsmasq.conf
+     dnsmasq.service.bak      ← ~/.config/systemd/user/dnsmasq.service
+     resolved.conf.bak        ← /etc/systemd/resolved.conf.d/*.conf
+     MANIFEST.txt             ← 列出每个备份的原始路径与 sha256
 2. 拆出个人站点块 → ~/.config/devproxy/sites.caddy
 3. 生成 ~/.config/devproxy/Caddyfile（全局块 + import 两个片段）
 4. 改写 unit 的 ExecStart → 指向新 Caddyfile
 5. systemctl --user restart caddy
 6. 验证
 ```
+
+**备份是强制前置步骤** —— 备份目录创建失败则整个迁移中止，不做任何修改。备份目录带 UTC 时间戳，因此多次迁移不会互相覆盖；`MANIFEST.txt` 记录每个备份对应的原始路径与 sha256，便于回滚时精确还原。备份目录只增不删，由用户自行清理。
 
 **验证步骤**（每步都要过）：
 
@@ -524,7 +550,8 @@ localhost {
 迁移动的是正在用的服务配置，回滚是硬要求：
 
 ```
-恢复 caddy.service.bak 与 Caddyfile.bak
+从 MANIFEST.txt 找到最近一次备份目录
+→ 逐个还原原始文件到其原始路径
 → systemctl --user restart caddy
 → 验证 https://localhost 恢复
 → 报告失败点
