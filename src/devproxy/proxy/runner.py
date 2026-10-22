@@ -11,6 +11,7 @@ import os
 import signal
 import socket
 import subprocess
+import sys
 import threading
 import time
 from typing import Callable
@@ -50,11 +51,14 @@ def _route_live(admin: CaddyAdmin, domain: str) -> bool:
 
     整个 /config/ 序列化后做子串匹配 —— 免去猜测 Caddy 内部的 server 编号
     （srv0/srv1 取决于 listen 地址的字典序）。
+
+    匹配带引号的域名（"codeup.test"）：裸域名匹配会让 "x.test" 命中
+    "ax.test" —— 前缀不同的另一条路由会把丢失的路由伪装成存活。
     """
     code, body = admin.api("GET", "/config/")
     if code != 200 or body is None:
         return False
-    return domain in json.dumps(body)
+    return f'"{domain}"' in json.dumps(body)
 
 
 def stop_process_group(
@@ -185,8 +189,11 @@ class UpRunner:
                 pid=proc.pid,
                 created_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             )
-            self.store.mutate(lambda t: t.upsert(route))
+            # 先置位再注册：信号可能在 mutate（validate+reload，秒级窗口）内部
+            # 落下并抛 SystemExit，此时 finally 仍要尝试注销，不能留下指向死
+            # 端口的路由；对从未写入的路由做 remove 是无害的 no-op
             registered = True
+            self.store.mutate(lambda t: t.upsert(route))
             watcher = threading.Thread(
                 target=self._watch, args=(route, stop), daemon=True
             )
@@ -202,7 +209,11 @@ class UpRunner:
                 try:
                     self.store.mutate(lambda t: t.remove(name))
                 except Exception:
-                    pass
+                    # 静默吞掉会让残留路由指向已被杀死的子进程 —— 必须提示用户
+                    print(
+                        f"⚠️  devproxy: 注销失败，残留路由请执行 devproxy down {name}",
+                        file=sys.stderr,
+                    )
             stop_process_group(proc, pgid)
             for s, handler in old_handlers.items():
                 signal.signal(s, handler)
