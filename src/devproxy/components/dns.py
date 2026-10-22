@@ -25,9 +25,30 @@ RESOLVED_CONF_DIR = Path("/etc/systemd/resolved.conf.d")
 RESOLVED_CONF = RESOLVED_CONF_DIR / "devproxy.conf"
 SYSTEM_DNSMASQ_CONF = Path("/etc/dnsmasq.d/devproxy.conf")
 
+# resolved 的整机兜底解析器。披露文案与真正写进配置的必须是同一份 ——
+# 两处各写一遍就会漂移，用户看到的和实际生效的就对不上了。
+FALLBACK_DNS = "1.1.1.1 8.8.8.8"
+
 # 记录上次写入的路由内容哈希 —— /etc 下的文件普通用户未必读得到，
 # 靠自家 state 目录里的哈希判断“是否已就绪”，让 setup 第二次跑成 no-op。
 STATE_FILE = "dns-route.json"
+
+
+def global_scope_disclosure(port: int) -> str:
+    """resolved 后端的整机作用域披露（多行短句，便于终端阅读）。
+
+    `DNS=` 写在 drop-in 的全局段里 —— 它决定的是**这台机器全部域名**的解析
+    都先问用户级的 dnsmasq，不只是 `*.test`。`FallbackDNS=` 则是整机兜底：
+    dnsmasq 起不来时，全机解析退化为公共 DNS。
+
+    这两件事必须写进 setup 的变更清单：用户点确认之前就该知道自己在改什么。
+    """
+    return (
+        "⚠ 整机作用域（这台机器全部域名，不只是 *.test）\n"
+        f"  · DNS=127.0.0.1:{port}：全机解析先问用户级 dnsmasq\n"
+        f"  · FallbackDNS={FALLBACK_DNS}：整机兜底\n"
+        "    dnsmasq 起不来时，全机解析退化为公共 DNS"
+    )
 
 
 def render_resolved_conf(*, port: int, domains: list[str]) -> str:
@@ -35,7 +56,7 @@ def render_resolved_conf(*, port: int, domains: list[str]) -> str:
     return (
         "[Resolve]\n"
         f"DNS=127.0.0.1:{port}\n"
-        "FallbackDNS=1.1.1.1 8.8.8.8\n"
+        f"FallbackDNS={FALLBACK_DNS}\n"
         f"Domains={suffix}\n"
     )
 
@@ -98,6 +119,20 @@ class DnsComponent:
             return "resolver"
         return "resolved" if self.resolved_backend else "system"
 
+    # -- 披露 ------------------------------------------------------------
+    def global_scope_note(self) -> str | None:
+        """整机作用域的披露文案；不涉及整机时返回 None。
+
+        只有 resolved 后端有整机作用域：`DNS=` 与 `FallbackDNS=` 写在 drop-in 的
+        全局段里，改的是**这台机器**的解析路径。macOS 的每域解析器文件与
+        `system` 后端的 dnsmasq 片段都只影响本后缀，不涉及整机。
+
+        setup 会把这段话单独打一遍 —— 变更清单的表格里放不下，也放不下重点。
+        """
+        if not self.resolved_backend:
+            return None
+        return global_scope_disclosure(self.platform.dns_port)
+
     # -- check ---------------------------------------------------------
     def check(self) -> Status:
         key = self._backend_key()
@@ -133,7 +168,9 @@ class DnsComponent:
             content = render_resolved_conf(
                 port=self.platform.dns_port, domains=[self.config.domain_suffix]
             )
-            desc = "写入 systemd-resolved 路由（*.%s → 127.0.0.1）" % self.config.domain_suffix
+            desc = "写入 systemd-resolved 路由（*.%s → 127.0.0.1，整机 DNS 作用域）" % (
+                self.config.domain_suffix,
+            )
             reload_action = Action(
                 description="重载 systemd-resolved 使路由生效",
                 kind="run",

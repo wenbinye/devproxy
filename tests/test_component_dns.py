@@ -429,3 +429,47 @@ def test_linux_plan_still_restarts_resolved(tmp_path):
     comp, _platform = _component(tmp_path, backend="resolved")
     reload_action = next(a for a in comp.plan() if a.kind == "run")
     assert reload_action.command == ["systemctl", "restart", "systemd-resolved"]
+
+
+# -- 整机作用域的披露（Finding 8） -----------------------------------------
+
+
+def test_global_scope_note_names_machine_wide_dns_and_fallback(tmp_path):
+    """resolved 的 DNS= / FallbackDNS= 改的是**整机** —— 必须写明。
+
+    这两行写在 drop-in 的全局段里：DNS= 让这台机器全部域名的解析都先问
+    用户级 dnsmasq，FallbackDNS= 是整机兜底。用户点确认之前就该知道。
+    """
+    comp, _platform = _component(tmp_path, backend="resolved")
+    note = comp.global_scope_note()
+    assert note is not None
+    assert "DNS=127.0.0.1:5353" in note
+    assert "FallbackDNS=1.1.1.1 8.8.8.8" in note
+    assert "整机" in note
+    assert "dnsmasq 起不来" in note, "必须说清 dnsmasq 挂掉时的降级后果"
+
+
+def test_global_scope_note_none_for_system_backend(tmp_path):
+    """system 后端只写本后缀的 dnsmasq 片段 —— 不涉及整机，不披露。"""
+    comp, _platform = _component(tmp_path, backend="system")
+    assert comp.global_scope_note() is None
+
+
+def test_global_scope_note_none_for_macos_resolver_backend(tmp_path):
+    """macOS 的每域解析器文件不影响其它域名 —— 不披露整机作用域。"""
+    comp, _platform = _component(tmp_path, backend="auto", platform=_MacPlatform())
+    assert comp.global_scope_note() is None
+
+
+def test_resolved_plan_description_marks_global_scope(tmp_path):
+    """变更清单的表格里也要看得出这是整机作用域。"""
+    comp, _platform = _component(tmp_path, backend="resolved")
+    write_action = next(a for a in comp.plan() if a.kind == "write")
+    assert "整机" in write_action.description
+
+
+def test_fallback_dns_constant_matches_rendered_conf(tmp_path):
+    """披露文案里的 FallbackDNS 必须与真正写进配置的一致。"""
+    content = render_resolved_conf(port=5353, domains=["test"])
+    assert f"FallbackDNS={dns_module.FALLBACK_DNS}" in content
+    assert dns_module.FALLBACK_DNS in dns_module.global_scope_disclosure(5353)

@@ -403,3 +403,58 @@ def test_cli_setup_aborts_when_user_declines(tmp_path, monkeypatch):
     assert comps[0].applied is None
     assert "已取消" in result.stdout
     assert "什么都没改" in result.stdout
+
+
+# -- 整机作用域的披露（Finding 8） -----------------------------------------
+
+
+class FakeScopeComponent(FakeCliComponent):
+    """带整机作用域披露的假组件。"""
+
+    def __init__(self, name, note, status=None, actions=()):
+        super().__init__(name, status, actions)
+        self._note = note
+
+    def global_scope_note(self):
+        return self._note
+
+
+def test_cli_setup_prints_global_scope_disclosure(tmp_path, monkeypatch):
+    """变更清单必须点名整机作用域 —— 表格放不下，就单独打一遍。"""
+    from typer.testing import CliRunner
+
+    from devproxy.cli import app
+
+    comps = [
+        FakeScopeComponent(
+            "dns",
+            "⚠ 整机作用域（这台机器全部域名，不只是 *.test）\n"
+            "  · DNS=127.0.0.1:5353：全机解析先问用户级 dnsmasq\n"
+            "  · FallbackDNS=1.1.1.1 8.8.8.8：整机兜底\n"
+            "    dnsmasq 起不来时，全机解析退化为公共 DNS",
+            Status(ok=False, detail="缺"),
+            [Action(description="写 /etc/systemd/resolved.conf.d/devproxy.conf")],
+        )
+    ]
+    _patch_cli(monkeypatch, tmp_path, comps)
+    result = CliRunner().invoke(app, ["setup", "--yes"])
+    assert result.exit_code == 0, result.stdout
+    assert "整机作用域" in result.stdout
+    assert "DNS=127.0.0.1:5353" in result.stdout
+    assert "FallbackDNS=1.1.1.1 8.8.8.8" in result.stdout
+    assert "dnsmasq 起不来" in result.stdout
+
+
+def test_cli_setup_without_global_scope_component_prints_no_disclosure(
+    tmp_path, monkeypatch
+):
+    """组件不涉及整机时不多嘴。"""
+    from typer.testing import CliRunner
+
+    from devproxy.cli import app
+
+    comps = [FakeCliComponent("caddy", Status(ok=False, detail="缺"), [Action(description="x")])]
+    _patch_cli(monkeypatch, tmp_path, comps)
+    result = CliRunner().invoke(app, ["setup", "--yes"])
+    assert result.exit_code == 0, result.stdout
+    assert "整机作用域" not in result.stdout

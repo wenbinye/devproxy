@@ -28,6 +28,19 @@
 | CA 根证书 | `/usr/local/share/ca-certificates/devproxy-local.crt` + NSS 库 `~/.pki/nssdb` | 系统钥匙串 `/Library/Keychains/System.keychain` |
 | 开机自启 | `loginctl enable-linger <用户>` | launchd 的 `RunAtLoad` |
 
+**DNS 路由的改动是整机范围的（Linux `resolved` 后端）** —— 这一点必须单独说清楚：
+
+- 写进 drop-in 的 `DNS=127.0.0.1:5353` 落在 resolved 的**全局段**，它决定的是
+  **这台机器全部域名**的解析先去问用户级的 dnsmasq，**不只是 `*.test`**；
+- 同一份 drop-in 里还有一行 `FallbackDNS=1.1.1.1 8.8.8.8`，它是**整机兜底**：
+  dnsmasq 起不来的时候，全机解析退化为这两个公共解析器；
+- `Domains=~.<后缀>` 才是把 `<后缀>` 交给 dnsmasq 的那一条 —— 但在
+  `DNS=` 已经把全机解析指向 dnsmasq 的前提下，它只决定 dnsmasq 内部怎么分流。
+
+`devproxy setup` 在打印变更清单时会把这段整机作用域**单独打一遍**（表格里放不下，
+也放不下重点），你点确认之前就会看到。macOS 的每域解析器文件与 Linux `system`
+后端的 dnsmasq 片段**只影响本后缀**，不涉及整机。
+
 **需要 sudo 的步骤**：
 
 - Linux
@@ -147,10 +160,13 @@ Caddy 的内部 CA **在第一次加载 `tls internal` 站点时**才生成 —�
 | 1 | 运行失败（子进程退出、reload 失败、路由表损坏、参数缺失……） |
 | 2 | 参数错误（未知日志服务名、非法 `dns_backend`、非法 `--domain-suffix`） |
 | 3 | 前置条件不满足（Caddy 未运行、主 Caddyfile 不存在、`doctor` 体检不通过） |
-| 4 | 需要提权但当前非交互（未加 `--yes`） |
+| 4 | 需要提权但当前非交互（未加 `--yes`），**或用户在确认提示上选择了「否」** |
 
 注意两个特例：`up` 缺少 `--` 或 `--` 后没有命令，按「运行失败」退出 **1**；
 `up` 的退出码在命令正常结束时**就是子进程的退出码**。
+
+退出码 4 表示「**需要人来拍板，但这次没有人拍**」——要么环境非交互且没加 `--yes`，
+要么用户在确认提示上答了「否」。这两种情况下**工具什么都没改**，终端上也会明确说明。
 
 还有一处不对称容易踩：同一个非法值，写在 `config.toml` 里与用命令行传，退出码不同 ——
 写在 `config.toml` 里属于**配置错误**（退出码 **1**），用 `--domain-suffix` /
@@ -220,7 +236,15 @@ Domains=~.test
 ```
 
 **注意**：drop-in 里的 `DNS=` 把这台机器的**全局** DNS 指到了用户级 dnsmasq ——
-这是为了不占用 53 端口而做的取舍。作为配套，工具保证 dnsmasq 的配置里**始终带 `no-resolv`**
+这是为了不占用 53 端口而做的取舍。落到实际语义上：
+
+- `DNS=127.0.0.1:5353` 写在 resolved 的**全局段**，决定的是**这台机器全部域名**的
+  解析都先问用户级 dnsmasq，**不只是 `*.test`**；
+- `FallbackDNS=1.1.1.1 8.8.8.8` 是同一份 drop-in 里的**整机兜底**：dnsmasq 起不来、
+  或它答不了的时候，全机解析退化为这两个公共解析器（而不是整机断网）；
+- `Domains=~.<后缀>` 决定 dnsmasq 内部把哪个后缀解析到本机。
+
+作为配套，工具保证 dnsmasq 的配置里**始终带 `no-resolv`**
 （除非你自己写了 `resolv-file=`）：dnsmasq 因此**不会**把 `/etc/resolv.conf`
 （resolved 机器上是 `127.0.0.53` 桩）当成上游，否则 resolved ↔ dnsmasq 互指，
 普通域名的解析会在全机范围内失败。
@@ -318,7 +342,7 @@ caddy_bin = "~/.local/bin/caddy"
 | `domain_suffix` | `test` | 单个 DNS 标签（小写字母/数字开头结尾，中间可含连字符，不含点，≤ 63 字符）。非法值在加载配置时就报错 |
 | `dns_backend` | `auto` | `auto` = resolved 真的在跑就用 resolved，否则用 system；也可显式指定 |
 | `admin_addr` | `127.0.0.1:2019` | `host:port` 形式。既是 Caddy 的 admin 监听地址，也是 reload 时的目标地址 |
-| `http_port` / `https_port` | `80` / `443` | **目前只出现在 `devproxy config` 的输出里**：主 Caddyfile 没有 `http_port` / `https_port` 指令，Caddy 仍按默认监听 80/443。改这两个值不会改变实际监听端口 |
+| `http_port` / `https_port` | `80` / `443` | Caddy 的**全局选项**，写进主 Caddyfile 的全局块，改了就真的换监听端口 |
 | `storage` | `~/.local/share/caddy` | Caddy 的存储目录，CA 与已签发证书都在这里。改了它 = Caddy 重新生成 CA = 浏览器信任全部失效 |
 | `ready_timeout` | `60` | `up` 等待应用就绪的秒数（1..3600） |
 | `caddy_bin` | `~/.local/bin/caddy` | caddy 二进制路径。setup 会把固定版本下载到这里；改了它必须重跑 setup 让服务单元指向新路径 |

@@ -441,6 +441,31 @@ def _print_notes(notes: list[str]) -> None:
         console.print(f"  · {note}")
 
 
+def _global_scope_notes(plan) -> list[str]:
+    """整机作用域的披露文案。
+
+    变更清单的表格放不下这类话（Rich 会截断），而它恰恰是最该让用户看到的：
+    `DNS=` 改的是**整台机器**的解析路径。组件通过可选的 `global_scope_note()`
+    提供文案 —— 没有就说明这个组件不涉及整机。
+
+    只要整机作用域真的成立就披露 —— 那台机器此刻就处在"整机解析指向用户级
+    dnsmasq"的状态里，用户有权知道。两种情况算数：这次要写它（r.actions 非空），
+    或者它早就写好了（组件状态正常）。
+    """
+    notes = []
+    for r in plan.reports:
+        fn = getattr(r.component, "global_scope_note", None)
+        if not callable(fn):
+            continue
+        if not r.actions and not r.status.ok:
+            # 既没在改、也没装好 —— 谈不上"整机解析已经指向 dnsmasq"。
+            continue
+        note = fn()
+        if note:
+            notes.append(note)
+    return notes
+
+
 def _migrate_legacy(
     platform,
     paths,
@@ -574,6 +599,11 @@ def setup(
             "\n".join(escape(a.description) for a in r.actions) or "—",
         )
     console.print(table)
+
+    # 整机作用域的披露：DNS= 与 FallbackDNS= 改的是**整台机器**的解析路径，
+    # 表格里放不下也看不清 —— 单独打一遍，用户点确认之前就该看到。
+    for note in _global_scope_notes(plan):
+        console.print(f"[yellow]{escape(note)}[/yellow]")
 
     if plan.is_noop:
         unhealthy = [r for r in plan.reports if not r.status.ok]
