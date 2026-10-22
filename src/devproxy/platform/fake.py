@@ -155,6 +155,13 @@ class FakePlatform:
     def ca_trusted(self, ca: Path) -> bool:
         return ca in self.trusted
 
+    def privilege_read(self, path: Path) -> str | None:
+        """非交互读：普通读得到就返回，读不到返回 None（绝不提示密码）。"""
+        try:
+            return Path(path).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return None
+
     def nss_trusted(self, ca: Path) -> bool:
         """NSS 库是另一份信任库，单独记 —— 与系统信任库互不相干。"""
         return ca in self.nss

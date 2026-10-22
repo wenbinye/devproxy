@@ -145,6 +145,13 @@ class Platform(Protocol):
 
     def ca_trusted(self, ca: Path) -> bool: ...
 
+    def privilege_read(self, path: Path) -> str | None:
+        """**非交互地**读取特权文件；读不到返回 None。
+
+        只读命令（doctor）必须无副作用：绝不弹密码框。普通用户读不到
+        特权文件时，宁可"读不到"也不要向用户索要密码。
+        """
+
     def nss_trusted(self, ca: Path) -> bool:
         """NSS 库（Chrome/Chromium 的信任库）里存的证书**内容**是否就是该 CA。
 

@@ -1,3 +1,4 @@
+import base64
 import os
 import subprocess
 from pathlib import Path
@@ -95,16 +96,16 @@ def test_fake_platform_privilege_session_is_cached():
 # ---------- Fix round 1: 提权写入 / 日志流式 / 服务操作失败即抛 ----------
 
 
-def test_linux_elevated_write_uses_system_temp_then_sudo_cp(
+def test_linux_elevated_write_uses_system_temp_then_sudo_install(
     monkeypatch, tmp_path, allow_platform_mutation
 ):
-    """内容须在系统临时目录备好，再 sudo cp 到目标；临时文件不得落在目标目录里。"""
+    """内容须在系统临时目录备好，再 sudo install 到目标；临时文件不得落在目标目录里。"""
     calls = []
 
     def fake_run(argv):
         calls.append(list(argv))
-        if argv[:2] == ["sudo", "cp"]:
-            assert Path(argv[2]).read_text(encoding="utf-8") == "hello", "cp 时临时文件内容必须已写好"
+        if argv[:3] == ["sudo", "install", "-m"]:
+            assert Path(argv[8]).read_text(encoding="utf-8") == "hello", "安装时临时文件内容必须已写好"
         return 0, ""
 
     monkeypatch.setattr(linux_mod, "_run", fake_run)
@@ -112,25 +113,75 @@ def test_linux_elevated_write_uses_system_temp_then_sudo_cp(
     sess = linux_mod.LinuxElevated()
     sess.write(target, "hello")
 
-    cp_calls = [c for c in calls if c[:2] == ["sudo", "cp"]]
-    assert len(cp_calls) == 1
-    cp = cp_calls[0]
-    assert cp[3] == str(target), "cp 的目标必须是真实目标路径"
-    tmp_used = Path(cp[2])
+    install_calls = [c for c in calls if c[:3] == ["sudo", "install", "-m"]]
+    assert len(install_calls) == 1
+    inst = install_calls[0]
+    assert inst[-1] == str(target), "install 的目标必须是真实目标路径"
+    tmp_used = Path(inst[-2])
     assert tmp_used.parent != target.parent, "临时文件不能放在目标目录内（特权目录不可写）"
     assert tmp_used.name.startswith("devproxy-elev-")
     assert not tmp_used.exists(), "成功后临时文件应清理"
 
 
+def test_linux_elevated_write_produces_world_readable_root_file(
+    monkeypatch, tmp_path, allow_platform_mutation
+):
+    """特权写入必须落成 root:root 0644 —— 0600 的文件普通用户自己都读不了。
+
+    mkstemp 建出来的临时文件是 0600，`cp` 会把权限一并带过去，
+    于是 /usr/local/share/ca-certificates/ 与 /etc/systemd/resolved.conf.d/
+    下的文件变成 root:root 0600，doctor 永远报"读不到"。
+    """
+    calls = []
+
+    def fake_run(argv):
+        calls.append(list(argv))
+        return 0, ""
+
+    monkeypatch.setattr(linux_mod, "_run", fake_run)
+    linux_mod.LinuxElevated().write(tmp_path / "devproxy.conf", "x")
+
+    installs = [c for c in calls if c[:3] == ["sudo", "install", "-m"]]
+    assert installs, "特权写入必须走 install（可显式设定权限与归属）"
+    argv = installs[0]
+    assert "-m" in argv and argv[argv.index("-m") + 1] == "644", "必须写成 0644"
+    assert "-o" in argv and argv[argv.index("-o") + 1] == "root"
+    assert "-g" in argv and argv[argv.index("-g") + 1] == "root"
+    assert not [c for c in calls if c[:2] == ["sudo", "cp"]], "不能再用 cp（会带上 0600）"
+
+
+def test_linux_elevated_copy_produces_world_readable_root_file(
+    monkeypatch, tmp_path, allow_platform_mutation
+):
+    """CA 装进系统信任库走 copy —— 同样必须落成 root:root 0644。"""
+    calls = []
+
+    def fake_run(argv):
+        calls.append(list(argv))
+        return 0, ""
+
+    monkeypatch.setattr(linux_mod, "_run", fake_run)
+    src = tmp_path / "root.crt"
+    src.write_text("CA", encoding="utf-8")
+    linux_mod.LinuxElevated().copy(src, tmp_path / "devproxy-local.crt")
+
+    installs = [c for c in calls if c[:3] == ["sudo", "install", "-m"]]
+    assert installs, "复制到特权目录必须走 install"
+    argv = installs[0]
+    assert argv[argv.index("-m") + 1] == "644"
+    assert argv[argv.index("-o") + 1] == "root"
+    assert not [c for c in calls if c[:2] == ["sudo", "cp"]], "不能再用 cp（会带上 0600）"
+
+
 def test_linux_elevated_write_failure_raises_and_cleans_temp(
     monkeypatch, tmp_path, allow_platform_mutation
 ):
-    """sudo cp 失败时抛 PermissionError，且临时文件也必须清理（try/finally）。"""
+    """特权写入失败时抛 PermissionError，且临时文件也必须清理（try/finally）。"""
     seen_tmp = []
 
     def fake_run(argv):
-        if argv[:2] == ["sudo", "cp"]:
-            seen_tmp.append(Path(argv[2]))
+        if argv[:3] == ["sudo", "install", "-m"]:
+            seen_tmp.append(Path(argv[-2]))
             return 1, "boom"
         return 0, ""
 
@@ -275,16 +326,150 @@ def test_fake_elevated_copy_records_command_and_written(tmp_path):
     assert ["cp", str(src), str(dest)] in p.commands
 
 
-# -- CA 信任判定：真信任库，而不是"暂存目录里有这个文件" -------------------
+# -- 非交互的特权读（doctor 不得弹密码框） ----------------------------------
 
 
-def test_linux_ca_trusted_true_when_openssl_verifies(tmp_path, monkeypatch):
-    dest = tmp_path / "devproxy-local.crt"
-    dest.write_text("CA", encoding="utf-8")
+def test_linux_privilege_read_is_non_interactive(monkeypatch, tmp_path):
+    """特权读必须带 sudo -n：没有缓存凭据时立刻失败，绝不等待输入。"""
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, stdout="unit\n", stderr="")
+
+    monkeypatch.setattr(linux_mod.subprocess, "run", fake_run)
+    out = LinuxPlatform().privilege_read(tmp_path / "caddy.service")
+    assert out == "unit\n"
+    assert calls[0][:3] == ["sudo", "-n", "cat"]
+    assert "-v" not in calls[0], "不得跑 sudo -v（那会弹密码框）"
+
+
+def test_linux_privilege_read_returns_none_on_failure(monkeypatch, tmp_path):
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="sudo: a password is required")
+
+    monkeypatch.setattr(linux_mod.subprocess, "run", fake_run)
+    assert LinuxPlatform().privilege_read(tmp_path / "caddy.service") is None
+
+
+def test_linux_privilege_read_returns_none_when_sudo_missing(monkeypatch, tmp_path):
+    def fake_run(argv, **kwargs):
+        raise FileNotFoundError("sudo")
+
+    monkeypatch.setattr(linux_mod.subprocess, "run", fake_run)
+    assert LinuxPlatform().privilege_read(tmp_path / "caddy.service") is None
+
+
+# -- CA 信任判定：按指纹命中活库，而不是"openssl 能不能验通这条链" ---------
+
+
+def _fake_pem(seed: str) -> str:
+    """造一份 PEM 证书文本（内容是 base64 出来的伪 DER）。
+
+    判据是"同一份字节"（sha256 指纹），不解析 X.509 结构 ——
+    所以测试里不需要真的证书。
+    """
+    body = base64.b64encode(f"fake-der:{seed}".encode("utf-8")).decode("ascii")
+    return (
+        "-----BEGIN CERTIFICATE-----\n"
+        f"{body}\n"
+        "-----END CERTIFICATE-----\n"
+    )
+
+
+@pytest.fixture
+def trust_store(tmp_path, monkeypatch):
+    """把系统信任库指到 tmp_path：测试绝不读真实的 /etc/ssl/certs。
+
+    返回 (bundle 文件, 散列索引目录, 暂存目录)。
+    """
+    bundle = tmp_path / "ca-certificates.crt"
+    hashed = tmp_path / "certs"
+    hashed.mkdir()
+    staged_dir = tmp_path / "usr" / "local" / "share" / "ca-certificates"
+    staged_dir.mkdir(parents=True)
+    monkeypatch.setattr(linux_mod, "TRUST_BUNDLE_FILES", (bundle,))
+    monkeypatch.setattr(linux_mod, "TRUST_HASH_DIR", hashed)
+    monkeypatch.setattr(linux_mod, "SYSTEM_TRUST_DIR", hashed)
+    return bundle, hashed, staged_dir
+
+
+def test_linux_ca_trusted_true_when_fingerprint_in_live_store(
+    trust_store, tmp_path, monkeypatch
+):
+    """CA 的指纹出现在活库里就算信任 —— 即使 openssl 因同主题歧义报错。
+
+    这是那条永久假阴性的核心场景：信任库里有多份同 SUBJECT 的根，
+    openssl 挑到另一份报 error 18，而 curl 其实完全正常。
+    """
+    bundle, hashed, staged = trust_store
     ca = tmp_path / "root.crt"
-    ca.write_text("CA", encoding="utf-8")
-    monkeypatch.setattr(linux_mod, "SYSTEM_CA_DEST", dest)
-    monkeypatch.setattr(linux_mod, "SYSTEM_TRUST_DIR", tmp_path / "certs")
+    ca.write_text(_fake_pem("mine"), encoding="utf-8")
+    bundle.write_text(_fake_pem("other") + _fake_pem("mine"), encoding="utf-8")
+
+    def fake_run(argv):
+        # 复现歧义：openssl 按 SUBJECT 选到了另一份根
+        return 1, "error 18 at 0 depth lookup: self-signed certificate"
+
+    monkeypatch.setattr(linux_mod, "_run", fake_run)
+    assert LinuxPlatform().ca_trusted(ca) is True
+
+
+def test_linux_ca_trusted_true_when_fingerprint_in_hashed_dir(
+    trust_store, tmp_path, monkeypatch
+):
+    """散列索引目录（/etc/ssl/certs/*.0）里的证书同样算活库。"""
+    bundle, hashed, staged = trust_store
+    ca = tmp_path / "root.crt"
+    ca.write_text(_fake_pem("mine"), encoding="utf-8")
+    (hashed / "abc123.0").write_text(_fake_pem("mine"), encoding="utf-8")
+    monkeypatch.setattr(
+        linux_mod,
+        "_run",
+        lambda argv: (1, "error 18 at 0 depth lookup: self-signed certificate"),
+    )
+    assert LinuxPlatform().ca_trusted(ca) is True
+
+
+def test_linux_ca_trusted_false_when_only_staged_file_present(
+    trust_store, tmp_path, monkeypatch
+):
+    """暂存目录里有这个文件 ≠ 系统信任它 —— update-ca-certificates 可能没跑成功。"""
+    bundle, hashed, staged = trust_store
+    ca = tmp_path / "root.crt"
+    ca.write_text(_fake_pem("mine"), encoding="utf-8")
+    (staged / "devproxy-local.crt").write_text(_fake_pem("mine"), encoding="utf-8")
+
+    monkeypatch.setattr(
+        linux_mod,
+        "_run",
+        lambda argv: (1, "error 20 at 0 depth lookup: unable to get local issuer"),
+    )
+    assert LinuxPlatform().ca_trusted(ca) is False
+
+
+def test_linux_ca_trusted_false_when_same_subject_other_root(
+    trust_store, tmp_path, monkeypatch
+):
+    """活库里只有同主题的另一份根 —— 不是这一份，不能算信任。"""
+    bundle, hashed, staged = trust_store
+    ca = tmp_path / "root.crt"
+    ca.write_text(_fake_pem("mine"), encoding="utf-8")
+    bundle.write_text(_fake_pem("other"), encoding="utf-8")
+
+    monkeypatch.setattr(
+        linux_mod,
+        "_run",
+        lambda argv: (1, "error 18 at 0 depth lookup: self-signed certificate"),
+    )
+    assert LinuxPlatform().ca_trusted(ca) is False
+
+
+def test_linux_ca_trusted_true_when_openssl_verifies(trust_store, tmp_path, monkeypatch):
+    """openssl 验通是补充的肯定信号（指纹扫描没覆盖到时的兜底）。"""
+    bundle, hashed, staged = trust_store
+    ca = tmp_path / "root.crt"
+    ca.write_text(_fake_pem("mine"), encoding="utf-8")
     calls = []
 
     def fake_run(argv):
@@ -294,52 +479,31 @@ def test_linux_ca_trusted_true_when_openssl_verifies(tmp_path, monkeypatch):
     monkeypatch.setattr(linux_mod, "_run", fake_run)
     assert LinuxPlatform().ca_trusted(ca) is True
     assert calls[0][:2] == ["openssl", "verify"]
-    assert str(tmp_path / "certs") in calls[0]
+    assert str(hashed) in calls[0]
 
 
-def test_linux_ca_trusted_false_when_openssl_rejects(tmp_path, monkeypatch):
-    """CA 只是躺在暂存目录里、没进信任库时，必须报未信任。"""
-    dest = tmp_path / "devproxy-local.crt"
-    dest.write_text("CA", encoding="utf-8")
+def test_linux_ca_trusted_never_raises_on_binary_file(
+    trust_store, tmp_path, monkeypatch
+):
+    """非 UTF-8 文件不能让 check() 抛异常 —— doctor 依赖它不炸。"""
+    bundle, hashed, staged = trust_store
+    bundle.write_bytes(b"\xff\xfe\x00binary")
     ca = tmp_path / "root.crt"
-    ca.write_text("CA", encoding="utf-8")
-    monkeypatch.setattr(linux_mod, "SYSTEM_CA_DEST", dest)
-    monkeypatch.setattr(linux_mod, "SYSTEM_TRUST_DIR", tmp_path / "certs")
+    ca.write_text(_fake_pem("mine"), encoding="utf-8")
     monkeypatch.setattr(
-        linux_mod,
-        "_run",
-        lambda argv: (1, "error 20 at 0 depth lookup: unable to get local issuer"),
+        linux_mod, "_run", lambda argv: (127, "命令不存在: openssl")
     )
     assert LinuxPlatform().ca_trusted(ca) is False
 
 
-def test_linux_ca_trusted_falls_back_when_openssl_missing(tmp_path, monkeypatch):
-    """没有 openssl 时退回比对暂存文件内容（老行为）。"""
-    dest = tmp_path / "devproxy-local.crt"
-    dest.write_text("CA", encoding="utf-8")
+def test_linux_ca_trusted_false_when_ca_not_pem(trust_store, tmp_path, monkeypatch):
+    """CA 文件不是可解析的 PEM —— 判为未信任，不抛异常。"""
+    bundle, hashed, staged = trust_store
     ca = tmp_path / "root.crt"
-    ca.write_text("CA", encoding="utf-8")
-    monkeypatch.setattr(linux_mod, "SYSTEM_CA_DEST", dest)
-    monkeypatch.setattr(linux_mod, "_run", lambda argv: (127, "命令不存在: openssl"))
-    assert LinuxPlatform().ca_trusted(ca) is True
-
-
-def test_linux_ca_trusted_false_when_staged_file_missing(tmp_path, monkeypatch):
-    ca = tmp_path / "root.crt"
-    ca.write_text("CA", encoding="utf-8")
-    monkeypatch.setattr(linux_mod, "SYSTEM_CA_DEST", tmp_path / "absent.crt")
-    monkeypatch.setattr(linux_mod, "_run", lambda argv: pytest.fail("不该执行 openssl"))
-    assert LinuxPlatform().ca_trusted(ca) is False
-
-
-def test_linux_ca_trusted_never_raises_on_binary_file(tmp_path, monkeypatch):
-    """非 UTF-8 文件不能让 check() 抛异常 —— doctor 依赖它不炸。"""
-    dest = tmp_path / "devproxy-local.crt"
-    dest.write_bytes(b"\xff\xfe\x00binary")
-    ca = tmp_path / "root.crt"
-    ca.write_text("CA", encoding="utf-8")
-    monkeypatch.setattr(linux_mod, "SYSTEM_CA_DEST", dest)
-    monkeypatch.setattr(linux_mod, "_run", lambda argv: (127, "命令不存在: openssl"))
+    ca.write_text("这不是证书", encoding="utf-8")
+    monkeypatch.setattr(
+        linux_mod, "_run", lambda argv: (127, "命令不存在: openssl")
+    )
     assert LinuxPlatform().ca_trusted(ca) is False
 
 
@@ -448,7 +612,7 @@ def test_fake_platform_nss_trusted_tracks_its_own_set(tmp_path):
 # -- 特权写入前建父目录（干净机器上 /etc/... 目录可能不存在） ----------------
 
 
-def test_linux_elevated_write_creates_parent_dir_before_cp(
+def test_linux_elevated_write_creates_parent_dir_before_install(
     monkeypatch, tmp_path, allow_platform_mutation
 ):
     calls = []
@@ -461,11 +625,11 @@ def test_linux_elevated_write_creates_parent_dir_before_cp(
     target = tmp_path / "etc" / "dnsmasq.d" / "devproxy.conf"
     linux_mod.LinuxElevated().write(target, "hello")
 
-    install = [c for c in calls if c[:2] == ["sudo", "install"]]
-    cp = [c for c in calls if c[:2] == ["sudo", "cp"]]
-    assert install and install[0][2:] == ["-d", str(target.parent)]
-    assert cp, "创建目录后仍须 cp 写入"
-    assert calls.index(install[0]) < calls.index(cp[0]), "install -d 必须在 cp 之前"
+    mkdir = [c for c in calls if c[:3] == ["sudo", "install", "-d"]]
+    write = [c for c in calls if c[:3] == ["sudo", "install", "-m"]]
+    assert mkdir and mkdir[0][3:] == [str(target.parent)]
+    assert write, "创建目录后仍须写入目标"
+    assert calls.index(mkdir[0]) < calls.index(write[0]), "install -d 必须先于写入"
 
 
 def test_linux_elevated_write_raises_when_mkdir_fails(

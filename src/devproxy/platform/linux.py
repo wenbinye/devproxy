@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import getpass
 import hashlib
 import ipaddress
@@ -12,16 +14,112 @@ from pathlib import Path
 
 from devproxy.platform.base import (
     CA_NICKNAME,
-    SYSTEM_CA_DEST,
     SYSTEM_TRUST_DIR,
     ElevatedSession,
 )
+
+# 系统信任库（活库）里可能存放 CA 的位置。
+#
+# - 汇总包：Debian/Ubuntu 的 /etc/ssl/certs/ca-certificates.crt、
+#   RHEL 的 /etc/pki/tls/certs/ca-bundle.crt
+# - 散列索引目录：/etc/ssl/certs 下的 *.0（主题散列软链）与 *.pem
+#
+# 刻意**不含**暂存目录 /usr/local/share/ca-certificates —— 那个文件存在
+# 只说明有人放了它进去，不代表 update-ca-certificates 跑成功过。
+TRUST_BUNDLE_FILES = (
+    Path("/etc/ssl/certs/ca-certificates.crt"),
+    Path("/etc/pki/tls/certs/ca-bundle.crt"),
+)
+TRUST_HASH_DIR = Path("/etc/ssl/certs")
 
 
 def _pem_body(text: str) -> str:
     """PEM 的规范化正文：去掉头尾标记、空行与所有空白。"""
     lines = (line.strip() for line in text.splitlines())
     return "".join(line for line in lines if line and not line.startswith("-----"))
+
+
+def _pem_der_blocks(text: str) -> list[bytes]:
+    """从 PEM 文本里取出全部证书的 DER 字节。
+
+    只做 base64 解码，不做 X.509 解析 —— 判据是"同一份字节"，
+    解析证书结构反而会引入额外的失败点。
+    """
+    blocks: list[bytes] = []
+    buf: list[str] = []
+    inside = False
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.startswith("-----BEGIN CERTIFICATE"):
+            inside = True
+            buf = []
+            continue
+        if line.startswith("-----END CERTIFICATE"):
+            inside = False
+            try:
+                blocks.append(base64.b64decode("".join(buf), validate=False))
+            except (binascii.Error, ValueError):
+                pass
+            buf = []
+            continue
+        if inside:
+            buf.append(line)
+    return blocks
+
+
+def _cert_fingerprint(der: bytes) -> str:
+    """证书指纹：DER 的 sha256（与 `openssl x509 -fingerprint -sha256` 同义）。"""
+    return hashlib.sha256(der).hexdigest().upper()
+
+
+def _pem_fingerprints(text: str) -> set[str]:
+    return {_cert_fingerprint(der) for der in _pem_der_blocks(text)}
+
+
+def _store_candidates() -> list[Path]:
+    """系统信任库里可能放着 CA 的文件（汇总包 + 散列索引目录）。
+
+    只读、只列名字；任何列目录的错误都吞掉 —— 判据失败必须退化成
+    "未信任"，绝不能让 doctor 抛异常。
+    """
+    files: list[Path] = list(TRUST_BUNDLE_FILES)
+    try:
+        if TRUST_HASH_DIR.is_dir():
+            for pattern in ("*.0", "*.pem", "*.crt"):
+                files.extend(sorted(TRUST_HASH_DIR.glob(pattern)))
+    except OSError:
+        pass
+    return files
+
+
+def ca_in_trust_store(ca: Path) -> bool:
+    """CA 是否**按指纹**存在于系统信任库。永不抛异常。
+
+    判据是"活库里有没有这份字节完全相同的证书"，而不是"openssl 能不能
+    验通这条链"：openssl 按 **SUBJECT** 选锚点，信任库里存在多个同主题
+    根时它会挑到另一个，报 error 18（self-signed certificate）——
+    而 curl 其实完全正常。拿它当判据会让 setup 永远认为"没信任"，
+    而重装同一个 CA 只会增加更多同主题根，永远修不好。
+    """
+    try:
+        ca_text = ca.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+    target = _pem_fingerprints(ca_text)
+    if not target:
+        # 不是可解析的 PEM 证书 —— 无法按指纹比对，判为未信任
+        return False
+    for path in _store_candidates():
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        try:
+            if target & _pem_fingerprints(text):
+                return True
+        except Exception:  # noqa: BLE001 —— 单个文件读坏了不影响其余
+            continue
+    return False
 
 
 def _pem_digest(text: str) -> str:
@@ -147,13 +245,20 @@ class LinuxElevated:
         return _run(["sudo", *argv])
 
     def write(self, path: Path, content: str) -> None:
-        """通过系统临时目录中的文件 + sudo cp 写入，避免 shell 引号问题。
+        """通过系统临时目录中的文件 + 特权安装写入，避免 shell 引号问题。
 
         父目录不一定存在：`/etc/systemd/resolved.conf.d` 与 `/etc/dnsmasq.d`
         在干净机器上可能尚未创建（不归任何 dpkg 包所有）。先 `install -d`
-        建目录，否则 sudo cp 必然失败，setup 永远无法收敛。
+        建目录，否则写入必然失败，setup 永远无法收敛。
         临时文件必须放在用户可写的系统临时目录（目标目录本身可能不可写），
         且无论成功失败都要清理。
+
+        用 `install -m 644 -o root -g root` 而不是 `cp`：mkstemp 建出来的
+        临时文件是 0600，`cp` 会把权限一并带过去，于是写进
+        /usr/local/share/ca-certificates/ 与 /etc/systemd/resolved.conf.d/
+        的文件变成 root:root 0600 —— 调用的普通用户自己都读不了，
+        doctor 会永远报"文件读不到"。macOS 那条路径已经改成 0644，
+        Linux 必须对齐。
         """
         code, msg = self.run(["install", "-d", str(path.parent)])
         if code != 0:
@@ -163,7 +268,19 @@ class LinuxElevated:
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(content)
-            code, msg = self.run(["cp", str(tmp), str(path)])
+            code, msg = self.run(
+                [
+                    "install",
+                    "-m",
+                    "644",
+                    "-o",
+                    "root",
+                    "-g",
+                    "root",
+                    str(tmp),
+                    str(path),
+                ]
+            )
             if code != 0:
                 raise PermissionError(f"写入 {path} 失败: {msg}")
         finally:
@@ -180,7 +297,24 @@ class LinuxElevated:
         return out
 
     def copy(self, src: Path, dest: Path) -> None:
-        code, msg = self.run(["cp", str(src), str(dest)])
+        """复制文件（CA 装进系统信任库走这条路）。
+
+        同样用 `install -m 644 -o root -g root`：`cp` 会把源文件的权限
+        带过去，源文件若是 0600，目标就成了 root:root 0600。
+        """
+        code, msg = self.run(
+            [
+                "install",
+                "-m",
+                "644",
+                "-o",
+                "root",
+                "-g",
+                "root",
+                str(src),
+                str(dest),
+            ]
+        )
         if code != 0:
             raise PermissionError(f"复制 {src} → {dest} 失败：{msg}")
 
@@ -201,6 +335,26 @@ class LinuxPlatform:
 
     def run(self, argv: list[str]) -> tuple[int, str]:
         return _run(argv)
+
+    def privilege_read(self, path: Path) -> str | None:
+        """非交互地读特权文件（`sudo -n`）。读不到返回 None。
+
+        doctor 是只读命令，绝不能因为权限问题弹出密码框 —— 那既违反
+        "只读体检"的承诺，也会让脚本里跑的 doctor 卡在密码提示上。
+        `sudo -n` 在没有缓存凭据时立刻失败，绝不等待输入。
+        """
+        try:
+            proc = subprocess.run(
+                ["sudo", "-n", "cat", str(path)],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if proc.returncode != 0:
+            return None
+        return proc.stdout
 
     def binary_version(self, binary: Path) -> str:
         if not binary.exists():
@@ -305,23 +459,23 @@ class LinuxPlatform:
     def ca_trusted(self, ca: Path) -> bool:
         """CA 是否**真的在系统信任库里**。
 
+        权威判据是**指纹命中**（见 ca_in_trust_store）：活库里存在与该 CA
+        字节完全相同的证书才算信任。
+
         只比对暂存目录（/usr/local/share/ca-certificates）里的文件是不够的：
         那个文件在 update-ca-certificates 没跑成功时也在那儿，系统却不认它。
-        所以优先用 openssl 对着真实信任库验证；没有 openssl 才退回比对暂存文件。
+
+        openssl 只作为**补充的肯定信号**：验通了说明信任链确实成立；
+        它验不通可能只是上面的同主题歧义，绝不用来否定指纹命中。
         """
-        dest = SYSTEM_CA_DEST
-        if not dest.exists():
-            return False
+        try:
+            if ca_in_trust_store(ca):
+                return True
+        except Exception:  # noqa: BLE001 —— 判定异常一律按"未信任"
+            pass
         code, _ = _run(
             ["openssl", "verify", "-CApath", str(SYSTEM_TRUST_DIR), str(ca)]
         )
-        if code == 127:
-            try:
-                return dest.read_text(encoding="utf-8") == ca.read_text(
-                    encoding="utf-8"
-                )
-            except (OSError, UnicodeDecodeError):
-                return False
         return code == 0
 
     def nss_trusted(self, ca: Path) -> bool:

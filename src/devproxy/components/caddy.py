@@ -159,16 +159,25 @@ class CaddyComponent:
             return False
 
     def _read_unit_text(self, unit: Path) -> str | None:
-        """读单元内容；普通读不到时（权限不足）改走提权会话。
+        """读单元内容；普通读不到时（权限不足）改走**非交互**的特权读。
 
         macOS 的 system scope 单元在 /Library/LaunchDaemons —— 权限或归属
         不对时普通用户读不了。"读不到"绝不等于"单元过期"：那样 doctor 会
         永远报红，setup 每次都要重装单元并再要一次密码。
+
+        这里必须走非交互的特权读（sudo -n）：doctor 承诺只读、无副作用，
+        绝不能因为一个读不到的单元就把密码框弹到用户脸上。
         """
         try:
             return unit.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             pass
+        reader = getattr(self.platform, "privilege_read", None)
+        if callable(reader):
+            try:
+                return reader(unit)
+            except (OSError, RuntimeError):
+                return None
         try:
             return self.platform.privilege().read(unit)
         except (OSError, RuntimeError):

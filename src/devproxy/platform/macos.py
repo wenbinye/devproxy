@@ -270,6 +270,17 @@ class MacOSPlatform:
         code, _ = _run(["security", "verify-cert", "-c", str(ca), "-p", "ssl"])
         return code == 0
 
+    def privilege_read(self, path: Path) -> str | None:
+        """非交互地读特权文件；读不到返回 None（绝不弹密码框）。
+
+        macOS 的 /Library/LaunchDaemons 通常全局可读；真读不到就当
+        "读不到"，让调用方按"宁放过也不误报"处理。
+        """
+        try:
+            return Path(path).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return None
+
     def nss_trusted(self, ca: Path) -> bool:
         """macOS 没有 NSS 库 —— 恒为真，证书组件才不会去装 NSS 证书。"""
         return True

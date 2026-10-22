@@ -60,7 +60,7 @@ def test_macos_platform_name_is_mac():
 
 
 def test_platform_implements_whole_protocol():
-    """协议一共 17 个方法 —— 少一个都是运行期 AttributeError，不是导入期。"""
+    """协议一共 18 个方法 —— 少一个都是运行期 AttributeError，不是导入期。"""
     p = MacOSPlatform()
     assert isinstance(p, Platform)
     assert isinstance(p.privilege.__self__, MacOSPlatform)
@@ -82,6 +82,7 @@ def test_platform_implements_whole_protocol():
         "ca_trusted",
         "nss_trusted",
         "dns_route_installed",
+        "privilege_read",
     ):
         assert callable(getattr(p, method, None)), f"缺少协议方法: {method}"
 

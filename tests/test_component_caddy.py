@@ -625,6 +625,31 @@ def test_unit_current_survives_permission_denied_read(tmp_path):
     assert status.ok is True, status.detail
 
 
+class _NoPromptPlatform(_UnreadableUnitPlatform):
+    """一旦有人要提权会话就炸 —— doctor 绝不能弹密码框。"""
+
+    def privilege(self):
+        raise AssertionError("doctor 不得触发提权（会弹密码框）")
+
+    def privilege_read(self, path):
+        return None
+
+
+def test_doctor_never_asks_for_password(tmp_path):
+    """doctor 承诺只读：单元读不到时也不许索要密码。
+
+    提权会话的构造会跑 `sudo -v` —— 那会把密码框弹到用户脸上，
+    既违反 doctor 的"只读"承诺，也会让脚本里跑的 doctor 卡住。
+    """
+    comp, paths, cfg = _component(tmp_path)
+    platform = _NoPromptPlatform()
+    comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
+    _make_ready(comp, platform, cfg)
+    # 不抛异常即通过：_NoPromptPlatform.privilege() 会直接 AssertionError
+    assert comp._unit_current() is True
+    comp.check()
+
+
 def test_unit_current_is_false_when_argv_does_not_match(tmp_path):
     """判据是整条命令行 —— 参数缺失或顺序不对都算过期。"""
     comp, paths, cfg = _component(tmp_path)
