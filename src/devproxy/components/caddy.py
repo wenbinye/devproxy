@@ -21,7 +21,7 @@ from typing import Callable
 from devproxy.config import Config
 from devproxy.migrate import load_extra_env
 from devproxy.paths import Paths
-from devproxy.platform.base import Action, Platform, Status
+from devproxy.platform.base import Action, Platform, Status, unit_exec_argv
 
 CADDY_VERSION = "2.11.7"
 
@@ -158,26 +158,53 @@ class CaddyComponent:
         except (OSError, UnicodeDecodeError):
             return False
 
+    def _read_unit_text(self, unit: Path) -> str | None:
+        """读单元内容；普通读不到时（权限不足）改走提权会话。
+
+        macOS 的 system scope 单元在 /Library/LaunchDaemons —— 权限或归属
+        不对时普通用户读不了。"读不到"绝不等于"单元过期"：那样 doctor 会
+        永远报红，setup 每次都要重装单元并再要一次密码。
+        """
+        try:
+            return unit.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            pass
+        try:
+            return self.platform.privilege().read(unit)
+        except (OSError, RuntimeError):
+            # 提权也读不到（sudo 不可用等）—— 返回 None，由调用方决定。
+            return None
+
     def _unit_current(self) -> bool:
         """已安装的单元是否把 ExecStart 指向本工具的主 Caddyfile 与二进制。
 
         只看 --config 不够：改了配置里的 caddy_bin 之后，已装单元仍指着旧
         二进制跑 —— "单元过期"永远判不出来，服务会一直用旧二进制。
 
-        判据按**单个 token** 匹配，不按整条命令行：systemd 单元里是
-        "ExecStart=/path/caddy run --config /path/Caddyfile"，launchd 的 plist
-        里则是逐个元素的数组，两边共有的只有 token 本身。
+        判据是**整条命令行**（argv 前缀必须完全对上），不是子串：只看
+        "路径出现过"会把参数配对错乱的单元也判成当前的 —— 而"单元是不是
+        当前的"正是 setup 决定要不要重装的依据。
+
+        两种单元格式都要认：systemd 的 ExecStart= 行与 launchd 的
+        ProgramArguments 数组（后者是数组，逐个元素比对）。
         """
         unit = self.platform.service_unit_path("caddy")
-        try:
-            text = unit.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
+        if not unit.exists():
             return False
-        if str(self.config.caddy_bin_path) not in text:
+        text = self._read_unit_text(unit)
+        if text is None:
+            # 读不到就不能说它过期 —— 宁可放过，也不能让 doctor 永远报红。
+            return True
+        argv = unit_exec_argv(text)
+        if argv is None:
             return False
-        if str(self.paths.caddyfile) not in text:
-            return False
-        return "run" in text
+        expected = [
+            str(self.config.caddy_bin_path),
+            "run",
+            "--config",
+            str(self.paths.caddyfile),
+        ]
+        return argv[: len(expected)] == expected
 
     def _need_binary(self) -> bool:
         """二进制判据：不存在，或版本与固定版本不符（含"版本读不出来"）。
@@ -225,7 +252,11 @@ class CaddyComponent:
             return Status(
                 ok=False,
                 detail="caddy 服务单元未指向本工具的 Caddyfile 或二进制",
-                hint="devproxy setup 会重装 systemd user 单元",
+                hint=(
+                    "devproxy setup 会重装 caddy LaunchDaemon"
+                    if self.platform.name == "mac"
+                    else "devproxy setup 会重装 systemd user 单元"
+                ),
             )
         if not self.platform.service_active("caddy"):
             return Status(

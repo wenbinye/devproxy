@@ -25,6 +25,17 @@ from devproxy.migrate import (
 )
 from devproxy.paths import Paths
 from devproxy.platform.fake import FakePlatform
+from tests.support import ElevatedReader, UnreadablePath
+
+
+class _UnreadableUnitPlatform(FakePlatform):
+    """单元文件普通用户读不了（macOS system scope 的 0600 root 单元）。"""
+
+    def service_unit_path(self, name):
+        return UnreadablePath(str(super().service_unit_path(name)))
+
+    def privilege(self):
+        return ElevatedReader(self)
 
 
 def _paths(tmp_path):
@@ -218,6 +229,27 @@ def test_detect_legacy_none_when_unit_has_no_config(tmp_path):
     platform = FakePlatform()
     (tmp_path / "caddy.service").write_text("[Service]\nExecStart=/usr/bin/foo\n")
     assert detect_legacy(platform, paths, unit_dir=tmp_path, home=tmp_path) is None
+
+
+def test_detect_legacy_reads_unreadable_unit_through_elevation(tmp_path):
+    """单元普通用户读不了 —— 必须走提权会话去读。
+
+    macOS 的 system scope 单元在 /Library/LaunchDaemons，权限或归属不对时
+    普通用户读不了。读不到就当"没有遗留环境"，等于把用户手工维护的
+    Caddyfile 与环境变量悄悄接管掉 —— 那是迁移最不能犯的错。
+    """
+    paths = _paths(tmp_path)
+    platform = _UnreadableUnitPlatform()
+    unit_path = Path(str(platform.service_unit_path("caddy")))
+    unit_path.parent.mkdir(parents=True, exist_ok=True)
+    unit_path.write_text(
+        "[Service]\nExecStart=/bin/caddy run --config /old/Caddyfile\n"
+        "Environment=MINIKUBE_IP=1.2.3.4\n",
+        encoding="utf-8",
+    )
+    state = detect_legacy(platform, paths, home=tmp_path)
+    assert state is not None, "读不到单元不能当成没有遗留环境"
+    assert state.env == {"MINIKUBE_IP": "1.2.3.4"}
 
 
 # -- 迁移 ---------------------------------------------------------------------

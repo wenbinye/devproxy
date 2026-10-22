@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import time
 from pathlib import Path
@@ -131,12 +132,21 @@ class DnsmasqComponent:
         self.conf_path = conf_path or DNSMASQ_CONF.expanduser()
 
     # -- check ---------------------------------------------------------
+    def _service_hint(self) -> str:
+        """服务相关的修复提示（按平台给不同的命令）。
+
+        macOS 上不能叫用户去跑 systemctl —— 那里没有 systemd。
+        """
+        if self.platform.name == "mac":
+            return f"launchctl kickstart -k gui/{os.getuid()}/com.devproxy.dnsmasq"
+        return "systemctl --user start dnsmasq"
+
     def check(self) -> Status:
         if not self.platform.service_active("dnsmasq"):
             return Status(
                 ok=False,
                 detail="dnsmasq 服务未运行",
-                hint="systemctl --user start dnsmasq",
+                hint=self._service_hint(),
             )
         if not self.conf_path.exists():
             return Status(
@@ -225,18 +235,22 @@ class DnsmasqComponent:
             return Status(
                 ok=False,
                 detail="dnsmasq 服务未处于 active",
-                hint="systemctl --user status dnsmasq",
+                hint=self._service_hint(),
             )
         name = f"foo.{self.config.domain_suffix}"
         answer = self.platform.dns_query(name)
         if answer not in ("127.0.0.1", "::1"):
+            hint = (
+                f"launchctl kickstart -k gui/{os.getuid()}/com.devproxy.dnsmasq"
+                if self.platform.name == "mac"
+                else "systemctl --user restart dnsmasq"
+            )
             return Status(
                 ok=False,
                 detail=(
                     f"dnsmasq 未把 {name} 解析到本机（{answer or '无响应'}）"
                 ),
-                hint="systemctl --user restart dnsmasq；dig @127.0.0.1 -p "
-                f"{self.platform.dns_port} {name}",
+                hint=f"{hint}；dig @127.0.0.1 -p {self.platform.dns_port} {name}",
             )
         return Status(ok=True, detail=f"dnsmasq 运行中（{name} → {answer}）")
 
@@ -263,15 +277,18 @@ class DnsmasqComponent:
 
         Linux 上固定 /usr/sbin/dnsmasq；macOS 上系统不带 dnsmasq，
         Homebrew 装在 /opt/homebrew/sbin 或 /usr/local/sbin —— 按存在的那个挑。
+
+        固定路径优先于 PATH：launchd 不认 PATH，而且 PATH 里那个未必是
+        Homebrew 装的那份（换了前缀的旧版本、别的包管理器装的）。
         """
         if self.platform.name != "mac":
             return "/usr/sbin/dnsmasq"
-        found = shutil.which("dnsmasq")
-        if found:
-            return found
         for candidate in MACOS_DNSMASQ_CANDIDATES:
             if Path(candidate).exists():
                 return candidate
+        found = shutil.which("dnsmasq")
+        if found:
+            return found
         return MACOS_DNSMASQ_CANDIDATES[0]
 
     def _exec_start(self) -> list[str]:

@@ -18,6 +18,7 @@ from devproxy.components.caddy import (
 from devproxy.config import Config
 from devproxy.paths import Paths
 from devproxy.platform.fake import FakePlatform
+from tests.support import ElevatedReader, UnreadablePath
 
 
 def _paths(tmp_path):
@@ -593,3 +594,61 @@ def test_macos_unit_current_detects_stale_plist(tmp_path):
         env={},
     )
     assert comp._unit_current() is False
+
+
+# ---------- 单元读不到 ≠ 单元过期 ----------
+
+
+class _UnreadableUnitPlatform(_MacPlatform):
+    """单元文件普通用户读不了（macOS system scope 的 0600 root 情形）。"""
+
+    def service_unit_path(self, name):
+        return UnreadablePath(str(super().service_unit_path(name)))
+
+    def privilege(self):
+        return ElevatedReader(self)
+
+
+def test_unit_current_survives_permission_denied_read(tmp_path):
+    """读不到单元，绝不等于"单元过期"。
+
+    macOS 的 system scope 单元在 /Library/LaunchDaemons —— 权限或归属
+    不对时普通用户读不了。这时若判成"过期"，doctor 会永远报红，
+    每次 setup 都要重装单元并再要一次密码。
+    """
+    comp, paths, cfg = _component(tmp_path)
+    platform = _UnreadableUnitPlatform()
+    comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
+    _make_ready(comp, platform, cfg)
+    assert comp._unit_current() is True
+    status = comp.check()
+    assert status.ok is True, status.detail
+
+
+def test_unit_current_is_false_when_argv_does_not_match(tmp_path):
+    """判据是整条命令行 —— 参数缺失或顺序不对都算过期。"""
+    comp, paths, cfg = _component(tmp_path)
+    platform = FakePlatform()
+    comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
+    _make_ready(comp, platform, cfg)
+    platform.install_service(
+        "caddy",
+        exec_start=[
+            str(Path(cfg.caddy_bin)),
+            "--config",
+            str(paths.caddyfile),
+        ],
+        env={},
+    )
+    assert comp._unit_current() is False, "少了 run 就算不是当前单元"
+
+
+def test_unit_current_is_false_when_unit_missing(tmp_path):
+    """单元压根没装 → 当然是过期。"""
+    comp, paths, cfg = _component(tmp_path)
+    platform = FakePlatform()
+    comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
+    _make_ready(comp, platform, cfg)
+    Path(platform.service_unit_path("caddy")).unlink()
+    assert comp._unit_current() is False
+

@@ -480,3 +480,60 @@ def test_linux_exec_reload_still_uses_mainpid(tmp_path):
     comp.apply(comp.plan())
     unit = platform.services["dnsmasq"]
     assert "ExecReload=/bin/kill -HUP $MAINPID" in unit
+
+
+# ---------- 提示与二进制路径：按平台给 ----------
+
+
+def test_macos_check_hint_mentions_launchctl(tmp_path):
+    """macOS 上不能叫用户去跑 systemctl —— 给 launchctl 的命令。"""
+    comp, _platform, _conf = _component(tmp_path, platform=_MacPlatform())
+    status = comp.check()
+    assert status.ok is False
+    assert "launchctl" in status.hint
+    assert "systemctl" not in status.hint
+
+
+def test_macos_verify_hint_mentions_launchctl(tmp_path):
+    comp, platform, _conf = _component(tmp_path, platform=_MacPlatform())
+    platform.active.add("dnsmasq")
+    platform.dns_answers["foo.test"] = None
+    status = comp.verify()
+    assert status.ok is False
+    assert "launchctl" in status.hint
+    assert "systemctl" not in status.hint
+
+
+def test_linux_check_hint_still_mentions_systemctl(tmp_path):
+    """Linux 路径不变。"""
+    comp, _platform, _conf = _component(tmp_path)
+    status = comp.check()
+    assert "systemctl" in status.hint
+
+
+def test_macos_dnsmasq_binary_prefers_homebrew_path(tmp_path, monkeypatch):
+    """PATH 里的 dnsmasq 可能不是 Homebrew 装的那个 —— 固定路径优先。"""
+    from devproxy.components import dnsmasq as dnsmasq_module
+
+    brew = tmp_path / "opt" / "homebrew" / "sbin" / "dnsmasq"
+    brew.parent.mkdir(parents=True)
+    brew.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr(dnsmasq_module, "MACOS_DNSMASQ_CANDIDATES", (str(brew),))
+    monkeypatch.setattr(
+        dnsmasq_module.shutil, "which", lambda name: "/usr/local/bin/dnsmasq"
+    )
+    comp, _platform, _conf = _component(tmp_path, platform=_MacPlatform())
+    assert comp._dnsmasq_binary() == str(brew)
+
+
+def test_macos_dnsmasq_binary_falls_back_to_which(tmp_path, monkeypatch):
+    """固定路径都没有时，才用 PATH 里的那个。"""
+    from devproxy.components import dnsmasq as dnsmasq_module
+
+    monkeypatch.setattr(dnsmasq_module, "MACOS_DNSMASQ_CANDIDATES", ("/nope/dnsmasq",))
+    monkeypatch.setattr(
+        dnsmasq_module.shutil, "which", lambda name: "/usr/local/bin/dnsmasq"
+    )
+    comp, _platform, _conf = _component(tmp_path, platform=_MacPlatform())
+    assert comp._dnsmasq_binary() == "/usr/local/bin/dnsmasq"
+

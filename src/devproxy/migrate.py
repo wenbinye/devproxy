@@ -189,6 +189,24 @@ def _home(platform: Platform, home: Path | None = None) -> Path:
     return getattr(platform, "user_home", None) or Path.home()
 
 
+def _read_unit_text(platform: Platform, path: Path) -> str | None:
+    """读单元内容；普通读不到时（权限不足）改走提权会话。
+
+    macOS 的 system scope 单元在 /Library/LaunchDaemons —— 权限或归属不对时
+    普通用户读不了。读不到就当"没有遗留环境"，等于把用户手工维护的
+    Caddyfile 与环境变量悄悄接管掉 —— 那是迁移最不能犯的错。
+    """
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        pass
+    try:
+        return platform.privilege().read(path)
+    except (OSError, RuntimeError):
+        # 提权也读不到（sudo 不可用等）—— 当作没有单元。
+        return None
+
+
 def detect_legacy(
     platform: Platform,
     paths: Paths,
@@ -202,9 +220,8 @@ def detect_legacy(
     )
     if not unit_path.exists():
         return None
-    try:
-        unit_text = unit_path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
+    unit_text = _read_unit_text(platform, unit_path)
+    if unit_text is None:
         return None
     config_path = unit_config_path(unit_text, _home(platform, home))
     if config_path is None:
