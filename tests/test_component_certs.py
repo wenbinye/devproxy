@@ -87,6 +87,22 @@ def test_check_never_raises(tmp_path):
     assert status.detail
 
 
+def test_check_degrades_when_platform_lacks_nss_trusted(tmp_path):
+    """平台协议里没有 nss_trusted（如未来的 macOS 实现）时按“未信任”降级。"""
+
+    class NoNss:
+        name = "no-nss"
+
+        def ca_trusted(self, ca):
+            return True
+
+    comp, _platform, paths = _component(tmp_path, NoNss())
+    _write_ca(paths)
+    status = comp.check()
+    assert status.ok is False
+    assert "NSS" in status.detail
+
+
 # -- plan ------------------------------------------------------------------
 
 
@@ -354,6 +370,46 @@ def test_verify_not_ok_when_only_system_trusted(tmp_path):
     assert comp.verify().ok is False
 
 
+def test_verify_checks_real_https_request(tmp_path, monkeypatch):
+    """信任库装好还不够 —— 真发一次 HTTPS 请求确认端到端可用。"""
+    _certutil_installed(monkeypatch)
+    platform = FakePlatform()
+    comp, paths, _ = _injected(tmp_path, platform)
+    ca = _write_ca(paths)
+    comp.apply(comp.plan())
+    _trust_both(platform, ca)
+    assert comp.verify().ok is True
+    assert "https://localhost" in platform.http_probes
+
+
+def test_verify_not_ok_when_https_probe_fails(tmp_path):
+    platform = FakePlatform()
+    comp, paths, _ = _injected(tmp_path, platform)
+    ca = _write_ca(paths)
+    _trust_both(platform, ca)
+    platform.http_result = False
+    status = comp.verify()
+    assert status.ok is False
+    assert "https://localhost" in status.detail
+    assert status.hint
+
+
+def test_verify_probes_first_registered_route(tmp_path):
+    """有路由时必须探测真实域名 —— localhost 没有站点，验的是匹配不是信任。"""
+    import json
+
+    platform = FakePlatform()
+    comp, paths, _ = _injected(tmp_path, platform)
+    ca = _write_ca(paths)
+    _trust_both(platform, ca)
+    paths.routes_json.write_text(
+        json.dumps({"version": 1, "routes": [{"domain": "codeup.test"}]}),
+        encoding="utf-8",
+    )
+    assert comp.verify().ok is True
+    assert "https://codeup.test" in platform.http_probes
+
+
 # -- CLI：trust / logs ------------------------------------------------------
 
 
@@ -466,7 +522,8 @@ def test_cli_logs_rejects_unknown_service(tmp_path, monkeypatch):
     platform = FakePlatform()
     _patch_cli(monkeypatch, tmp_path, platform)
     result = CliRunner().invoke(app, ["logs", "nginx"])
-    assert result.exit_code == 1
+    # 参数错误按全局约定退出 2（§9.1），不是运行失败 1
+    assert result.exit_code == 2
 
 
 def test_cli_logs_tails_service_log(tmp_path, monkeypatch):
@@ -483,6 +540,21 @@ def test_cli_logs_tails_service_log(tmp_path, monkeypatch):
     result = CliRunner().invoke(app, ["logs", "caddy"])
     assert result.exit_code == 0, result.stdout
     assert platform.tailed == ["caddy"]
+
+
+def test_cli_logs_missing_journalctl_is_clean_error(tmp_path, monkeypatch):
+    """journalctl 不存在时不能把 FileNotFoundError 漏成 traceback。"""
+
+    class MissingJournal(FakePlatform):
+        def tail_service_log(self, name):
+            raise FileNotFoundError("journalctl")
+
+    platform = MissingJournal()
+    _patch_cli(monkeypatch, tmp_path, platform)
+    result = CliRunner().invoke(app, ["logs", "caddy"])
+    assert result.exit_code == 1
+    assert "journalctl" in result.stderr
+    assert "Traceback" not in result.output
 
 
 def test_cli_logs_does_not_create_files_in_home(tmp_path, monkeypatch):

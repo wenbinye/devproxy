@@ -7,6 +7,7 @@ macOS 只需要系统钥匙串（由 Plan 3 的 macOS 平台实现提供）。
 
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 
@@ -57,10 +58,18 @@ class CertComponent:
             return False
 
     def _system_trusted(self) -> bool:
-        return self._trusted(self.platform.ca_trusted, self.ca_path)
+        checker = getattr(self.platform, "ca_trusted", None)
+        if checker is None:
+            return False
+        return self._trusted(checker, self.ca_path)
 
     def _nss_trusted(self) -> bool:
-        return self._trusted(self.platform.nss_trusted, self.ca_path)
+        # 平台协议可能有变（Plan 3 的 macOS 实现）；属性访问本身也要在
+        # try 之外兜住的话，缺方法会让 check() 抛异常 —— doctor 就炸了。
+        checker = getattr(self.platform, "nss_trusted", None)
+        if checker is None:
+            return False
+        return self._trusted(checker, self.ca_path)
 
     # -- check ---------------------------------------------------------
 
@@ -198,9 +207,33 @@ class CertComponent:
 
     # -- verify --------------------------------------------------------
 
+    def _probe_url(self) -> str:
+        """真实 HTTPS 探测的 URL：优先首条已注册路由，其次 localhost。
+
+        用 localhost 去验一个只有 codeup.test 的机器会因“无 localhost 站点”
+        而握手失败 —— 那验的是站点匹配，不是证书信任链。
+        """
+        try:
+            data = json.loads(self.paths.routes_json.read_text(encoding="utf-8"))
+            for route in data.get("routes") or []:
+                domain = route.get("domain") if isinstance(route, dict) else None
+                if isinstance(domain, str) and domain:
+                    return f"https://{domain}"
+        except (OSError, ValueError, AttributeError):
+            pass
+        return "https://localhost"
+
     def verify(self) -> Status:
         if not self.ca_path.exists():
             return Status(ok=True, detail="尚无 CA 根证书（跳过验证）")
         if not (self._system_trusted() and self._nss_trusted()):
             return Status(ok=False, detail="CA 仍未被完全信任", hint="devproxy trust")
-        return Status(ok=True, detail="CA 已信任")
+        # openssl 验证信任链只是第一步；再发一次真实 HTTPS 请求确认端到端可用。
+        url = self._probe_url()
+        if not self.platform.http_ok(url):
+            return Status(
+                ok=False,
+                detail=f"CA 已进信任库，但 {url} 仍握手失败",
+                hint="devproxy trust；systemctl --user status caddy",
+            )
+        return Status(ok=True, detail=f"CA 已信任，{url} 握手成功")

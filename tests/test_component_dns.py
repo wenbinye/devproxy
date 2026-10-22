@@ -34,8 +34,19 @@ def test_render_system_dnsmasq_conf_shape():
 def test_auto_backend_prefers_resolved(tmp_path):
     paths = Paths(tmp_path / "c", tmp_path / "s", tmp_path / "d")
     cfg = Config()
-    comp = DnsComponent(FakePlatform(), paths, cfg, backend="auto")
+    platform = FakePlatform()
+    platform.resolved_running = True
+    comp = DnsComponent(platform, paths, cfg, backend="auto")
     assert comp.resolved_backend is True
+
+
+def test_auto_backend_picks_system_when_resolved_inactive(tmp_path):
+    """目录存在不代表 resolved 在跑 —— auto 必须探测进程状态。"""
+    paths = Paths(tmp_path / "c", tmp_path / "s", tmp_path / "d")
+    platform = FakePlatform()
+    platform.resolved_running = False
+    comp = DnsComponent(platform, paths, Config(), backend="auto")
+    assert comp.resolved_backend is False
 
 
 def test_explicit_system_backend(tmp_path):
@@ -63,9 +74,9 @@ def test_plan_writes_resolved_conf(tmp_path):
 # -- 组件 ---------------------------------------------------------------
 
 
-def _component(tmp_path, backend="resolved", suffix="test"):
+def _component(tmp_path, backend="resolved", suffix="test", platform=None):
     paths = Paths(tmp_path / "c", tmp_path / "s", tmp_path / "d")
-    platform = FakePlatform()
+    platform = platform or FakePlatform()
     return (
         DnsComponent(platform, paths, Config(domain_suffix=suffix), backend=backend),
         platform,
@@ -142,15 +153,43 @@ def test_verify_ok_when_route_installed(tmp_path):
     comp, platform = _component(tmp_path, backend="resolved")
     platform.dns_backends.add("resolved")
     assert comp.verify().ok is True
+    assert platform.dns_queries == ["foo.test"]
 
 
-def test_auto_falls_back_to_system_without_resolved_dir(tmp_path, monkeypatch):
-    monkeypatch.setattr(
-        dns_module, "RESOLVED_CONF_DIR", tmp_path / "no-such-resolved-dir"
-    )
-    comp, _platform = _component(tmp_path, backend="auto")
+def test_verify_fails_when_resolver_does_not_return_loopback(tmp_path):
+    comp, platform = _component(tmp_path, backend="resolved")
+    platform.dns_backends.add("resolved")
+    platform.dns_answer = None
+    status = comp.verify()
+    assert status.ok is False
+    assert "foo.test" in status.detail
+
+
+def test_verify_fails_when_resolver_returns_wrong_address(tmp_path):
+    comp, platform = _component(tmp_path, backend="resolved")
+    platform.dns_backends.add("resolved")
+    platform.dns_answer = "10.0.0.5"
+    assert comp.verify().ok is False
+
+
+def test_auto_falls_back_to_system_when_resolved_inactive(tmp_path):
+    platform = FakePlatform()
+    platform.resolved_running = False
+    comp, _platform = _component(tmp_path, backend="auto", platform=platform)
     assert comp.resolved_backend is False
     assert comp.target_path == dns_module.SYSTEM_DNSMASQ_CONF
+
+
+def test_auto_ignores_resolved_conf_dir_when_resolved_inactive(tmp_path, monkeypatch):
+    """目录存在不是判据 —— 本机的目录就是手工创建的。"""
+    monkeypatch.setattr(
+        dns_module, "RESOLVED_CONF_DIR", tmp_path / "resolved.conf.d"
+    )
+    (tmp_path / "resolved.conf.d").mkdir()
+    platform = FakePlatform()
+    platform.resolved_running = False
+    comp, _platform = _component(tmp_path, backend="auto", platform=platform)
+    assert comp.resolved_backend is False
 
 
 # -- setup 幂等：已就绪时 plan 必须为空（Important C） -------------------

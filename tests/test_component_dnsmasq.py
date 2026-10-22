@@ -344,3 +344,75 @@ def test_apply_unknown_action_raises(tmp_path):
     comp, _platform, _conf = _component(tmp_path)
     with pytest.raises(RuntimeError):
         comp.apply([Action(description="?", kind="run", command=["bogus"])])
+
+
+# -- verify：真的能解析 *.test ----------------------------------------------
+
+
+def test_verify_ok_when_dns_query_returns_loopback(tmp_path):
+    comp, platform, _conf = _component(tmp_path)
+    platform.active.add("dnsmasq")
+    status = comp.verify()
+    assert status.ok is True
+    assert platform.dns_queries == ["foo.test"]
+
+
+def test_verify_fails_when_dns_query_returns_nothing(tmp_path):
+    comp, platform, _conf = _component(tmp_path)
+    platform.active.add("dnsmasq")
+    platform.dns_answer = None
+    status = comp.verify()
+    assert status.ok is False
+    assert "foo.test" in status.detail
+    assert status.hint
+
+
+def test_verify_fails_when_dns_query_returns_wrong_address(tmp_path):
+    comp, platform, _conf = _component(tmp_path)
+    platform.active.add("dnsmasq")
+    platform.dns_answer = "10.0.0.5"
+    assert comp.verify().ok is False
+
+
+# -- 备份：改写用户既有配置前必须先备份 --------------------------------------
+
+
+def test_apply_backs_up_changed_user_config(tmp_path):
+    original = "port=53\naddress=/.develop/127.0.0.1\n"
+    comp, _platform, conf_path = _component(tmp_path, conf=original)
+    comp.apply(comp.plan())
+
+    backups = sorted((tmp_path / "s" / "backups").glob("dnsmasq.conf.*.bak"))
+    assert len(backups) == 1
+    assert backups[0].read_text(encoding="utf-8") == original
+
+
+def test_apply_does_not_backup_when_content_unchanged(tmp_path):
+    """内容没变时不得落备份 —— 否则每次 setup 都堆垃圾。"""
+    comp, platform, conf_path = _component(tmp_path)
+    merged = merge_dnsmasq_config(
+        "", port=platform.dns_port, suffix=Config().domain_suffix
+    )
+    conf_path.parent.mkdir(parents=True, exist_ok=True)
+    conf_path.write_text(merged, encoding="utf-8")
+
+    from devproxy.platform.base import Action
+
+    comp.apply(
+        [
+            Action(
+                description="写同样的内容",
+                kind="write",
+                path=conf_path,
+                content=merged,
+            )
+        ]
+    )
+    backups = list((tmp_path / "s" / "backups").glob("*.bak"))
+    assert backups == []
+
+
+def test_apply_creates_no_backup_for_new_config(tmp_path):
+    comp, _platform, _conf_path = _component(tmp_path)
+    comp.apply(comp.plan())
+    assert list((tmp_path / "s" / "backups").glob("*.bak")) == []

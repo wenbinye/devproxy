@@ -56,12 +56,17 @@ class DnsComponent:
 
     @property
     def resolved_backend(self) -> bool:
-        """auto 时优先 resolved（不占 53，用户态守护）。"""
+        """auto 时优先 resolved（不占 53，用户态守护）。
+
+        判据必须是 resolved **真的在运行**，而不是目录存在 ——
+        /etc/systemd/resolved.conf.d 可能只是被手工创建过；反过来干净机器
+        上目录不存在也不代表 resolved 没装。目录存在与否都不是可靠信号。
+        """
         if self.backend == "system":
             return False
         if self.backend == "resolved":
             return True
-        return RESOLVED_CONF_DIR.is_dir()
+        return self.platform.resolved_active()
 
     @property
     def target_path(self) -> Path:
@@ -147,6 +152,7 @@ class DnsComponent:
 
     # -- verify --------------------------------------------------------
     def verify(self) -> Status:
+        """路由文件在位还不够 —— 必须真的能经系统解析器解析到本机。"""
         key = self.backend_key
         if not self.platform.dns_route_installed(key):
             return Status(
@@ -154,7 +160,18 @@ class DnsComponent:
                 detail="DNS 路由未生效",
                 hint="systemctl restart systemd-resolved",
             )
-        return Status(ok=True, detail="DNS 路由已配置")
+        name = f"foo.{self.config.domain_suffix}"
+        answer = self.platform.dns_query(name)
+        if answer not in ("127.0.0.1", "::1"):
+            return Status(
+                ok=False,
+                detail=(
+                    f"系统解析器未把 {name} 指到本机（"
+                    f"{answer or '无响应'}）；路由文件已写但未生效"
+                ),
+                hint="systemctl restart systemd-resolved；resolvectl query " + name,
+            )
+        return Status(ok=True, detail=f"DNS 路由已生效（{name} → {answer}）")
 
     # -- 状态记录 ------------------------------------------------------
     @property

@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 from devproxy.config import Config
@@ -166,6 +167,7 @@ class DnsmasqComponent:
         for action in actions:
             if action.kind == "write" and action.path is not None:
                 action.path.parent.mkdir(parents=True, exist_ok=True)
+                self._backup_if_changed(action.path, action.content)
                 action.path.write_text(action.content, encoding="utf-8")
                 continue
             if action.command[:1] == ["install-service"]:
@@ -174,15 +176,46 @@ class DnsmasqComponent:
                 continue
             raise RuntimeError(f"未知动作: {action.command}")
 
+    def _backup_if_changed(self, path: Path, content: str) -> None:
+        """改写用户既有配置前先备份（Plan 2 Global Constraints）。
+
+        内容没变时绝不落备份文件 —— 否则每次 setup 都会在状态目录里堆垃圾。
+        """
+        if path != self.conf_path or not path.exists():
+            return
+        try:
+            original = path.read_bytes()
+        except OSError:
+            return
+        if original == content.encode("utf-8"):
+            return
+        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        backup = self.paths.backup_dir / f"dnsmasq.conf.{stamp}.bak"
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        backup.write_bytes(original)
+
     # -- verify --------------------------------------------------------
     def verify(self) -> Status:
+        """服务 active 之外，还真要能解析 *.test —— 配置写对不代表 dnsmasq
+        加载了它（端口占用、启动失败、单元指向别的 conf-dir 都会骗过 check）。"""
         if not self.platform.service_active("dnsmasq"):
             return Status(
                 ok=False,
                 detail="dnsmasq 服务未处于 active",
                 hint="systemctl --user status dnsmasq",
             )
-        return Status(ok=True, detail="dnsmasq 运行中")
+        name = f"foo.{self.config.domain_suffix}"
+        answer = self.platform.dns_query(name)
+        if answer not in ("127.0.0.1", "::1"):
+            return Status(
+                ok=False,
+                detail=(
+                    f"dnsmasq 未把 {name} 解析到本机（{answer or '无响应'}）"
+                ),
+                hint="systemctl --user restart dnsmasq；dig @127.0.0.1 -p "
+                f"{self.platform.dns_port} {name}",
+            )
+        return Status(ok=True, detail=f"dnsmasq 运行中（{name} → {answer}）")
 
     # -- unit ----------------------------------------------------------
     def _conf_dir_spec(self) -> str:
