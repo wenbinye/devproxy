@@ -12,6 +12,11 @@ SYSTEM_CA_DEST = Path("/usr/local/share/ca-certificates/devproxy-local.crt")
 SYSTEM_TRUST_DIR = Path("/etc/ssl/certs")
 NSS_DIR = Path("~/.pki/nssdb")
 
+# macOS 的对应物：CA 进系统钥匙串（Safari/Chrome 都认它），
+# DNS 路由走每域解析器文件（/etc/resolver/<后缀>），不动 /etc/resolv.conf。
+SYSTEM_KEYCHAIN = "/Library/Keychains/System.keychain"
+RESOLVER_DIR = Path("/etc/resolver")
+
 
 @dataclass
 class Status:

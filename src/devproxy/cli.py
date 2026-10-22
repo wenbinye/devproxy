@@ -316,9 +316,10 @@ def selftest() -> None:
 
 
 def _platform():
-    from devproxy.platform.linux import LinuxPlatform
+    """按当前系统选平台实现（Linux / macOS）。"""
+    from devproxy.platform import get_platform
 
-    return LinuxPlatform()
+    return get_platform()
 
 
 def _components(paths, config, dns_backend=None, platform=None):
