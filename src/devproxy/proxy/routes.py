@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -16,6 +17,16 @@ RENDER_HEADER = "# 由 devproxy 自动生成 —— 请勿手工编辑\n"
 
 class RouteTableError(RuntimeError):
     """路由表文件损坏或不合法。"""
+
+
+# 站点地址与上游都要拼进 Caddyfile 文本 —— 只放行严格白名单，
+# 大括号/换行/引号这类元字符一律拒绝（不是「转义后放行」：
+# Caddyfile 没有可靠的通用转义，唯一的正解是不让它们进来）
+HOSTNAME_RE = re.compile(
+    r"\A[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*\Z"
+)
+HOSTPORT_RE = re.compile(r"\A[a-z0-9.-]+:\d{1,5}\Z")
+MAX_HOSTNAME_LEN = 253
 
 
 @dataclass
@@ -128,11 +139,40 @@ def save_table(path: Path, table: RouteTable) -> None:
     atomic_write(path, json.dumps(table.to_dict(), ensure_ascii=False, indent=2) + "\n")
 
 
+def check_renderable(route: Route) -> None:
+    """渲染前的最后一道闸：domain 必须是主机名，upstream 必须是 host:port。
+
+    routes.json 是「真相」，但真相也可能是手工编辑过的 —— 渲染器不能把
+    任意文本直接灌进 Caddyfile 这种配置语言里。
+    """
+    domain = route.domain
+    if (
+        not isinstance(domain, str)
+        or len(domain) > MAX_HOSTNAME_LEN
+        or not HOSTNAME_RE.match(domain)
+    ):
+        raise RouteTableError(
+            f"路由 {route.name!r} 的 domain {domain!r} 不是合法主机名"
+            "（只允许小写字母、数字、连字符与点）"
+        )
+    upstream = route.upstream
+    if not isinstance(upstream, str) or not HOSTPORT_RE.match(upstream):
+        raise RouteTableError(
+            f"路由 {route.name!r} 的 upstream {upstream!r} 必须形如 host:port"
+        )
+    if not 1 <= int(upstream.rpartition(":")[2]) <= 65535:
+        raise RouteTableError(
+            f"路由 {route.name!r} 的 upstream {upstream!r} 端口超出 1..65535"
+        )
+
+
 def render_caddyfile(table: RouteTable) -> str:
     """渲染成 Caddyfile 片段：一个路由 = 一个精确站点块。
 
     刻意不用通配块与 on-demand —— 精确块让未注册域名拿不到证书。
     """
+    for route in table.routes:
+        check_renderable(route)
     blocks = [
         f"{r.domain} {{\n\ttls internal\n\treverse_proxy {r.upstream}\n}}"
         for r in table.routes

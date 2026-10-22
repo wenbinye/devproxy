@@ -137,6 +137,20 @@ def _read_log_tail(path: Path, limit: int = 800) -> str:
     return text[-limit:].strip()
 
 
+def _wait_trust_disabled_log(log_path: Path, timeout: float = 10.0) -> bool:
+    """等 caddy 打出「宿主信任库安装已禁用」那行日志。
+
+    这是 install_trust=false 真正生效的唯一外部可见证据（老版本 caddy
+    会静默忽略该字段）；等不到就当没生效 —— fail closed。
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if TRUST_DISABLED_LOG in _read_log_tail(log_path, limit=100000):
+            return True
+        time.sleep(0.2)
+    return False
+
+
 def _adapt(caddy_bin: Path, caddyfile: Path, config_json: Path) -> tuple[bool, str]:
     """Caddyfile → JSON，并把沙箱 CA 的「装进系统信任库」关掉。
 
@@ -280,13 +294,7 @@ def run_selftest(caddy_bin: Path) -> SelftestResult:
 
         # 「没污染宿主」是本自检的核心承诺之一，必须有证据，不能靠假设。
         # 老版本 caddy 会静默忽略 install_trust，那时这行日志不会出现。
-        disabled = False
-        deadline = time.time() + 10
-        while time.time() < deadline and not disabled:
-            disabled = TRUST_DISABLED_LOG in _read_log_tail(log_path, limit=100000)
-            if not disabled:
-                time.sleep(0.2)
-        if disabled:
+        if _wait_trust_disabled_log(log_path):
             result.record("已确认禁用宿主信任库安装（caddy 日志佐证）", True)
         else:
             result.record(

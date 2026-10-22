@@ -7,6 +7,7 @@ import time
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 from typer.core import TyperGroup
 
@@ -34,7 +35,9 @@ EXIT_PRECONDITION = 3
 
 def fail(msg: str, code: int = EXIT_FAIL) -> None:
     """以统一形态输出错误并退出（Rich 渲染的一行错误，而非 traceback）。"""
-    err_console.print(f"devproxy: {msg}")
+    # escape：错误消息里可能带 [a-z0-9-] 这类字符集或用户输入，
+    # 不转义会被 Rich 当成标记吞掉
+    err_console.print(f"devproxy: {escape(msg)}")
     raise typer.Exit(code)
 
 
@@ -86,7 +89,7 @@ def build_context(
 @app.command(context_settings={"ignore_unknown_options": True})
 def up(
     ctx: typer.Context,
-    name: str = typer.Argument(..., help="路由名（[a-z0-9-]，单标签）"),
+    name: str = typer.Argument(..., help="路由名（\\[a-z0-9-]，单标签）"),
     port: int = typer.Option(None, "--port", help="显式端口（默认自动分配）"),
     ready_timeout: int = typer.Option(None, "--ready-timeout", help="就绪超时秒数"),
 ) -> None:
@@ -116,11 +119,9 @@ def up(
         )
     except PreconditionError as e:
         # Caddy 未运行是前置条件不满足，不是运行失败 —— 退出码 3（§9.1）
-        err_console.print(f"devproxy: {e}")
-        raise typer.Exit(EXIT_PRECONDITION) from e
+        fail(str(e), EXIT_PRECONDITION)
     except (UpError, RouteStoreError, RouteTableError, InvalidNameError) as e:
-        err_console.print(f"devproxy: {e}")
-        raise typer.Exit(EXIT_FAIL) from e
+        fail(str(e))
     raise typer.Exit(rc)
 
 
@@ -133,11 +134,9 @@ def expose(
     try:
         validate_name(name)
     except InvalidNameError as e:
-        err_console.print(f"devproxy: {e}")
-        raise typer.Exit(EXIT_FAIL) from e
+        fail(str(e))
     if not (1 <= port <= 65535):
-        err_console.print(f"devproxy: 非法端口 {port}：必须在 1..65535 之间")
-        raise typer.Exit(EXIT_FAIL)
+        fail(f"非法端口 {port}：必须在 1..65535 之间")
 
     _, config, store, admin = build_context()
     # expose 注册的是常驻活路由，reload 必须真的发生 —— Caddy 未运行属于
@@ -172,8 +171,7 @@ def down(name: str = typer.Argument(..., help="路由名")) -> None:
     try:
         validate_name(name)
     except InvalidNameError as e:
-        err_console.print(f"devproxy: {e}")
-        raise typer.Exit(EXIT_FAIL) from e
+        fail(str(e))
     _, _, store, _ = build_context()
     try:
         route = store.get(name)
@@ -213,11 +211,11 @@ def ls() -> None:
     for r in routes:
         ok = reachable(r.port)
         table.add_row(
-            r.name,
-            r.domain,
+            escape(r.name),
+            escape(r.domain),
             str(r.port),
-            r.mode,
-            r.upstream,
+            escape(r.mode),
+            escape(r.upstream),
             "● reachable" if ok else "⛔ 不可达",
         )
     console.print(table)
@@ -271,7 +269,7 @@ def main() -> None:
         app()
     except (ConfigError, RouteStoreError, RouteTableError) as e:
         # 兜底：领域异常绝不能以 traceback 形态漏到终端
-        err_console.print(f"devproxy: {e}")
+        err_console.print(f"devproxy: {escape(str(e))}")
         sys.exit(EXIT_FAIL)
 
 

@@ -30,11 +30,16 @@ class CaddyAdmin:
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as r:
                 raw = r.read()
-                return r.status, (json.loads(raw) if raw else None)
+                status = r.status
         except urllib.error.HTTPError as e:
             return e.code, None
         except (urllib.error.URLError, OSError):
             return 0, None
+        try:
+            return status, (json.loads(raw) if raw else None)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            # 200 但响应体不是 JSON —— 契约是 (code, body)，不能裸抛
+            return status, None
 
     def is_alive(self) -> bool:
         code, _ = self.api("GET", "/config/")
@@ -59,8 +64,9 @@ class CaddyConfig:
                 text=True,
                 timeout=timeout,
             )
-        except (FileNotFoundError, PermissionError):
-            return False, f"caddy 二进制不存在或不可执行: {self.caddy_bin}"
+        except OSError as e:
+            # 文件缺失 / 不可执行 / 格式不对（Exec format error）都归到这里
+            return False, f"caddy 二进制不存在或不可执行: {self.caddy_bin}（{e}）"
         except subprocess.TimeoutExpired:
             return False, f"caddy validate 超时（{timeout}s）"
         return proc.returncode == 0, (proc.stderr or proc.stdout).strip()
@@ -82,8 +88,9 @@ class CaddyConfig:
                 text=True,
                 timeout=timeout,
             )
-        except (FileNotFoundError, PermissionError):
-            return False, f"caddy 二进制不存在或不可执行: {self.caddy_bin}"
+        except OSError as e:
+            # 文件缺失 / 不可执行 / 格式不对（Exec format error）都归到这里
+            return False, f"caddy 二进制不存在或不可执行: {self.caddy_bin}（{e}）"
         except subprocess.TimeoutExpired:
             return False, f"caddy reload 超时（{timeout}s）"
         return proc.returncode == 0, (proc.stderr or proc.stdout).strip()

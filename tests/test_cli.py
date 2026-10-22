@@ -259,3 +259,21 @@ def test_main_backstop_turns_domain_errors_into_exit_1(monkeypatch, exc):
     with pytest.raises(SystemExit) as cm:
         cli.main()
     assert cm.value.code == 1
+
+
+# ------------------------------------- Rich 标记不得吞掉错误消息里的字符集
+
+
+def test_invalid_name_error_keeps_charset_in_output(env, monkeypatch):
+    """[a-z0-9-] 会被 Rich 当标记吞掉 —— 错误输出必须保留字面字符集。"""
+    _patch_ctx(monkeypatch, env)
+    res = CliRunner().invoke(app, ["expose", "Bad_Name", "--port", "3000"])
+    assert res.exit_code == 1
+    assert "[a-z0-9-]" in res.output
+
+
+def test_up_help_text_keeps_charset(env, monkeypatch):
+    _patch_ctx(monkeypatch, env)
+    res = CliRunner().invoke(app, ["up", "--help"])
+    assert res.exit_code == 0
+    assert "[a-z0-9-]" in res.output

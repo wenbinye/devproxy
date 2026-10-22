@@ -140,3 +140,56 @@ def test_build_main_caddyfile_shape(tmp_path):
     assert "import /state/routes.caddy" in out
     assert "import /config/sites.caddy" in out
     assert out.count("{") == 1, "全局块只能有一个（被 import 的文件不能再有全局块）"
+
+
+# ------------------------------------------ 边界：畸形二进制 / 畸形 Admin 响应
+
+
+def _nonexec_format_binary(tmp_path) -> Path:
+    """存在、有执行位、但不是可执行格式（Exec format error）的文件。"""
+    fake = tmp_path / "caddy"
+    fake.write_text("this is not an executable format\n")
+    fake.chmod(0o755)
+    return fake
+
+
+def test_validate_wrong_format_binary_returns_false_not_exception(tmp_path):
+    """二进制存在但格式不对（OSError: Exec format error）也要遵守 (False, msg) 契约。"""
+    cfg = CaddyConfig(caddy_bin=_nonexec_format_binary(tmp_path), caddyfile=tmp_path / "C")
+    ok, msg = cfg.validate(tmp_path / "C")
+    assert ok is False
+    assert "caddy" in msg
+
+
+def test_reload_wrong_format_binary_returns_false_not_exception(tmp_path):
+    cfg = CaddyConfig(caddy_bin=_nonexec_format_binary(tmp_path), caddyfile=tmp_path / "C")
+    ok, msg = cfg.reload(tmp_path / "C")
+    assert ok is False
+    assert "caddy" in msg
+
+
+class _NonJsonHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = b"not-json-at-all"
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+def test_api_non_json_200_returns_code_and_none():
+    """200 但响应体不是 JSON → (200, None)，不能裸抛 JSONDecodeError。"""
+    srv = _Quiet(("127.0.0.1", 0), _NonJsonHandler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        code, body = CaddyAdmin(base=f"http://127.0.0.1:{srv.server_address[1]}").api(
+            "GET", "/config/"
+        )
+        assert code == 200
+        assert body is None
+    finally:
+        srv.shutdown()
+        srv.server_close()

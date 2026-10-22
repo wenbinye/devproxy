@@ -1,8 +1,11 @@
 import json
 
+import pytest
+
 from devproxy.proxy.routes import (
     Route,
     RouteTable,
+    RouteTableError,
     atomic_write,
     load_table,
     render_caddyfile,
@@ -108,3 +111,45 @@ def test_atomic_write_leaves_no_tmp_file(tmp_path):
     atomic_write(p, "hello")
     assert p.read_text() == "hello"
     assert list(tmp_path.iterdir()) == [p]
+
+
+# --------------------- I-6: 渲染期输入校验（routes.json 是真相但不是免检通道）
+
+
+def _bad_route(**overrides):
+    base = dict(
+        name="x",
+        domain="x.test",
+        port=1,
+        mode="up",
+        upstream="127.0.0.1:1",
+    )
+    base.update(overrides)
+    return Route(**base)
+
+
+def test_render_rejects_domain_with_caddyfile_metacharacters():
+    """domain 直通站点块地址 —— 换行/大括号可伪造额外站点块，必须拒绝。"""
+    bad = _bad_route(domain="x.test }\nimport /tmp/evil\n#")
+    with pytest.raises(RouteTableError) as cm:
+        render_caddyfile(RouteTable(routes=[bad]))
+    assert "domain" in str(cm.value) and "x" in str(cm.value)
+
+
+def test_render_rejects_upstream_with_caddyfile_metacharacters():
+    bad = _bad_route(upstream="127.0.0.1:1 }\n}\nimport /tmp/evil")
+    with pytest.raises(RouteTableError) as cm:
+        render_caddyfile(RouteTable(routes=[bad]))
+    assert "upstream" in str(cm.value)
+
+
+def test_render_rejects_domain_with_dots_or_uppercase():
+    for domain in ("X.TEST", "x..test", "x.test.", "-x.test"):
+        with pytest.raises(RouteTableError):
+            render_caddyfile(RouteTable(routes=[_bad_route(domain=domain)]))
+
+
+def test_render_rejects_bad_upstream_forms():
+    for upstream in ("127.0.0.1", ":8080", "127.0.0.1:99999", "http://127.0.0.1:1"):
+        with pytest.raises(RouteTableError):
+            render_caddyfile(RouteTable(routes=[_bad_route(upstream=upstream)]))
