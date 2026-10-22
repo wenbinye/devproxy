@@ -19,6 +19,7 @@ from devproxy.proxy.runner import (
     UpRunner,
     alloc_port,
     kill_pid_group,
+    proc_start_time,
     reachable,
     stop_process_group,
 )
@@ -474,4 +475,124 @@ def test_run_signal_forwards_to_group_and_deregisters(paths, tmp_path):
             proc.kill()
             proc.wait(timeout=5)
         if child_pid is not None and _process_running(child_pid):
-            kill_pid_group(child_pid)
+            # 测试自己的兜底清理：此刻读到的身份必然匹配，可直接杀
+            kill_pid_group(child_pid, proc_start_time(child_pid))
+
+
+# ------------------------------------------- I-3: pid 复用防护（进程身份校验）
+
+
+def _spawn_sleeper() -> subprocess.Popen:
+    return subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True
+    )
+
+
+def test_proc_start_time_is_stable_and_missing_for_dead_pid():
+    """同一进程两次读取身份一致；不存在的 pid 返回 None。"""
+    a = proc_start_time(os.getpid())
+    b = proc_start_time(os.getpid())
+    assert a is not None and a == b
+    assert proc_start_time(999_999_999) is None
+
+
+def test_kill_pid_group_kills_when_identity_matches():
+    proc = _spawn_sleeper()
+    try:
+        assert kill_pid_group(proc.pid, proc_start_time(proc.pid)) is True
+        deadline = time.time() + 5
+        while time.time() < deadline and _process_running(proc.pid):
+            time.sleep(0.05)
+        assert not _process_running(proc.pid)
+    finally:
+        stop_process_group(proc, proc.pid)
+
+
+def test_kill_pid_group_skips_reused_pid():
+    """记录的启动时刻与当前进程对不上（pid 被复用）→ 绝不误杀。"""
+    proc = _spawn_sleeper()
+    try:
+        forged = (proc_start_time(proc.pid) or "0") + "-forged"
+        assert kill_pid_group(proc.pid, forged) is False
+        time.sleep(0.3)
+        assert _process_running(proc.pid), "身份不符时不得杀掉无辜进程"
+    finally:
+        stop_process_group(proc, proc.pid)
+
+
+def test_kill_pid_group_skips_when_identity_unknown():
+    """老版本路由表没有 proc_start —— 无法核实身份时宁可留下残留进程。"""
+    proc = _spawn_sleeper()
+    try:
+        assert kill_pid_group(proc.pid, None) is False
+        time.sleep(0.3)
+        assert _process_running(proc.pid), "无法核实身份时不得杀掉进程"
+    finally:
+        stop_process_group(proc, proc.pid)
+
+
+def test_kill_pid_group_on_dead_pid_is_noop():
+    proc = _spawn_sleeper()
+    pid, start = proc.pid, proc_start_time(proc.pid)
+    stop_process_group(proc, proc.pid)
+    time.sleep(0.3)
+    assert kill_pid_group(pid, start) is False
+
+
+def test_run_persists_proc_start_with_pid(paths):
+    """注册路由时把进程身份一并固化，供 down 时防 pid 复用。"""
+    paths.ensure_files()
+    runner = _runner(paths)
+    snapshots = []
+
+    def on_ready(domain, port):
+        snapshots.append(json.loads(paths.routes_json.read_text()))
+
+    runner.run("codeup", [sys.executable, "-c", _LISTEN_AND_EXIT], on_ready=on_ready)
+    entry = snapshots[0]["routes"][0]
+    assert entry["pid"], "pid 必须记录"
+    assert entry.get("proc_start"), "proc_start 必须记录"
+
+
+# --------------------------------------------- I-4: 心跳不得复活已注销的路由
+
+
+def test_watch_does_not_resurrect_route_removed_between_check_and_write(
+    paths, monkeypatch
+):
+    """down 恰好落在心跳的「查表」与「写回」之间 → 不得复活（检查必须持锁）。"""
+    import threading
+
+    paths.ensure_files()
+    cfg = Config(storage=str(paths.data_dir))
+    caddy = FakeCaddy()
+    store = RouteStore(paths, cfg, caddy)
+    admin = FakeAdmin()
+    runner = UpRunner(store, cfg, admin)
+    runner.heartbeat_interval = 0.05
+
+    route = Route(name="x", domain="x.test", port=1, mode="up", upstream="127.0.0.1:1")
+    store.mutate(lambda t: t.upsert(route))
+    admin.config_payload = {}  # Caddy 当前配置里没有它
+
+    real_mutate = store.mutate
+    armed = {"hit": False}
+
+    def racing_mutate(fn, *args, **kwargs):
+        if armed["hit"]:
+            return real_mutate(fn, *args, **kwargs)
+        armed["hit"] = True
+        # 用户恰在此刻完成了一次 down（落在无锁检查与写回之间）
+        real_mutate(lambda t: t.remove("x"))
+        return real_mutate(fn, *args, **kwargs)
+
+    monkeypatch.setattr(store, "mutate", racing_mutate)
+
+    stop = threading.Event()
+    t = threading.Thread(target=runner._watch, args=(route, stop), daemon=True)
+    t.start()
+    t.join(timeout=5)
+    stop.set()
+    assert not t.is_alive(), "路由已不存在，守护线程应结束"
+    table = json.loads(paths.routes_json.read_text())
+    assert table["routes"] == [], "被 down 的路由不得被心跳复活"

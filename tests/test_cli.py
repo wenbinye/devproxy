@@ -145,18 +145,23 @@ def test_down_unknown_name_is_ok(env, monkeypatch):
 
 
 def test_down_kills_leftover_process_group(env, monkeypatch):
-    """down 要顺带杀掉 mode=up 路由的残留子进程组。"""
+    """down 要顺带杀掉 mode=up 路由的残留子进程组（带注册时的进程身份）。"""
     _patch_ctx(monkeypatch, env)
     killed = []
-    monkeypatch.setattr("devproxy.cli.kill_pid_group", lambda pid: killed.append(pid))
+
+    def fake_kill(pid, proc_start=None):
+        killed.append((pid, proc_start))
+
+    monkeypatch.setattr("devproxy.cli.kill_pid_group", fake_kill)
     _seed_route(env / "state", "codeup", 42133, mode="up")
     p = env / "state" / "routes.json"
     data = json.loads(p.read_text())
     data["routes"][0]["pid"] = 4242
+    data["routes"][0]["proc_start"] = "12345"
     p.write_text(json.dumps(data))
     res = CliRunner().invoke(app, ["down", "codeup"])
     assert res.exit_code == 0, res.output
-    assert killed == [4242]
+    assert killed == [(4242, "12345")]
 
 
 def test_ls_lists_routes(env, monkeypatch):

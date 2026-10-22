@@ -29,6 +29,9 @@ class Route:
     upstream: str
     command: list[str] | None = None
     pid: int | None = None
+    # pid 的启动时刻（/proc stat 第 22 字段 / ps lstart）—— pid 会被 OS
+    # 复用，down 时用它确认要杀的还是当初那个进程。None = 无法核实
+    proc_start: str | None = None
     created_at: str = ""
 
     def to_dict(self) -> dict:
@@ -43,6 +46,8 @@ class Route:
             d["command"] = self.command
         if self.pid is not None:
             d["pid"] = self.pid
+        if self.proc_start is not None:
+            d["proc_start"] = self.proc_start
         if self.created_at:
             d["created_at"] = self.created_at
         return d
@@ -57,6 +62,7 @@ class Route:
             upstream=d["upstream"],
             command=list(d["command"]) if d.get("command") is not None else None,
             pid=int(d["pid"]) if d.get("pid") is not None else None,
+            proc_start=d.get("proc_start"),
             created_at=d.get("created_at", ""),
         )
 

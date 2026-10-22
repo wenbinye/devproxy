@@ -14,15 +14,20 @@ import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 from typing import Callable
 
 from devproxy.config import Config
 from devproxy.proxy.caddy import CaddyAdmin
 from devproxy.proxy.names import domain_for, validate_name
-from devproxy.proxy.routes import Route
+from devproxy.proxy.routes import Route, RouteTable
 from devproxy.proxy.store import RouteStore
 
 HEARTBEAT_INTERVAL = 30.0
+
+
+class _RouteGone(Exception):
+    """路由表里已经没有这条路由（用户已 down）—— 心跳不得复活它。"""
 
 
 class UpError(RuntimeError):
@@ -134,7 +139,7 @@ class UpRunner:
         if existing is not None:
             self.store.mutate(lambda t: t.remove(name))
             if existing.pid:
-                kill_pid_group(existing.pid)
+                kill_pid_group(existing.pid, existing.proc_start)
 
         if port is None:
             port = alloc_port()
@@ -193,6 +198,7 @@ class UpRunner:
                 upstream=f"127.0.0.1:{port}",
                 command=list(cmd),
                 pid=proc.pid,
+                proc_start=proc_start_time(proc.pid),
                 created_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             )
             # 先置位再注册：信号可能在 mutate（validate+reload，秒级窗口）内部
@@ -231,7 +237,9 @@ class UpRunner:
 
         路由是文件化的，正常情况下 Caddy 重启会自动加载；这个自检兜住
         "Caddy 是用别的配置启动的" 与 "有人手改了渲染产物" 两种情况。
-        路由表里已经没有它 —— 说明用户主动 down 过 —— 就不再复活。
+        「路由表里还有没有它」的检查必须放在 mutate 回调里、与写回同一把
+        flock 之下 —— 检查在锁外的话，down 可以恰好插在检查与写回之间，
+        把刚注销的路由复活成指向死端口的条目。
         """
         while not stop.wait(self.heartbeat_interval):
             try:
@@ -239,17 +247,70 @@ class UpRunner:
                     return
                 if _route_live(self.admin, route.domain):
                     continue
-                if self.store.get(route.name) is None:
-                    return
-                self.store.mutate(lambda t: t.upsert(route))
+
+                def apply(t: RouteTable) -> None:
+                    if t.get(route.name) is None:
+                        raise _RouteGone  # 用户已注销 —— 不复活
+                    t.upsert(route)
+
+                # 异常从回调里抛出会先于渲染/落盘/reload 穿出 mutate，
+                # 事务什么都不写就结束 —— 既不复活路由，也不空转 reload
+                try:
+                    self.store.mutate(apply)
+                except _RouteGone:
+                    return  # 路由已不存在，线程结束
             except Exception:
                 # Admin 返回畸形响应等异常不能杀死守护线程
                 pass
 
 
-def kill_pid_group(pid: int) -> None:
-    """按进程组杀掉残留的上一次 up 子进程（pid == pgid）。"""
+def kill_pid_group(pid: int, proc_start: str | None = None) -> bool:
+    """按进程组杀掉残留的上一次 up 子进程（pid == pgid）。
+
+    routes.json 会跨重启存活，pid 会被 OS 回收复用 —— 只有当前进程的
+    启动时刻与注册时记录的一致才发信号；身份对不上或无法核实时宁可
+    留下残留进程也不误杀无辜进程组（up 自己的 finally 仍按直接句柄
+    清理自己的孩子）。返回是否真的发出了信号。
+    """
+    current = proc_start_time(pid)
+    if current is None:
+        return False  # 进程已不在（或读不到身份），无从下手
+    if proc_start is None or proc_start != current:
+        print(
+            f"⚠️  进程 {pid} 已不是当初那个（pid 被复用），跳过清理",
+            file=sys.stderr,
+        )
+        return False
     try:
         os.killpg(pid, signal.SIGTERM)
     except (ProcessLookupError, PermissionError, OSError):
         pass
+    return True
+
+
+def proc_start_time(pid: int) -> str | None:
+    """读取进程「身份」：/proc/<pid>/stat 第 22 字段（启动时刻，clock ticks）。
+
+    pid 会被 OS 回收复用，单看 pid 无法断定还是不是当初那个进程 ——
+    启动时刻是检测 pid 复用的标准做法。没有 /proc 的平台（macOS）
+    退回 `ps -o lstart=`。两者都拿不到时返回 None（= 无法核实）。
+    """
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    except OSError:
+        try:
+            proc = subprocess.run(
+                ["ps", "-o", "lstart=", "-p", str(pid)],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return proc.stdout.strip() or None
+    # 第 2 字段 comm 带括号且可能含空格 —— 只能在最后一个 ')' 之后切分；
+    # 切完后第一个字段是第 3 字段 state，第 22 字段 starttime 位于索引 19
+    fields = stat.rsplit(")", 1)[1].split()
+    if len(fields) <= 19:
+        return None
+    return fields[19]

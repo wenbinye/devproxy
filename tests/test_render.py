@@ -60,6 +60,18 @@ def test_route_roundtrip():
     assert Route.from_dict(r.to_dict()) == r
 
 
+def test_route_roundtrip_keeps_proc_start():
+    """pid 的进程身份随路由持久化；老版本路由表没有该字段时为 None。"""
+    r = _route()
+    r.pid = 4242
+    r.proc_start = "12345"
+    d = r.to_dict()
+    assert d["proc_start"] == "12345"
+    assert Route.from_dict(d).proc_start == "12345"
+    legacy = {k: v for k, v in d.items() if k != "proc_start"}
+    assert Route.from_dict(legacy).proc_start is None
+
+
 def test_table_roundtrip():
     t = RouteTable(routes=[_route()], domain_suffix="test")
     assert RouteTable.from_dict(t.to_dict()) == t

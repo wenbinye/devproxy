@@ -187,7 +187,8 @@ def down(name: str = typer.Argument(..., help="路由名")) -> None:
     except (RouteStoreError, RouteTableError) as e:
         fail(str(e))
     if route.pid:
-        kill_pid_group(route.pid)
+        # 带上注册时记录的进程身份 —— pid 可能已被复用，身份不符不杀
+        kill_pid_group(route.pid, route.proc_start)
     console.print(f"已注销 {name}")
 
 
