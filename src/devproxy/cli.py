@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 import time
 from dataclasses import replace
+from pathlib import Path
 
 import typer
 from rich.console import Console
@@ -15,7 +16,7 @@ from typer.core import TyperGroup
 from devproxy.components.caddy import CaddyComponent
 from devproxy.components.certs import CertComponent
 from devproxy.components.dns import DnsComponent
-from devproxy.components.dnsmasq import DnsmasqComponent
+from devproxy.components.dnsmasq import DNSMASQ_CONF, DnsmasqComponent
 from devproxy.config import (
     DNS_BACKENDS,
     Config,
@@ -24,6 +25,14 @@ from devproxy.config import (
     validate_config,
 )
 from devproxy.doctor import build_report, report_is_healthy
+from devproxy.migrate import (
+    LegacyState,
+    MigrationError,
+    default_dns_route,
+    detect_legacy,
+    migrate,
+    rollback as do_rollback,
+)
 from devproxy.paths import Paths, default_paths
 from devproxy.proxy.caddy import CaddyAdmin, CaddyConfig
 from devproxy.proxy.names import InvalidNameError, domain_for, validate_name
@@ -305,13 +314,13 @@ def _platform():
     return LinuxPlatform()
 
 
-def _components(paths, config, dns_backend=None):
+def _components(paths, config, dns_backend=None, platform=None):
     """按配置（或显式覆盖）组装组件。
 
     dns_backend 缺省取 config.dns_backend —— setup 与 doctor 必须用同一个
     后端，否则 setup 装完、doctor 仍报"路由缺失"。
     """
-    platform = _platform()
+    platform = platform or _platform()
     backend = dns_backend or config.dns_backend
     return [
         CaddyComponent(platform, paths, config),
@@ -353,15 +362,86 @@ def _interactive() -> bool:
     return sys.stdin.isatty()
 
 
+def _migrate_legacy(platform, paths, config, state: LegacyState, *, yes: bool) -> None:
+    """把遗留的 caddy 服务迁到本工具管理之下。
+
+    迁移会改写用户的单元与 Caddyfile —— 非交互环境必须显式 --yes。
+    """
+    console.print("[yellow]检测到遗留的 caddy 服务（非本工具管理）[/yellow]")
+    console.print(f"  单元: {state.unit_path}")
+    console.print(f"  配置: {state.config_path}")
+    console.print(f"  环境变量: {state.env or '无'}")
+    console.print("将执行：备份 → 拆出个人站点到 sites.caddy → 改写单元 → 重启")
+    if not yes and not sys.stdin.isatty():
+        err_console.print("非交互环境且未指定 --yes，拒绝迁移。")
+        raise typer.Exit(EXIT_SUDO)
+    if not yes and _interactive():
+        if not typer.confirm("即将迁移上述遗留环境（会改写单元与 Caddyfile），继续？", default=True):
+            console.print("已取消。")
+            raise typer.Exit(EXIT_OK)
+    notes: list[str] = []
+    try:
+        backup = migrate(
+            platform,
+            paths,
+            config,
+            state,
+            dnsmasq_conf=DNSMASQ_CONF.expanduser(),
+            dns_route=default_dns_route(platform, paths, config),
+            notes=notes,
+        )
+    except MigrationError as e:
+        fail(str(e), EXIT_FAIL)
+    for note in notes:
+        console.print(f"  · {note}")
+    console.print(f"已备份到: {backup.directory}")
+    console.print(f"回滚命令: devproxy setup --rollback {backup.directory}")
+
+
+def _do_rollback(directory: Path) -> None:
+    """按备份目录回滚。"""
+    from devproxy.backup import BackupRestoreError, load_backup
+
+    try:
+        backup = load_backup(directory)
+    except (OSError, ValueError) as e:
+        fail(f"无法读取备份目录 {directory}: {e}", EXIT_FAIL)
+    try:
+        touched = do_rollback(backup, platform=_platform())
+    except BackupRestoreError as e:
+        # 部分条目失败时必须把"已还原了哪些"如实报出来 —— 异常一抛，
+        # 用户就完全不知道机器现在是什么状态了。
+        err_console.print(f"devproxy: 回滚部分失败（{escape(str(e))}）")
+        for p in e.restored:
+            console.print(f"  ✔ 已还原 {escape(str(p))}")
+        for p, exc in e.failures:
+            err_console.print(f"  ✗ {escape(str(p))}: {escape(str(exc))}")
+        raise typer.Exit(EXIT_FAIL)
+    console.print(f"已回滚 {len(touched)} 个文件：")
+    for p in touched:
+        console.print(f"  · {escape(str(p))}")
+    # 单元换了但进程没重启的话，跑的还是迁移后的配置
+    try:
+        _platform().restart_service("caddy")
+    except Exception:  # noqa: BLE001 —— 服务本来就不存在时不必报错
+        pass
+
+
 @app.command()
 def setup(
     dns_backend: str = typer.Option(None, "--dns-backend", help="auto|resolved|system"),
     domain_suffix: str = typer.Option(None, "--domain-suffix"),
     no_trust: bool = typer.Option(False, "--no-trust", help="跳过证书信任"),
     yes: bool = typer.Option(False, "--yes", help="非交互模式，不询问"),
+    rollback_dir: str = typer.Option(None, "--rollback", help="从指定备份目录回滚"),
 ) -> None:
     """部署本地开发环境（Caddy + dnsmasq + DNS 路由 + 证书信任 + 自启）。"""
     paths, config, _, _ = build_context()
+
+    if rollback_dir:
+        _do_rollback(Path(rollback_dir))
+        raise typer.Exit(EXIT_OK)
+
     backend = _dns_backend(dns_backend, config)
     if domain_suffix:
         config = replace(config, domain_suffix=domain_suffix)
@@ -371,7 +451,14 @@ def setup(
             validate_config(config)
         except ConfigError as e:
             fail(str(e), EXIT_USAGE)
-    components = _components(paths, config, backend)
+
+    platform = _platform()
+    # 迁移必须先于组件流程：组件会读迁移留下的状态（如单元环境变量）
+    state = detect_legacy(platform, paths)
+    if state is not None:
+        _migrate_legacy(platform, paths, config, state, yes=yes)
+
+    components = _components(paths, config, backend, platform)
     if no_trust:
         components = [c for c in components if c.name != "cert"]
 

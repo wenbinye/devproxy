@@ -281,6 +281,122 @@ def test_main_backstop_turns_domain_errors_into_exit_1(monkeypatch, exc):
     assert cm.value.code == 1
 
 
+# ------------------------------------- 迁移与回滚（setup）
+
+
+def test_cli_never_builds_the_real_platform(env, monkeypatch, tmp_path):
+    """回归防线：CLI 路径绝不能构造真实平台。
+
+    真实平台会去看 ~/.config/systemd/user/ 下的真实单元，迁移一旦跑起来
+    就会改写用户机器上的 caddy.service（曾因此真的覆盖过一次）。
+    conftest 的 autouse fixture 负责兜底，这里把"真实平台不许被构造"
+    变成显式断言，防止兜底被摘掉。
+    """
+    import devproxy.platform.linux as linux_mod
+
+    def boom(*args, **kwargs):
+        raise AssertionError("测试里不允许构造真实平台")
+
+    monkeypatch.setattr(linux_mod, "LinuxPlatform", boom)
+    monkeypatch.setattr("devproxy.cli._components", lambda *a, **k: [])
+    res = CliRunner().invoke(app, ["setup", "--yes"])
+    assert res.exit_code == 0, res.output
+
+
+def _fake_setup_platform(monkeypatch, tmp_path):
+    """把 setup 依赖的一切换成 tmp_path 里的假东西 —— 绝不碰真实系统。"""
+    from devproxy.platform.fake import FakePlatform
+
+    platform = FakePlatform()
+    monkeypatch.setattr("devproxy.cli._platform", lambda: platform)
+    # 不装配任何组件：迁移本身与组件流程无关，测试只盯迁移与回滚
+    monkeypatch.setattr("devproxy.cli._components", lambda *a, **k: [])
+    monkeypatch.setattr("devproxy.cli.DNSMASQ_CONF", tmp_path / "dnsmasq.conf")
+    monkeypatch.setattr(
+        "devproxy.cli.default_dns_route", lambda *a, **k: tmp_path / "resolved.conf"
+    )
+    return platform
+
+
+def _seed_legacy_unit(platform, tmp_path):
+    """造一套遗留环境：单元 + 旧 Caddyfile。"""
+    old_cfg = tmp_path / "old" / "Caddyfile"
+    old_cfg.parent.mkdir(parents=True, exist_ok=True)
+    old_cfg.write_text(
+        "localhost {\n\ttls internal\n}\n\n*.test {\n\trespond 404\n}\n", encoding="utf-8"
+    )
+    unit = platform.service_unit_path("caddy")
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    unit.write_text(
+        "[Service]\n"
+        "Environment=MINIKUBE_IP=1.2.3.4\n"
+        f"ExecStart=/bin/caddy run --config {old_cfg}\n",
+        encoding="utf-8",
+    )
+    return unit, old_cfg
+
+
+def test_setup_migrates_legacy_caddy(env, monkeypatch, tmp_path):
+    platform = _fake_setup_platform(monkeypatch, tmp_path)
+    unit, _old = _seed_legacy_unit(platform, tmp_path)
+
+    res = CliRunner().invoke(app, ["setup", "--yes"])
+    assert res.exit_code == 0, res.output
+    assert "遗留" in res.output
+    sites = (env / "config" / "sites.caddy").read_text(encoding="utf-8")
+    assert "localhost" in sites
+    assert "*.test" not in sites
+    assert "MINIKUBE_IP=1.2.3.4" in platform.services["caddy"]
+    # 备份目录必须真的建出来了
+    backups = list((env / "state" / "backups").iterdir())
+    assert len(backups) == 1
+    assert (backups[0] / "MANIFEST.txt").exists()
+
+
+def test_setup_refuses_migration_without_yes_in_non_interactive(env, monkeypatch, tmp_path):
+    platform = _fake_setup_platform(monkeypatch, tmp_path)
+    unit, _old = _seed_legacy_unit(platform, tmp_path)
+    res = CliRunner().invoke(app, ["setup"])
+    assert res.exit_code != 0
+    assert "--yes" in res.output
+    assert "MINIKUBE_IP" not in platform.services.get("caddy", "")
+
+
+def test_setup_rollback_restores_files(env, monkeypatch, tmp_path):
+    platform = _fake_setup_platform(monkeypatch, tmp_path)
+    unit, _old = _seed_legacy_unit(platform, tmp_path)
+    assert CliRunner().invoke(app, ["setup", "--yes"]).exit_code == 0
+    backup_dir = next((env / "state" / "backups").iterdir())
+
+    unit.write_text("CLOBBERED\n", encoding="utf-8")
+    res = CliRunner().invoke(app, ["setup", "--rollback", str(backup_dir)])
+    assert res.exit_code == 0, res.output
+    assert "已回滚" in res.output
+    assert "MINIKUBE_IP=1.2.3.4" in unit.read_text(encoding="utf-8")
+
+
+def test_setup_rollback_reports_partial_failure(env, monkeypatch, tmp_path):
+    """部分条目还原失败时，已还原清单必须如实报出来（不能随异常丢掉）。"""
+    platform = _fake_setup_platform(monkeypatch, tmp_path)
+    unit, _old = _seed_legacy_unit(platform, tmp_path)
+    assert CliRunner().invoke(app, ["setup", "--yes"]).exit_code == 0
+    backup_dir = next((env / "state" / "backups").iterdir())
+
+    # 删掉单元的备份副本 → 还原该条目必然失败（与 uid 无关）
+    (backup_dir / "caddy.service.bak").unlink()
+    res = CliRunner().invoke(app, ["setup", "--rollback", str(backup_dir)])
+    assert res.exit_code == 1, res.output
+    assert "已还原" in res.output
+    assert "Traceback" not in res.output
+
+
+def test_setup_rollback_with_bad_directory_is_clean_error(env, monkeypatch, tmp_path):
+    _fake_setup_platform(monkeypatch, tmp_path)
+    res = CliRunner().invoke(app, ["setup", "--rollback", str(tmp_path / "nope")])
+    assert res.exit_code == 1, res.output
+    assert "Traceback" not in res.output
+
+
 # ------------------------------------- Rich 标记不得吞掉错误消息里的字符集
 
 
