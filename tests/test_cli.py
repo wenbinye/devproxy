@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -179,6 +180,90 @@ def test_config_shows_effective_config(env, monkeypatch):
     res = CliRunner().invoke(app, ["config"])
     assert res.exit_code == 0, res.output
     assert "domain_suffix" in res.output
+
+
+def test_config_marks_effective_storage_and_labels_default_dir(env, monkeypatch):
+    """config 只该说清"哪条 storage 真正生效"。
+
+    Paths.data_dir（只受 DEVPROXY_DATA_DIR 影响）与 config.toml 里的
+    storage 可能不是同一个 —— 两个都叫 storage 会让人以为 Caddy 的数据
+    在错的地方。
+    """
+    paths, cfg, _ = _patch_ctx(monkeypatch, env)
+    # 让两处真的不一致：config.toml 指向别处
+    other = env / "other-storage"
+    cfg = replace(cfg, storage=str(other))
+    store = RouteStore(paths, cfg, FakeCaddy())
+    monkeypatch.setattr(
+        "devproxy.cli.build_context", lambda *a, **k: (paths, cfg, store, FakeAdmin())
+    )
+    res = CliRunner().invoke(app, ["config"])
+    assert res.exit_code == 0, res.output
+    assert str(other) in res.output, "生效的 storage 必须打出来"
+    assert "data_dir_default" in res.output, "默认目录必须换个不误导的名字"
+    assert "storage 才是生效的" in res.output
+
+
+# ---------------------------------------------- 注册路由后的信任提示
+
+
+def _write_ca(storage: Path) -> Path:
+    """在 Caddy storage 下放一份 CA 根证书（模拟"首条路由已生成 CA"）。"""
+    ca = storage / "pki" / "authorities" / "local" / "root.crt"
+    ca.parent.mkdir(parents=True, exist_ok=True)
+    ca.write_text("-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n", encoding="utf-8")
+    return ca
+
+
+def test_expose_prints_trust_hint_when_ca_not_trusted(env, monkeypatch):
+    """CA 是第一条路由注册时才生成的 —— 那一刻必须告诉用户去 trust。
+
+    不说的话，用户只会看到"浏览器报证书不安全"，根本不知道还差一步。
+    """
+    paths, cfg, _ = _patch_ctx(monkeypatch, env)
+    _write_ca(Path(cfg.storage))
+    res = CliRunner().invoke(app, ["expose", "legacy", "--port", "3000"])
+    assert res.exit_code == 0, res.output
+    assert "devproxy trust" in res.output
+
+
+def test_expose_does_not_print_trust_hint_when_ca_trusted(env, monkeypatch):
+    """CA 已被信任时不再重复提示 —— 每次都冒出来就是噪音。"""
+    paths, cfg, _ = _patch_ctx(monkeypatch, env)
+    ca = _write_ca(Path(cfg.storage))
+    platform = monkeypatch.undo  # noqa: F841 —— 只是让下面读起来清楚
+    from devproxy.platform.fake import FakePlatform
+
+    fake = FakePlatform()
+    fake.trusted.add(ca)
+    fake.nss.add(ca)
+    monkeypatch.setattr("devproxy.cli._platform", lambda: fake)
+    res = CliRunner().invoke(app, ["expose", "legacy", "--port", "3000"])
+    assert res.exit_code == 0, res.output
+    assert "devproxy trust" not in res.output
+
+
+def test_expose_does_not_print_trust_hint_without_ca(env, monkeypatch):
+    """还没有 CA（没生成）就没什么可信任的 —— 不提示。"""
+    _patch_ctx(monkeypatch, env)
+    res = CliRunner().invoke(app, ["expose", "legacy", "--port", "3000"])
+    assert res.exit_code == 0, res.output
+    assert "devproxy trust" not in res.output
+
+
+def test_up_prints_trust_hint_when_ca_not_trusted(env, monkeypatch):
+    paths, cfg, _ = _patch_ctx(monkeypatch, env)
+    _write_ca(Path(cfg.storage))
+
+    def fake_run(self, name, cmd, port=None, ready_timeout=None, on_ready=None):
+        if on_ready is not None:
+            on_ready("codeup.test", 8080)
+        return 0
+
+    monkeypatch.setattr("devproxy.cli.UpRunner.run", fake_run)
+    res = CliRunner().invoke(app, ["up", "codeup", "--", "sleep", "1"])
+    assert res.exit_code == 0, res.output
+    assert "devproxy trust" in res.output
 
 
 # ---------------------------------------------------------------- I-1: 退出码 3

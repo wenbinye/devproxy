@@ -72,6 +72,15 @@ class CertComponent:
             return False
         return self._trusted(checker, self.ca_path)
 
+    def fully_trusted(self) -> bool:
+        """CA 是否已被系统信任库与 NSS 库**同时**信任。
+
+        CA 还不存在时返回 False —— 没什么可信任的。
+        """
+        if not self.ca_path.exists():
+            return False
+        return self._system_trusted() and self._nss_trusted()
+
     @property
     def _is_macos(self) -> bool:
         return self.platform.name == "mac"

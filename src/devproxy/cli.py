@@ -57,10 +57,20 @@ EXIT_FAIL = 1
 EXIT_USAGE = 2
 EXIT_PRECONDITION = 3
 EXIT_SUDO = 4
+# 用户拒绝了确认 —— 同样是"需要人来做决定"，与"非交互且需要提权"共用 4。
+# 绝不返回 0：调用方（如 `devproxy setup && devproxy up …`）必须能看出
+# "什么都没装"这件事。
+EXIT_DECLINED = 4
 
 TRUST_HINT = (
     "提示：首次注册路由（devproxy up / expose）会生成 CA，之后请运行 devproxy trust "
     "让 curl/Chrome 信任。"
+)
+
+# 注册路由之后用的提示：此时 CA 已经生成，缺的只是"信任"这一步。
+TRUST_HINT_ROUTE = (
+    "提示：CA 根证书已生成，但还没被信任 —— 现在 curl/Chrome 访问会报证书错误。"
+    "请运行 devproxy trust 让它们信任它。"
 )
 
 # setup 结束时的示例命令。
@@ -160,6 +170,27 @@ def _require_caddyfile(paths: Paths) -> None:
         )
 
 
+def _print_trust_hint_if_needed(paths: Paths, config: Config) -> None:
+    """CA 已生成但还没被信任时提示一次。
+
+    CA 是**第一条路由注册时**才生成的 —— 第一次 up/expose 之后 curl 与
+    Chrome 一定不信任这个证书。不说清楚，用户只会看到"浏览器报不安全"，
+    根本不知道还差一步 `devproxy trust`。
+
+    CA 还不存在（没什么可信任）或已被信任时都不提示 —— 后者否则每次
+    运行都会冒出来，变成噪音。
+    """
+    comp = CertComponent(_platform(), paths, config)
+    try:
+        if comp.fully_trusted():
+            return
+    except Exception:  # noqa: BLE001 —— 提示失败不该影响主流程
+        return
+    if not comp.ca_path.exists():
+        return
+    console.print(TRUST_HINT_ROUTE)
+
+
 @app.command(context_settings={"ignore_unknown_options": True})
 def up(
     ctx: typer.Context,
@@ -183,6 +214,7 @@ def up(
 
     def on_ready(domain: str, allocated: int) -> None:
         console.print(f"✅ https://{domain}  (端口 {allocated})")
+        _print_trust_hint_if_needed(paths, config)
 
     try:
         rc = runner.run(
@@ -239,6 +271,7 @@ def expose(
         err_console.print(f"⚠️  上游 127.0.0.1:{port} 当前无响应（路由已注册，稍后可访问）")
     console.print(f"✅ https://{domain}  (上游 127.0.0.1:{port})")
     console.print(f"   移除: devproxy down {name}")
+    _print_trust_hint_if_needed(paths, config)
 
 
 @app.command()
@@ -308,14 +341,21 @@ def config() -> None:
             "admin_addr": cfg.admin_addr,
             "http_port": cfg.http_port,
             "https_port": cfg.https_port,
+            # 生效的 storage（config.toml > DEVPROXY_DATA_DIR > 默认值）
             "storage": cfg.storage,
             "ready_timeout": cfg.ready_timeout,
             "paths": {
                 "config_dir": str(paths.config_dir),
                 "state_dir": str(paths.state_dir),
-                "data_dir": str(paths.data_dir),
+                # 只是默认目录（仅 DEVPROXY_DATA_DIR 影响它）——
+                # 不是生效的 storage，别让用户以为 Caddy 的数据在那儿
+                "data_dir_default": str(paths.data_dir),
             },
         }
+    )
+    console.print(
+        "[dim]storage 才是生效的 Caddy 存储路径（CA 与证书都在那儿）；"
+        "data_dir_default 只是默认目录，被 config.toml 的 storage 覆盖时以 storage 为准。[/dim]"
     )
     console.print("[dim]--- 渲染出的路由片段 ---[/dim]")
     try:
@@ -425,8 +465,8 @@ def _migrate_legacy(
         raise typer.Exit(EXIT_SUDO)
     if not yes and _interactive():
         if not typer.confirm("即将迁移上述遗留环境（会改写单元与 Caddyfile），继续？", default=True):
-            console.print("已取消。")
-            raise typer.Exit(EXIT_OK)
+            console.print("已取消：什么都没改（迁移未开始）。")
+            raise typer.Exit(EXIT_DECLINED)
     collected = list(notes or [])
     try:
         backup = migrate(
@@ -565,8 +605,8 @@ def setup(
             else "即将执行以上变更，继续？"
         )
         if not typer.confirm(prompt, default=True):
-            console.print("已取消。")
-            raise typer.Exit(EXIT_OK)
+            console.print("已取消：什么都没改（未执行任何变更）。")
+            raise typer.Exit(EXIT_DECLINED)
 
     results = apply_plan(plan)
     ok = True

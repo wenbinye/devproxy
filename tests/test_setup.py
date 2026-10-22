@@ -384,6 +384,10 @@ def test_cli_setup_asks_for_confirmation_interactively(tmp_path, monkeypatch):
 
 
 def test_cli_setup_aborts_when_user_declines(tmp_path, monkeypatch):
+    """用户拒绝确认 = "什么都没装" —— 绝不能以退出码 0 结束。
+
+    `devproxy setup && devproxy up …` 会把"没装"当成"装好了"继续跑。
+    """
     from typer.testing import CliRunner
 
     from devproxy.cli import app
@@ -395,6 +399,7 @@ def test_cli_setup_aborts_when_user_declines(tmp_path, monkeypatch):
     monkeypatch.setattr("devproxy.cli._interactive", lambda: True)
     monkeypatch.setattr("devproxy.cli.typer.confirm", lambda *a, **k: False)
     result = CliRunner().invoke(app, ["setup"])
-    assert result.exit_code == 0
+    assert result.exit_code == 4, result.stdout
     assert comps[0].applied is None
     assert "已取消" in result.stdout
+    assert "什么都没改" in result.stdout
