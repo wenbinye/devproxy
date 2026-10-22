@@ -14,6 +14,7 @@ from devproxy.config import Config
 from devproxy.proxy.caddy import CaddyAdmin
 from devproxy.proxy.routes import Route
 from devproxy.proxy.runner import (
+    PreconditionError,
     UpError,
     UpRunner,
     alloc_port,
@@ -135,6 +136,16 @@ def test_run_requires_caddy_alive(paths):
     with pytest.raises(UpError) as cm:
         runner.run("codeup", [sys.executable, "-c", "import time; time.sleep(1)"])
     assert "Admin API" in str(cm.value)
+
+
+def test_run_caddy_not_running_raises_precondition(paths):
+    """Caddy 未运行是前置条件不满足 —— 必须是 PreconditionError（CLI 映射为退出码 3）。"""
+    paths.ensure_files()
+    runner = _runner(paths, alive=False)
+    with pytest.raises(PreconditionError) as cm:
+        runner.run("codeup", [sys.executable, "-c", "import time; time.sleep(1)"])
+    assert "Caddy 未运行" in str(cm.value)
+    assert "devproxy setup" in str(cm.value), "报错要告诉用户下一步做什么"
 
 
 def test_run_rejects_occupied_explicit_port(paths):

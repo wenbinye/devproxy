@@ -14,8 +14,14 @@ from devproxy.config import Config, ConfigError, load_config
 from devproxy.paths import Paths, default_paths
 from devproxy.proxy.caddy import CaddyAdmin, CaddyConfig
 from devproxy.proxy.names import InvalidNameError, domain_for, validate_name
-from devproxy.proxy.routes import Route, load_table, render_caddyfile
-from devproxy.proxy.runner import UpError, UpRunner, kill_pid_group, reachable
+from devproxy.proxy.routes import Route, RouteTableError, load_table, render_caddyfile
+from devproxy.proxy.runner import (
+    PreconditionError,
+    UpError,
+    UpRunner,
+    kill_pid_group,
+    reachable,
+)
 from devproxy.proxy.store import RouteStore, RouteStoreError
 
 console = Console()
@@ -24,6 +30,12 @@ err_console = Console(stderr=True)
 EXIT_OK = 0
 EXIT_FAIL = 1
 EXIT_PRECONDITION = 3
+
+
+def fail(msg: str, code: int = EXIT_FAIL) -> None:
+    """以统一形态输出错误并退出（Rich 渲染的一行错误，而非 traceback）。"""
+    err_console.print(f"devproxy: {msg}")
+    raise typer.Exit(code)
 
 
 class DevProxyGroup(TyperGroup):
@@ -102,7 +114,11 @@ def up(
             ready_timeout=ready_timeout,
             on_ready=on_ready,
         )
-    except (UpError, RouteStoreError, InvalidNameError) as e:
+    except PreconditionError as e:
+        # Caddy 未运行是前置条件不满足，不是运行失败 —— 退出码 3（§9.1）
+        err_console.print(f"devproxy: {e}")
+        raise typer.Exit(EXIT_PRECONDITION) from e
+    except (UpError, RouteStoreError, RouteTableError, InvalidNameError) as e:
         err_console.print(f"devproxy: {e}")
         raise typer.Exit(EXIT_FAIL) from e
     raise typer.Exit(rc)
@@ -123,7 +139,14 @@ def expose(
         err_console.print(f"devproxy: 非法端口 {port}：必须在 1..65535 之间")
         raise typer.Exit(EXIT_FAIL)
 
-    _, config, store, _ = build_context()
+    _, config, store, admin = build_context()
+    # expose 注册的是常驻活路由，reload 必须真的发生 —— Caddy 未运行属于
+    # 前置条件不满足（退出码 3），而不是写表失败的运行错误（退出码 1）
+    if not admin.is_alive():
+        fail(
+            "Caddy 未运行（Admin API 不可达），请先执行 devproxy setup 或启动 Caddy",
+            EXIT_PRECONDITION,
+        )
     domain = domain_for(name, config.domain_suffix)
     route = Route(
         name=name,
@@ -135,9 +158,8 @@ def expose(
     )
     try:
         store.mutate(lambda t: t.upsert(route))
-    except RouteStoreError as e:
-        err_console.print(f"devproxy: {e}")
-        raise typer.Exit(EXIT_FAIL) from e
+    except (RouteStoreError, RouteTableError) as e:
+        fail(str(e))
     if not reachable(port):
         err_console.print(f"⚠️  上游 127.0.0.1:{port} 当前无响应（路由已注册，稍后可访问）")
     console.print(f"✅ https://{domain}  (上游 127.0.0.1:{port})")
@@ -153,15 +175,17 @@ def down(name: str = typer.Argument(..., help="路由名")) -> None:
         err_console.print(f"devproxy: {e}")
         raise typer.Exit(EXIT_FAIL) from e
     _, _, store, _ = build_context()
-    route = store.get(name)
+    try:
+        route = store.get(name)
+    except RouteTableError as e:
+        fail(str(e))
     if route is None:
         console.print(f"（{name} 未注册）")
         raise typer.Exit(EXIT_OK)
     try:
         store.mutate(lambda t: t.remove(name))
-    except RouteStoreError as e:
-        err_console.print(f"devproxy: {e}")
-        raise typer.Exit(EXIT_FAIL) from e
+    except (RouteStoreError, RouteTableError) as e:
+        fail(str(e))
     if route.pid:
         kill_pid_group(route.pid)
     console.print(f"已注销 {name}")
@@ -171,7 +195,10 @@ def down(name: str = typer.Argument(..., help="路由名")) -> None:
 def ls() -> None:
     """列出所有已注册路由。"""
     _, _, store, _ = build_context()
-    routes = store.list()
+    try:
+        routes = store.list()
+    except RouteTableError as e:
+        fail(str(e))
     if not routes:
         console.print("（无路由）")
         raise typer.Exit(EXIT_OK)
@@ -216,7 +243,11 @@ def config() -> None:
         }
     )
     console.print("[dim]--- 渲染出的路由片段 ---[/dim]")
-    console.print(render_caddyfile(load_table(paths.routes_json)))
+    try:
+        snippet = render_caddyfile(load_table(paths.routes_json))
+    except RouteTableError as e:
+        fail(str(e))
+    console.print(snippet)
 
 
 @app.command()
@@ -237,8 +268,9 @@ def selftest() -> None:
 def main() -> None:
     try:
         app()
-    except ConfigError as e:
-        err_console.print(f"devproxy: 配置错误：{e}")
+    except (ConfigError, RouteStoreError, RouteTableError) as e:
+        # 兜底：领域异常绝不能以 traceback 形态漏到终端
+        err_console.print(f"devproxy: {e}")
         sys.exit(EXIT_FAIL)
 
 

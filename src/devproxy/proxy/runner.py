@@ -29,6 +29,10 @@ class UpError(RuntimeError):
     """up 失败。"""
 
 
+class PreconditionError(UpError):
+    """前置条件不满足（如 Caddy 未运行）——CLI 层应映射为退出码 3。"""
+
+
 def alloc_port() -> int:
     """绑定 :0 取一个随机空闲端口后立即释放。存在微小时隙竞争。"""
     s = socket.socket()
@@ -121,7 +125,9 @@ class UpRunner:
             raise UpError(f"非法端口 {port}：必须在 1..65535 之间")
 
         if not self.admin.is_alive():
-            raise UpError("Caddy Admin API 不可达（caddy 是否在运行？）")
+            raise PreconditionError(
+                "Caddy 未运行（Admin API 不可达），请先执行 devproxy setup 或启动 Caddy"
+            )
 
         # 同名路由先清理（旧子进程一并收掉）
         existing = self.store.get(name)
