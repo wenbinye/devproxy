@@ -1235,17 +1235,24 @@ class DnsComponent:
                 port=self.platform.dns_port, domains=[self.config.domain_suffix]
             )
             desc = "写入 systemd-resolved 路由（*.%s → 127.0.0.1）" % self.config.domain_suffix
-        else:
-            content = render_system_dnsmasq_conf(suffix=self.config.domain_suffix)
-            desc = "写入系统 dnsmasq 路由（*.%s → 127.0.0.1）" % self.config.domain_suffix
-        return [
-            Action(description=desc, kind="write", path=self.target_path, content=content, privileged=True),
-            Action(
+            reload_action = Action(
                 description="重载 systemd-resolved 使路由生效",
                 kind="run",
                 command=["systemctl", "restart", "systemd-resolved"],
                 privileged=True,
-            ),
+            )
+        else:
+            content = render_system_dnsmasq_conf(suffix=self.config.domain_suffix)
+            desc = "写入系统 dnsmasq 路由（*.%s → 127.0.0.1）" % self.config.domain_suffix
+            reload_action = Action(
+                description="重载系统 dnsmasq 使路由生效",
+                kind="run",
+                command=["systemctl", "restart", "dnsmasq"],
+                privileged=True,
+            )
+        return [
+            Action(description=desc, kind="write", path=self.target_path, content=content, privileged=True),
+            reload_action,
         ]
 
     def apply(self, actions: list[Action]) -> None:
