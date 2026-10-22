@@ -1316,6 +1316,7 @@ git commit -m "✨ feat(devproxy): 事务性路由仓库（校验→落盘→rel
   - `devproxy.proxy.runner.alloc_port() -> int`
   - `devproxy.proxy.runner.reachable(port: int, timeout: float = 0.5) -> bool`
   - `devproxy.proxy.runner.stop_process_group(proc, pgid: int | None = None, sig: int = signal.SIGTERM) -> None`
+  - `devproxy.proxy.runner.kill_pid_group(pid: int) -> None` — 按进程组杀掉残留子进程（pid == pgid）
   - `devproxy.proxy.runner.HEARTBEAT_INTERVAL` — `float`，默认 `30.0`；`UpRunner.heartbeat_interval` 类属性可覆盖（测试用）
   - `devproxy.proxy.runner.UpError(RuntimeError)`
   - `devproxy.proxy.runner.UpRunner` — 构造 `(store: RouteStore, config: Config, admin: CaddyAdmin)`；类属性 `heartbeat_interval: float = HEARTBEAT_INTERVAL`；方法 `run(name, cmd, port=None, ready_timeout=None, on_ready=None) -> int`（返回子进程退出码）、`_watch(route, stop) -> None`
@@ -1723,7 +1724,7 @@ class UpRunner:
         if existing is not None:
             self.store.mutate(lambda t: t.remove(name))
             if existing.pid:
-                _kill_pid_group(existing.pid)
+                kill_pid_group(existing.pid)
 
         if port is None:
             port = alloc_port()
@@ -1829,7 +1830,7 @@ class UpRunner:
                 pass
 
 
-def _kill_pid_group(pid: int) -> None:
+def kill_pid_group(pid: int) -> None:
     """按进程组杀掉残留的上一次 up 子进程（pid == pgid）。"""
     try:
         os.killpg(pid, signal.SIGTERM)
@@ -2007,6 +2008,21 @@ def test_down_unknown_name_is_ok(env, monkeypatch):
     assert res.exit_code == 0
 
 
+def test_down_kills_leftover_process_group(env, monkeypatch):
+    """down 要顺带杀掉 mode=up 路由的残留子进程组。"""
+    _patch_ctx(monkeypatch, env)
+    killed = []
+    monkeypatch.setattr("devproxy.cli.kill_pid_group", lambda pid: killed.append(pid))
+    _seed_route(env / "state", "codeup", 42133, mode="up")
+    p = env / "state" / "routes.json"
+    data = json.loads(p.read_text())
+    data["routes"][0]["pid"] = 4242
+    p.write_text(json.dumps(data))
+    res = CliRunner().invoke(app, ["down", "codeup"])
+    assert res.exit_code == 0, res.output
+    assert killed == [4242]
+
+
 def test_ls_lists_routes(env, monkeypatch):
     _patch_ctx(monkeypatch, env)
     _seed_route(env / "state", "codeup", 42133)
@@ -2052,7 +2068,7 @@ from devproxy.paths import Paths, default_paths
 from devproxy.proxy.caddy import CaddyAdmin, CaddyConfig
 from devproxy.proxy.names import InvalidNameError, domain_for, validate_name
 from devproxy.proxy.routes import Route, load_table, render_caddyfile
-from devproxy.proxy.runner import UpError, UpRunner, reachable
+from devproxy.proxy.runner import UpError, UpRunner, kill_pid_group, reachable
 from devproxy.proxy.store import RouteStore, RouteStoreError
 
 console = Console()
@@ -2183,14 +2199,15 @@ def expose(
 
 @app.command()
 def down(name: str = typer.Argument(..., help="路由名")) -> None:
-    """注销路由。"""
+    """注销路由；若该路由的子进程还在，一并收掉。"""
     try:
         validate_name(name)
     except InvalidNameError as e:
         err_console.print(f"devproxy: {e}")
         raise typer.Exit(EXIT_FAIL) from e
     _, _, store, _ = build_context()
-    if store.get(name) is None:
+    route = store.get(name)
+    if route is None:
         console.print(f"（{name} 未注册）")
         raise typer.Exit(EXIT_OK)
     try:
@@ -2198,6 +2215,8 @@ def down(name: str = typer.Argument(..., help="路由名")) -> None:
     except RouteStoreError as e:
         err_console.print(f"devproxy: {e}")
         raise typer.Exit(EXIT_FAIL) from e
+    if route.pid:
+        kill_pid_group(route.pid)
     console.print(f"已注销 {name}")
 
 
@@ -2271,7 +2290,7 @@ if __name__ == "__main__":
 cd /home/yewenbin/work/tasks/local-https
 python3 -m pytest tests/test_cli.py -v
 ```
-Expected: PASS，8 passed
+Expected: PASS，9 passed
 
 - [ ] **Step 5: 提交**
 
