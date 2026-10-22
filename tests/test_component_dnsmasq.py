@@ -5,6 +5,8 @@
 
 import pytest
 
+from pathlib import Path
+
 from devproxy.components.dnsmasq import DnsmasqComponent, merge_dnsmasq_config
 from devproxy.config import Config
 from devproxy.paths import Paths
@@ -75,6 +77,97 @@ def test_merge_keeps_user_upstream_untouched():
     out = merge_dnsmasq_config("server=223.5.5.5\n", port=5353, suffix="test")
     servers = [ln for ln in out.splitlines() if ln.startswith("server=")]
     assert servers == ["server=223.5.5.5"]
+
+
+# -- 全局上游 vs 域名限定上游（dnsmasq 手册：server= 不阻止读 resolv.conf） --
+
+
+def _global_servers(lines):
+    """全局上游 = server= 的值里没有域名部分。"""
+    out = []
+    for line in lines:
+        s = line.strip()
+        if not s.startswith("server="):
+            continue
+        value = s[len("server="):].strip()
+        if value and "/" not in value and "," not in value:
+            out.append(s)
+    return out
+
+
+def test_merge_domain_scoped_server_is_not_a_global_upstream():
+    """server=/corp/10.0.0.1 只服务于该域名 —— 不能算全局上游。
+
+    否则配置里既没有全局上游也没有 no-resolv，普通域名会走
+    /etc/resolv.conf（resolved 机器上是 127.0.0.53 桩），而 resolved 又被
+    工具的 drop-in 指回本机 dnsmasq → 全机解析失败。
+    """
+    out = merge_dnsmasq_config(
+        "server=/corp.example.com/10.0.0.1\n", port=5353, suffix="test"
+    )
+    lines = out.splitlines()
+    assert "no-resolv" in lines
+    assert _global_servers(lines)
+    # 用户的域名限定上游原样保留
+    assert "server=/corp.example.com/10.0.0.1" in lines
+
+
+def test_merge_global_server_keeps_it_and_adds_no_resolv():
+    """server= 从不抑制读取 /etc/resolv.conf —— 手册明说要 --no-resolv。"""
+    out = merge_dnsmasq_config("server=223.5.5.5\n", port=5353, suffix="test")
+    lines = out.splitlines()
+    assert "no-resolv" in lines
+    assert [ln for ln in lines if ln.startswith("server=")] == ["server=223.5.5.5"]
+
+
+def test_merge_resolv_file_prevents_no_resolv():
+    """显式 resolv-file= 是用户自选解析器文件 —— 与 no-resolv 互斥，不加。"""
+    out = merge_dnsmasq_config(
+        "resolv-file=/etc/resolv.d/custom\n", port=5353, suffix="test"
+    )
+    assert "no-resolv" not in out.splitlines()
+
+
+def test_merge_idempotent_for_domain_scoped_server():
+    once = merge_dnsmasq_config(
+        "server=/corp.example.com/10.0.0.1\n", port=5353, suffix="test"
+    )
+    twice = merge_dnsmasq_config(once, port=5353, suffix="test")
+    assert once == twice
+
+
+def test_merge_idempotent_for_global_server():
+    once = merge_dnsmasq_config("server=223.5.5.5\n", port=5353, suffix="test")
+    twice = merge_dnsmasq_config(once, port=5353, suffix="test")
+    assert once == twice
+
+
+def test_merge_idempotent_for_resolv_file():
+    once = merge_dnsmasq_config(
+        "resolv-file=/etc/resolv.d/custom\n", port=5353, suffix="test"
+    )
+    twice = merge_dnsmasq_config(once, port=5353, suffix="test")
+    assert once == twice
+
+
+# -- 只监听回环，避免变成局域网上的开放递归解析器 ----------------------
+
+
+def test_merge_ensures_loopback_only_listener():
+    out = merge_dnsmasq_config("", port=5353, suffix="test")
+    lines = out.splitlines()
+    assert "listen-address=127.0.0.1" in lines
+    assert "bind-interfaces" in lines
+
+
+def test_merge_keeps_user_listen_address():
+    out = merge_dnsmasq_config(
+        "listen-address=127.0.0.2\nbind-interfaces\n", port=5353, suffix="test"
+    )
+    lines = out.splitlines()
+    assert "listen-address=127.0.0.2" in lines
+    assert "listen-address=127.0.0.1" not in lines
+    assert lines.count("bind-interfaces") == 1
 
 
 def test_merge_does_not_duplicate_existing_no_resolv():
@@ -174,6 +267,32 @@ def test_generated_conf_has_upstream_to_avoid_resolution_loop(tmp_path):
     lines = conf_path.read_text(encoding="utf-8").splitlines()
     assert "no-resolv" in lines
     assert [ln for ln in lines if ln.startswith("server=")]
+
+
+def test_generated_conf_only_listens_on_loopback(tmp_path):
+    """没有 listen-address/bind-interfaces 时 dnsmasq 会绑 0.0.0.0:5353 ——
+    变成局域网上的开放递归解析器。"""
+    comp, _platform, conf_path = _component(tmp_path)
+    comp.apply(comp.plan())
+    lines = conf_path.read_text(encoding="utf-8").splitlines()
+    assert "listen-address=127.0.0.1" in lines
+    assert "bind-interfaces" in lines
+
+
+def test_unit_conf_dir_is_absolute_for_relative_conf_path(tmp_path, monkeypatch):
+    """systemd 把相对路径按 / 解析 —— 单元里必须是绝对路径或 %h/... 。"""
+    monkeypatch.chdir(tmp_path)
+    platform = FakePlatform()
+    paths = Paths(tmp_path / "c", tmp_path / "s", tmp_path / "d")
+    comp = DnsmasqComponent(
+        platform, paths, Config(), conf_path=Path("rel/dnsmasq.conf")
+    )
+    comp.apply(comp.plan())
+    unit = platform.services["dnsmasq"]
+    conf_dir = unit.split("--conf-dir=")[1].split()[0]
+    # 相对路径会被 systemd 按 / 解析 —— 必须是绝对路径或 %h/...
+    assert conf_dir.startswith("/") or conf_dir.startswith("%h/")
+    assert conf_dir != "rel" and not conf_dir.startswith("rel/")
 
 
 def test_check_reports_service_not_running(tmp_path):

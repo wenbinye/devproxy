@@ -16,20 +16,54 @@ from devproxy.platform.base import Action, Platform, Status
 
 DNSMASQ_CONF = Path("~/.config/dnsmasq/dnsmasq.conf")
 
-# 无用户上游时补的公共 DNS。绝不能补 127.0.0.53（systemd-resolved 桩）——
+# 没有全局上游时补的公共 DNS。绝不能补 127.0.0.53（systemd-resolved 桩）——
 # resolved 会被指回本机 dnsmasq，形成解析环路。
 DEFAULT_UPSTREAMS = ("server=1.1.1.1", "server=8.8.8.8")
 
 
+def _option_present(lines: list[str], name: str) -> bool:
+    """配置里是否已有该选项（带值 `name=` 或裸选项 `name`）。"""
+    prefix = name + "="
+    for line in lines:
+        s = line.strip()
+        if s == name or s.startswith(prefix):
+            return True
+    return False
+
+
+def _is_global_server(line: str) -> bool:
+    """`server=` 是否是**全局**上游。
+
+    dnsmasq 手册：`--server=/<domain>/<ip>` 只服务于该域名，其余域名仍走
+    /etc/resolv.conf —— 它不构成全局上游（`server=1.2.3.4,domain` 同理）。
+    """
+    s = line.strip()
+    if not s.startswith("server="):
+        return False
+    value = s[len("server="):].strip()
+    if not value:
+        return False
+    if "/" in value or "," in value:
+        return False
+    return True
+
+
 def merge_dnsmasq_config(existing: str, *, port: int, suffix: str) -> str:
-    """增量修改 dnsmasq 配置：确保 port、address 与上游存在，其余原样保留。
+    """增量修改 dnsmasq 配置：确保 port、address、监听范围与上游存在，其余原样保留。
 
     绝不重写整个文件 —— 用户可能有 .develop 等自己的域名条目。
 
-    上游规则：配置里已有 `server=` 就原样保留（用户自己选的）；没有才补
-    `no-resolv` + 公共 DNS。否则 dnsmasq 会拿 /etc/resolv.conf 当上游 ——
-    systemd-resolved 机器上那是 127.0.0.53 桩，而 resolved 又被指向本机
-    dnsmasq，解析请求会绕成死循环。
+    上游规则（依据 dnsmasq 手册）：
+    - 手册明说 `server=` **不会**抑制读取 /etc/resolv.conf，只有 `--no-resolv`
+      才会。而本工具的 resolved drop-in 已把全局 DNS 指向 dnsmasq，于是
+      /etc/resolv.conf（resolved 机器上是 127.0.0.53 桩）绝不能再当上游 ——
+      否则 resolved ↔ dnsmasq 互指，普通域名解析全机失败。
+      故：除非用户显式 `resolv-file=`（自选解析器文件，与 no-resolv 互斥），
+      一律确保 `no-resolv` 存在。
+    - 域名限定的上游（`server=/corp/10.0.0.1`）不算全局上游；没有全局上游时
+      补公共 DNS，且绝不补 127.0.0.53 这类本机桩。
+    - 用户显式写了 `resolv-file=` 时一律不动上游：那是自选的解析器文件，
+      既不与 no-resolv 并存，也不该被公共 DNS 掺和。
     """
     lines = existing.splitlines()
     out: list[str] = []
@@ -50,11 +84,19 @@ def merge_dnsmasq_config(existing: str, *, port: int, suffix: str) -> str:
         if addr not in present:
             out.append(addr)
             present.add(addr)
-    has_server = any(line.strip().startswith("server=") for line in out)
-    if not has_server:
-        if "no-resolv" not in present:
-            out.append("no-resolv")
-            present.add("no-resolv")
+    # 只监听回环：缺这两行时 dnsmasq 会绑 0.0.0.0:5353，成为局域网上的
+    # 开放递归解析器（DNS 放大攻击面）。用户已自行设置过就保留不改。
+    if not _option_present(out, "listen-address"):
+        out.append("listen-address=127.0.0.1")
+        present.add("listen-address=127.0.0.1")
+    if not _option_present(out, "bind-interfaces"):
+        out.append("bind-interfaces")
+        present.add("bind-interfaces")
+    has_resolv_file = _option_present(out, "resolv-file")
+    if not has_resolv_file and not _option_present(out, "no-resolv"):
+        out.append("no-resolv")
+        present.add("no-resolv")
+    if not has_resolv_file and not any(_is_global_server(line) for line in out):
         for upstream in DEFAULT_UPSTREAMS:
             if upstream not in present:
                 out.append(upstream)
@@ -144,10 +186,14 @@ class DnsmasqComponent:
 
     # -- unit ----------------------------------------------------------
     def _conf_dir_spec(self) -> str:
-        """单元里用 %h 表达家目录；配置目录不在家目录下时用绝对路径。"""
-        conf_dir = self.conf_path.parent
+        """单元里用 %h 表达家目录；配置目录不在家目录下时用绝对路径。
+
+        必须先 resolve：systemd 把相对路径按 / 解析，`--conf-dir=rel` 会指到
+        根目录下，单元根本起不来。
+        """
+        conf_dir = self.conf_path.resolve().parent
         try:
-            rel = conf_dir.relative_to(Path.home())
+            rel = conf_dir.relative_to(Path.home().resolve())
         except ValueError:
             return str(conf_dir)
         return "%h" if str(rel) == "." else f"%h/{rel}"

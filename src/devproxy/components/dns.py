@@ -115,8 +115,13 @@ class DnsComponent:
 
     # -- apply ---------------------------------------------------------
     def apply(self, actions: list[Action]) -> None:
-        """提权会话按需获取 —— 没有特权动作时绝不触发 sudo 密码提示。"""
+        """提权会话按需获取 —— 没有特权动作时绝不触发 sudo 密码提示。
+
+        状态只在**全部动作成功后**记录：重载失败时若先记状态，下次 plan 会
+        返回空列表，把“未生效”误报成“已就绪”。
+        """
         elevated = None
+        written: tuple[Path, str] | None = None
         for action in actions:
             if action.kind == "write" and action.path is not None:
                 if action.privileged:
@@ -126,14 +131,19 @@ class DnsComponent:
                 else:
                     action.path.parent.mkdir(parents=True, exist_ok=True)
                     action.path.write_text(action.content, encoding="utf-8")
-                self._record_state(action.path, action.content)
+                if action.path == self.target_path:
+                    written = (action.path, action.content)
                 continue
             if action.privileged:
                 if elevated is None:
                     elevated = self.platform.privilege()
-                elevated.run(action.command)
+                code, msg = elevated.run(action.command)
+                if code != 0:
+                    raise RuntimeError(f"执行 {' '.join(action.command)} 失败: {msg}")
                 continue
             raise RuntimeError(f"未知动作: {action.command}")
+        if written is not None:
+            self._record_state(*written)
 
     # -- verify --------------------------------------------------------
     def verify(self) -> Status:
@@ -173,9 +183,25 @@ class DnsComponent:
         )
 
     def _route_in_place(self, content: str) -> bool:
-        """上次写入的内容哈希是否就是现在要写的内容（且路径未变）。"""
+        """路由是否已是预期内容。
+
+        三重判据，缺一不可：
+        1. 目标文件还在 —— 用户删掉后 setup 不能还说“已就绪”；
+        2. 文件读得到时，直接比内容（用户在 /etc 下改过就重写）；
+        3. 文件读不到时（普通用户未必能读 /etc 下的文件），退回 state 目录里
+           上次写入的哈希。
+        """
+        if not self.target_path.exists():
+            return False
+        digest = _sha256(content)
+        try:
+            current = self.target_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            current = None
+        if current is not None:
+            return _sha256(current) == digest
         state = self._read_state()
         return (
-            state.get("content_sha256") == _sha256(content)
+            state.get("content_sha256") == digest
             and state.get("path") == str(self.target_path)
         )

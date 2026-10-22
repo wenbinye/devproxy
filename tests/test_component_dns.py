@@ -4,6 +4,8 @@
 服务操作走 FakePlatform。
 """
 
+import os
+
 import pytest
 
 from devproxy.components import dns as dns_module
@@ -68,6 +70,27 @@ def _component(tmp_path, backend="resolved", suffix="test"):
         DnsComponent(platform, paths, Config(domain_suffix=suffix), backend=backend),
         platform,
     )
+
+
+class _FailingElevated:
+    """提权会话：写正常，跑命令失败 —— 模拟 systemctl restart 失败。"""
+
+    def __init__(self, platform) -> None:
+        self.platform = platform
+
+    def run(self, argv):
+        self.platform.commands.append(list(argv))
+        return 1, "boom"
+
+    def write(self, path, content):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+
+    def read(self, path):
+        return path.read_text(encoding="utf-8")
+
+    def copy(self, src, dest):
+        pass
 
 
 def test_resolved_plan_targets_resolved_conf_and_restarts_resolved(tmp_path):
@@ -153,13 +176,80 @@ def test_plan_non_empty_when_recorded_hash_differs(tmp_path, monkeypatch):
     assert other.plan() != []
 
 
-def test_plan_non_empty_without_state_file(tmp_path, monkeypatch):
+def test_plan_empty_when_file_content_matches_without_state(tmp_path, monkeypatch):
+    """路由文件内容已是预期内容 —— 即使 state 文件丢了也不该重写。"""
     target = tmp_path / "etc" / "resolved.conf.d" / "devproxy.conf"
     monkeypatch.setattr(dns_module, "RESOLVED_CONF", target)
     comp, _platform = _component(tmp_path, backend="resolved")
     comp.apply(comp.plan())
     comp.paths.state_dir.joinpath("dns-route.json").unlink()
+    assert comp.plan() == []
+
+
+def test_plan_uses_state_hash_when_file_unreadable(tmp_path, monkeypatch):
+    """/etc 下的文件读不到时（普通用户），退回 state 目录里的哈希。"""
+    if os.geteuid() == 0:
+        pytest.skip("root 能读任意文件")
+    target = tmp_path / "etc" / "resolved.conf.d" / "devproxy.conf"
+    monkeypatch.setattr(dns_module, "RESOLVED_CONF", target)
+    comp, _platform = _component(tmp_path, backend="resolved")
+    comp.apply(comp.plan())
+    target.chmod(0o000)
+    try:
+        assert comp.plan() == []
+    finally:
+        target.chmod(0o600)
+
+
+def test_plan_non_empty_when_target_file_removed(tmp_path, monkeypatch):
+    """用户删掉 /etc 下的路由文件后，setup 不能还说“已就绪”。"""
+    target = tmp_path / "etc" / "resolved.conf.d" / "devproxy.conf"
+    monkeypatch.setattr(dns_module, "RESOLVED_CONF", target)
+    comp, _platform = _component(tmp_path, backend="resolved")
+    comp.apply(comp.plan())
+    target.unlink()
     assert comp.plan() != []
+
+
+def test_plan_non_empty_when_target_file_edited(tmp_path, monkeypatch):
+    """用户在 /etc 下改了路由文件 —— 状态哈希还指向旧内容，必须重写。"""
+    target = tmp_path / "etc" / "resolved.conf.d" / "devproxy.conf"
+    monkeypatch.setattr(dns_module, "RESOLVED_CONF", target)
+    comp, _platform = _component(tmp_path, backend="resolved")
+    comp.apply(comp.plan())
+    target.write_text("[Resolve]\nDNS=9.9.9.9\n", encoding="utf-8")
+    assert comp.plan() != []
+
+
+def test_state_not_recorded_when_reload_fails(tmp_path, monkeypatch):
+    """重载失败就不能记成“已就绪”——否则下次 plan 空列表，实际没生效。"""
+    target = tmp_path / "etc" / "resolved.conf.d" / "devproxy.conf"
+    monkeypatch.setattr(dns_module, "RESOLVED_CONF", target)
+    comp, platform = _component(tmp_path, backend="resolved")
+    monkeypatch.setattr(platform, "privilege", lambda: _FailingElevated(platform))
+    with pytest.raises(RuntimeError):
+        comp.apply(comp.plan())
+    assert not (tmp_path / "s" / "dns-route.json").exists()
+
+
+def test_state_not_recorded_for_other_write_paths(tmp_path):
+    """状态文件只描述路由本身 —— 别的写动作不得污染它。"""
+    from devproxy.platform.base import Action
+
+    comp, _platform = _component(tmp_path, backend="resolved")
+    other = tmp_path / "other.conf"
+    comp.apply(
+        [
+            Action(
+                description="无关写入",
+                kind="write",
+                path=other,
+                content="hello",
+                privileged=False,
+            )
+        ]
+    )
+    assert not (tmp_path / "s" / "dns-route.json").exists()
 
 
 def test_apply_records_state_in_state_dir(tmp_path, monkeypatch):
