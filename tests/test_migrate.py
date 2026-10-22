@@ -538,6 +538,77 @@ def test_migrate_skips_validation_when_binary_missing(tmp_path):
     assert paths.caddyfile.exists()
 
 
+def test_validate_falls_back_to_legacy_unit_binary(tmp_path, monkeypatch):
+    """config.toml 里的 caddy 不存在时，改用遗留单元里的二进制校验。
+
+    "换单元前必校验"不能因为配置里的路径还没下载就变成空话 ——
+    遗留单元里的 ExecStart 指向的正是这台机器上真正在跑的 caddy。
+    """
+    paths = _paths(tmp_path)
+    paths.ensure_files()
+    platform = FakePlatform()
+    legacy_bin = tmp_path / "legacy" / "caddy"
+    legacy_bin.parent.mkdir(parents=True, exist_ok=True)
+    legacy_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+    state = _legacy_state(
+        tmp_path,
+        unit_text=(
+            "[Service]\n"
+            f"ExecStart={legacy_bin} run --config /old/Caddyfile\n"
+        ),
+    )
+    calls = []
+
+    def fake_run(argv):
+        calls.append(list(argv))
+        return 0, ""
+
+    monkeypatch.setattr(platform, "run", fake_run)
+    notes: list[str] = []
+    migrate(
+        platform,
+        paths,
+        Config(caddy_bin=str(tmp_path / "absent")),
+        state,
+        dnsmasq_conf=tmp_path / "dnsmasq.conf",
+        dns_route=tmp_path / "resolved.conf",
+        notes=notes,
+    )
+    validate_calls = [c for c in calls if "validate" in c]
+    assert validate_calls, "必须真的跑一次 caddy validate"
+    assert validate_calls[0][0] == str(legacy_bin)
+    assert any("遗留单元" in n for n in notes)
+    assert not any("跳过配置校验" in n for n in notes)
+
+
+def test_validate_still_skips_when_no_binary_anywhere(tmp_path):
+    """配置与遗留单元里都没有二进制 —— 只能跳过，但必须留下提示。"""
+    paths = _paths(tmp_path)
+    paths.ensure_files()
+    platform = FakePlatform()
+    state = _legacy_state(tmp_path)
+    notes: list[str] = []
+    migrate(
+        platform,
+        paths,
+        Config(caddy_bin=str(tmp_path / "absent")),
+        state,
+        dnsmasq_conf=tmp_path / "dnsmasq.conf",
+        dns_route=tmp_path / "resolved.conf",
+        notes=notes,
+    )
+    assert any("跳过配置校验" in n for n in notes)
+
+
+def test_unit_exec_start_parsed():
+    from devproxy.migrate import unit_exec_start
+
+    assert unit_exec_start(
+        "[Service]\nExecStart=/opt/caddy run --config /etc/Caddyfile\n"
+    ) == ["/opt/caddy", "run", "--config", "/etc/Caddyfile"]
+    assert unit_exec_start("[Service]\nEnvironment=X=1\n") is None
+
+
 # -- storage 连续性：CA 不能换地方 -------------------------------------------
 
 

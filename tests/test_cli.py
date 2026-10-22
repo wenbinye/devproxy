@@ -481,3 +481,60 @@ def test_setup_persists_legacy_storage_for_later_setups(env, monkeypatch, tmp_pa
     # Rich 会按终端宽度折行（长路径甚至会被拆断）—— 比对前把空白全去掉
     squashed = "".join(res.output.split())
     assert "".join(str(legacy_storage).split()) in squashed, "storage 的差异必须对用户说出来"
+
+
+# ------------------------------------- 留档的 storage 覆盖 config.toml 时必须说
+
+
+def _write_storage_pair(env, config_storage: str, stored_storage: str):
+    from devproxy.paths import default_paths
+
+    paths = default_paths()
+    paths.config_toml.parent.mkdir(parents=True, exist_ok=True)
+    paths.config_toml.write_text(
+        f'storage = "{config_storage}"\n', encoding="utf-8"
+    )
+    paths.caddy_storage.parent.mkdir(parents=True, exist_ok=True)
+    paths.caddy_storage.write_text(
+        json.dumps({"storage": stored_storage}), encoding="utf-8"
+    )
+    return paths
+
+
+def test_build_context_says_so_when_stored_storage_overrides_config(env, capsys):
+    """留档的 storage 覆盖了 config.toml —— 必须说出来，并给出退出路径。
+
+    用户改了 config.toml 却被无声忽略，是最难查的一类问题。
+    """
+    from devproxy.cli import build_context
+
+    paths = _write_storage_pair(env, "/tmp/from-config-toml", "/tmp/from-legacy")
+    _paths, config, _store, _admin = build_context()
+    assert config.storage == "/tmp/from-legacy", "留档必须继续生效（CA 不能换地方）"
+    err = capsys.readouterr().err
+    assert "/tmp/from-legacy" in err, "必须说出实际生效的路径"
+    assert "/tmp/from-config-toml" in err, "必须说出被忽略的配置值"
+    # Rich 会按终端宽度折行（长路径甚至会被拆断）—— 比对前把空白全去掉
+    squashed = "".join(err.split())
+    assert "".join(str(paths.caddy_storage).split()) in squashed, "必须给出退出路径（留档文件）"
+
+
+def test_build_context_quiet_when_storage_agrees(env, capsys):
+    """两边一致时不啰嗦。"""
+    from devproxy.cli import build_context
+
+    _write_storage_pair(env, "/tmp/same", "/tmp/same")
+    _paths, config, _store, _admin = build_context()
+    assert config.storage == "/tmp/same"
+    assert "storage" not in capsys.readouterr().err
+
+
+def test_cli_setup_reports_the_storage_override(env, monkeypatch, tmp_path):
+    """CLI 路径上也要说出来 —— 用户看到的是终端输出，不是源码。"""
+    from devproxy.cli import build_context
+
+    _write_storage_pair(env, "/tmp/from-config-toml", "/tmp/from-legacy")
+    res = CliRunner().invoke(app, ["config"])
+    assert res.exit_code == 0, res.output
+    assert "/tmp/from-legacy" in res.output
+    assert "/tmp/from-config-toml" in res.output

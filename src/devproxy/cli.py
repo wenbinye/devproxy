@@ -100,6 +100,27 @@ app = typer.Typer(
 )
 
 
+def _resolve_storage(config: Config, paths: Paths) -> Config:
+    """沿用迁移留档的 storage，并把分歧说出来。
+
+    留档（state/caddy-storage.json）是迁移时的决定：换了 storage 位置，
+    Caddy 会重新生成 CA，浏览器信任与已有证书全部失效。所以它优先于
+    config.toml —— 但**绝不能静默**：用户改了 config.toml 却被无声忽略，
+    是最难查的一类问题。退出路径一并给出：删掉留档文件即可恢复配置。
+    """
+    storage = load_legacy_storage(paths)
+    if storage is None:
+        return config
+    if storage != config.storage_path:
+        err_console.print(
+            f"devproxy: 沿用迁移留档的 storage 路径 {storage}"
+            f"（config.toml 里是 {config.storage_path}）：留档优先，"
+            f"config.toml 的 storage 当前不生效。"
+            f"删除 {paths.caddy_storage} 即可恢复 config.toml 的设置。"
+        )
+    return replace(config, storage=str(storage))
+
+
 def build_context(
     paths: Paths | None = None, config: Config | None = None
 ) -> tuple[Paths, Config, RouteStore, CaddyAdmin]:
@@ -109,9 +130,7 @@ def build_context(
     paths.ensure_files()
     # 迁移时沿用了遗留 Caddyfile 的 storage（CA 还在那儿）—— 别换回去，
     # 换了 Caddy 会重新生成 CA，浏览器信任与已有证书全部失效。
-    storage = load_legacy_storage(paths)
-    if storage is not None:
-        config = replace(config, storage=str(storage))
+    config = _resolve_storage(config, paths)
     caddy = CaddyConfig(
         caddy_bin=config.caddy_bin_path,
         caddyfile=paths.caddyfile,

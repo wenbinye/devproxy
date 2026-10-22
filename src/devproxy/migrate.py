@@ -168,6 +168,18 @@ def unit_env(unit_text: str) -> dict[str, str]:
     return env
 
 
+def unit_exec_start(unit_text: str) -> list[str] | None:
+    """从 ExecStart= 里解析出命令行参数列表（没有则返回 None）。"""
+    for raw in unit_text.splitlines():
+        line = raw.strip()
+        if not line.startswith("ExecStart="):
+            continue
+        args = line[len("ExecStart="):].split()
+        if args:
+            return args
+    return None
+
+
 # -- 遗留检测 -----------------------------------------------------------------
 
 
@@ -398,19 +410,57 @@ def _write_main_caddyfile(paths: Paths, config: Config) -> None:
     paths.caddyfile.write_text(_main_caddyfile_content(paths, config), encoding="utf-8")
 
 
+def _legacy_caddy_binary(
+    state: LegacyState | None, home: Path | None = None
+) -> Path | None:
+    """遗留单元的 ExecStart 指向的 caddy 二进制。
+
+    配置里的 caddy_bin 可能还没下载（首次 setup），但遗留单元里的那个
+    正在这台机器上跑 —— 用它做配置校验才有意义。
+    """
+    if state is None:
+        return None
+    try:
+        text = state.unit_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    args = unit_exec_start(text)
+    if not args:
+        return None
+    program = args[0].strip('"')
+    if not program:
+        return None
+    base = home or Path.home()
+    return Path(program.replace("%h", str(base))).expanduser()
+
+
 def _validate_caddyfile(
-    platform: Platform, paths: Paths, config: Config, notes: list[str]
+    platform: Platform,
+    paths: Paths,
+    config: Config,
+    notes: list[str],
+    state: LegacyState | None = None,
 ) -> None:
     """换单元之前先让 caddy 验一遍配置。
 
     个人站点块是从用户自己的 Caddyfile 原样搬过来的 —— 语法冲突、重复站点
     都可能让 Caddy 起不来。校验不通过就不能换单元：否则服务起不来，
     用户连"是哪一行的错"都看不到。
+
+    配置里的 caddy 二进制还没下载时，退回遗留单元里的那个 —— 否则
+    "换单元前必校验"会因为一个路径不存在而变成空话。
     """
     binary = config.caddy_bin_path
     if not binary.exists():
-        notes.append("caddy 二进制不存在，跳过配置校验（setup 下载后仍会校验）")
-        return
+        fallback = _legacy_caddy_binary(state)
+        if fallback is not None and fallback.exists():
+            notes.append(
+                f"配置里的 caddy 二进制不存在，改用遗留单元里的 {fallback} 校验配置"
+            )
+            binary = fallback
+        else:
+            notes.append("caddy 二进制不存在，跳过配置校验（setup 下载后仍会校验）")
+            return
     fd, tmp_name = tempfile.mkstemp(prefix="devproxy-validate-", suffix=".Caddyfile")
     tmp = Path(tmp_name)
     try:
@@ -535,7 +585,7 @@ def migrate(
         # 否则 caddy 只会报 "file not found"，迁移被自己的校验拦死。
         paths.ensure_files()
         _write_sites_caddy(paths, state, config, notes)
-        _validate_caddyfile(platform, paths, config, notes)
+        _validate_caddyfile(platform, paths, config, notes, state)
         _write_main_caddyfile(paths, config)
         _install_caddy_unit(platform, paths, config, state)
         # 生效的 storage 就是遗留的 storage 时必须留档：之后的 setup

@@ -228,3 +228,39 @@ on-demand 未配置 `ask` 端点（Caddy 启动日志会有 abuse 告警）：�
 - **caddy 重启/重载窗口**：已注册域名最长 30s 内返回 404，心跳周期内自动恢复。
 - **崩溃残留**：devp 被强杀（如 `kill -9`）时路由可能残留；`devp ls` 会标注不可达，
   用 `devp down <name>` 手动清理。
+
+## devproxy — 本地开发环境一键部署
+
+`devproxy`（`src/devproxy/`）把本地服务用 `https://<name>.test` 暴露出来：
+一条命令部署 Caddy + dnsmasq + DNS 路由 + 证书信任 + 开机自启，
+`devproxy up <name> -- CMD...` 注册域名。
+
+```bash
+devproxy setup    # 部署（幂等，可重复执行）
+devproxy doctor   # 体检：缺什么给什么修复命令
+devproxy up demo -- python3 -m http.server   # → https://demo.test
+```
+
+### 平台差异
+
+| | Linux | macOS |
+|---|---|---|
+| 服务单元 | systemd user（`~/.config/systemd/user/`） | launchd（caddy 走 `LaunchDaemons`，其余走 `LaunchAgents`） |
+| 绑定 80/443 | `setcap cap_net_bind_service` | 以 root 跑的 LaunchDaemon（macOS 无 setcap） |
+| DNS 路由 | systemd-resolved 或 `/etc/dnsmasq.d/` | `/etc/resolver/<后缀>`（不动 `/etc/resolv.conf`） |
+| dnsmasq 端口 | 5353 | 5300（53 被 mDNSResponder 占着） |
+| CA 信任 | 系统信任库 + NSS 库（Chrome 只认 NSS） | 系统钥匙串（Safari/Chrome 都读） |
+
+### storage 留档：为什么改了 config.toml 也不生效
+
+迁移遗留环境时，devproxy 会把**遗留 Caddyfile 里的 storage 路径**（CA 所在目录）
+留档到 `~/.local/state/devproxy/caddy-storage.json`，并在之后的每次 setup 里
+继续沿用它 —— 换了 storage 位置，Caddy 会重新生成 CA，浏览器里的信任与
+个人站点已有的 `tls internal` 证书全部失效。
+
+**留档优先于 `config.toml`。** 两者不一致时，devproxy 会在终端上明确提示
+（实际生效的路径、被忽略的配置值、以及留档文件的位置），不会静默忽略。
+
+想改回 `config.toml` 里的设置：**删除 `~/.local/state/devproxy/caddy-storage.json`**
+（该文件即退出路径），然后重新 `devproxy setup` —— 注意这会让 Caddy 重新生成 CA，
+浏览器需要重新信任新的根证书。
