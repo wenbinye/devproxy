@@ -7,6 +7,7 @@ macOS 只需要系统钥匙串（由 Plan 3 的 macOS 平台实现提供）。
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 from devproxy.config import Config
@@ -134,7 +135,14 @@ class CertComponent:
                 failures.append((action, e))
         if failures:
             detail = "；".join(f"{a.description}（{e}）" for a, e in failures)
-            raise RuntimeError(f"{len(failures)} 个步骤失败：{detail}")
+            message = f"{len(failures)} 个步骤失败：{detail}"
+            succeeded = len(actions) - len(failures)
+            if succeeded:
+                message += f"；其余 {succeeded} 个步骤已执行"
+            # 提权失败要保留类型：CLI 据此给退出码 4（需要提权），而不是 1
+            if all(isinstance(e, PermissionError) for _, e in failures):
+                raise PermissionError(message)
+            raise RuntimeError(message)
 
     def _apply_one(self, action: Action) -> None:
         if action.command[:1] == ["install-system-ca"]:
@@ -154,12 +162,12 @@ class CertComponent:
         if action.command[:1] == ["install-nss-ca"]:
             src = Path(action.command[1])
             nss = Path(action.command[2]).expanduser()
-            nss.mkdir(parents=True, exist_ok=True)
-            code, _ = self.platform.run(["certutil", "-V"])
-            if code != 0:
+            # 探测只能看二进制在不在：certutil -V 需要 -n，真实机器上永远非零
+            if shutil.which("certutil") is None:
                 raise RuntimeError(
                     "缺少 certutil（Chrome 信任需 NSS 库）：sudo apt install libnss3-tools"
                 )
+            nss.mkdir(parents=True, exist_ok=True)
             # 库还不存在时先建一个空库，否则 certutil -A 会失败
             if not (nss / "cert9.db").exists():
                 code, msg = self.platform.run(

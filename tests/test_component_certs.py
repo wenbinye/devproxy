@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from devproxy.cli import app
@@ -163,7 +164,18 @@ def _injected(tmp_path, platform):
     return comp, paths, cfg
 
 
-def test_apply_writes_only_to_injected_targets(tmp_path):
+def _certutil_installed(monkeypatch):
+    monkeypatch.setattr(
+        "devproxy.components.certs.shutil.which", lambda name: "/usr/bin/certutil"
+    )
+
+
+def _certutil_missing(monkeypatch):
+    monkeypatch.setattr("devproxy.components.certs.shutil.which", lambda name: None)
+
+
+def test_apply_writes_only_to_injected_targets(tmp_path, monkeypatch):
+    _certutil_installed(monkeypatch)
     platform = FakePlatform()
     comp, paths, _ = _injected(tmp_path, platform)
     _write_ca(paths)
@@ -175,7 +187,8 @@ def test_apply_writes_only_to_injected_targets(tmp_path):
         assert tmp_path in written.parents, f"写到了 tmp_path 之外: {written}"
 
 
-def test_apply_runs_nss_before_system_ca(tmp_path):
+def test_apply_runs_nss_before_system_ca(tmp_path, monkeypatch):
+    _certutil_installed(monkeypatch)
     platform = FakePlatform()
     comp, paths, _ = _injected(tmp_path, platform)
     _write_ca(paths)
@@ -184,56 +197,50 @@ def test_apply_runs_nss_before_system_ca(tmp_path):
     assert names.index("certutil") < names.index("update-ca-certificates")
 
 
-def test_apply_raises_when_certutil_missing(tmp_path):
-    class NoCertutil(FakePlatform):
-        def run(self, argv):
-            self.commands.append(list(argv))
-            if argv[:1] == ["certutil"]:
-                return 127, "命令不存在: certutil"
-            return 0, ""
-
-    platform = NoCertutil()
+def test_apply_detects_certutil_by_binary_not_exit_code(tmp_path, monkeypatch):
+    """certutil -V 需要 -n，真实机器上永远非零 —— 探测只能看二进制在不在。"""
+    _certutil_installed(monkeypatch)
+    platform = FakePlatform()
     comp, paths, _ = _injected(tmp_path, platform)
     _write_ca(paths)
-    try:
+    comp.apply(comp.plan())
+    assert ["certutil", "-V"] not in platform.commands
+    assert any(c[:1] == ["certutil"] and "-A" in c for c in platform.commands)
+
+
+def test_apply_raises_when_certutil_missing(tmp_path, monkeypatch):
+    _certutil_missing(monkeypatch)
+    platform = FakePlatform()
+    comp, paths, _ = _injected(tmp_path, platform)
+    _write_ca(paths)
+    with pytest.raises(RuntimeError) as ei:
         comp.apply(comp.plan())
-    except RuntimeError as e:
-        assert "certutil" in str(e)
-    else:
-        raise AssertionError("缺少 certutil 时应当报错")
+    assert "缺少 certutil" in str(ei.value)
 
 
-def test_apply_still_installs_system_ca_when_nss_fails(tmp_path):
+def test_apply_still_installs_system_ca_when_nss_fails(tmp_path, monkeypatch):
     """两步互相独立：没有 certutil 不该连累 curl/Go 的系统信任库。"""
-
-    class NoCertutil(FakePlatform):
-        def run(self, argv):
-            self.commands.append(list(argv))
-            if argv[:1] == ["certutil"]:
-                return 127, "命令不存在: certutil"
-            return 0, ""
-
-    platform = NoCertutil()
+    _certutil_missing(monkeypatch)
+    platform = FakePlatform()
     comp, paths, _ = _injected(tmp_path, platform)
     _write_ca(paths)
-    try:
+    with pytest.raises(RuntimeError) as ei:
         comp.apply(comp.plan())
-    except RuntimeError as e:
-        assert "certutil" in str(e)
-    else:
-        raise AssertionError("缺少 certutil 时应当报错")
+    assert "缺少 certutil" in str(ei.value)
     # NSS 失败之后，系统信任库那步仍然跑完了
     assert (tmp_path / "ca" / "devproxy-local.crt").exists()
     assert ["update-ca-certificates"] in platform.commands
 
 
-def test_apply_still_installs_nss_when_system_ca_fails(tmp_path):
+def test_apply_still_installs_nss_when_system_ca_fails(tmp_path, monkeypatch):
     """拒绝 sudo / 提权失败时，不需要 root 的 NSS 步仍要跑完。"""
+    _certutil_installed(monkeypatch)
     from devproxy.platform.fake import FakeElevated
 
     class CopyBoom(FakePlatform):
         def privilege(self):
             if self._elevated is None:
+
                 class Elev(FakeElevated):
                     def copy(self, src, dest):
                         raise RuntimeError("copy 失败")
@@ -244,27 +251,47 @@ def test_apply_still_installs_nss_when_system_ca_fails(tmp_path):
     platform = CopyBoom()
     comp, paths, _ = _injected(tmp_path, platform)
     _write_ca(paths)
-    try:
+    with pytest.raises(RuntimeError, match="copy 失败"):
         comp.apply(comp.plan())
-    except RuntimeError as e:
-        assert "copy 失败" in str(e)
-    else:
-        raise AssertionError("系统信任库失败时应当报错")
     assert any(c[:1] == ["certutil"] and "-A" in c for c in platform.commands)
 
 
-def test_apply_reports_every_failed_step(tmp_path):
+def test_apply_preserves_permission_error(tmp_path, monkeypatch):
+    """sudo 被拒是"提权失败"（退出码 4），不能被改写成普通 RuntimeError。"""
+    _certutil_installed(monkeypatch)
+    from devproxy.platform.fake import FakeElevated
+
+    class SudoDenied(FakePlatform):
+        def privilege(self):
+            if self._elevated is None:
+
+                class Elev(FakeElevated):
+                    def copy(self, src, dest):
+                        raise PermissionError("sudo: 密码错误")
+
+                self._elevated = Elev(self)
+            return self._elevated
+
+    platform = SudoDenied()
+    comp, paths, _ = _injected(tmp_path, platform)
+    _write_ca(paths)
+    with pytest.raises(PermissionError) as ei:
+        comp.apply(comp.plan())
+    message = str(ei.value)
+    assert "系统信任库" in message and "sudo: 密码错误" in message
+    assert "其余 1 个步骤已执行" in message or "已执行" in message
+    # NSS 那步照样装上了
+    assert any(c[:1] == ["certutil"] and "-A" in c for c in platform.commands)
+
+
+def test_apply_reports_every_failed_step(tmp_path, monkeypatch):
+    _certutil_missing(monkeypatch)
     from devproxy.platform.fake import FakeElevated
 
     class AllBoom(FakePlatform):
-        def run(self, argv):
-            self.commands.append(list(argv))
-            if argv[:1] == ["certutil"]:
-                return 127, "命令不存在: certutil"
-            return 0, ""
-
         def privilege(self):
             if self._elevated is None:
+
                 class Elev(FakeElevated):
                     def copy(self, src, dest):
                         raise RuntimeError("copy 失败")
@@ -275,18 +302,16 @@ def test_apply_reports_every_failed_step(tmp_path):
     platform = AllBoom()
     comp, paths, _ = _injected(tmp_path, platform)
     _write_ca(paths)
-    try:
+    with pytest.raises(RuntimeError) as ei:
         comp.apply(comp.plan())
-    except RuntimeError as e:
-        message = str(e)
-        assert "certutil" in message
-        assert "copy 失败" in message
-    else:
-        raise AssertionError("两步都失败时应当报错")
+    message = str(ei.value)
+    assert "certutil" in message
+    assert "copy 失败" in message
 
 
-def test_apply_raises_when_update_ca_certificates_fails(tmp_path):
+def test_apply_raises_when_update_ca_certificates_fails(tmp_path, monkeypatch):
     """update-ca-certificates 失败必须报错 —— 否则 CA 只是躺在暂存目录里。"""
+    _certutil_installed(monkeypatch)
     from devproxy.platform.fake import FakeElevated
 
     class NoUpdateCa(FakePlatform):
@@ -307,15 +332,12 @@ def test_apply_raises_when_update_ca_certificates_fails(tmp_path):
     platform = NoUpdateCa()
     comp, paths, _ = _injected(tmp_path, platform)
     _write_ca(paths)
-    try:
+    with pytest.raises(RuntimeError, match="update-ca-certificates"):
         comp.apply(comp.plan())
-    except RuntimeError as e:
-        assert "update-ca-certificates" in str(e)
-    else:
-        raise AssertionError("update-ca-certificates 失败时应当报错")
 
 
-def test_verify_ok_after_trust(tmp_path):
+def test_verify_ok_after_trust(tmp_path, monkeypatch):
+    _certutil_installed(monkeypatch)
     platform = FakePlatform()
     comp, paths, _ = _injected(tmp_path, platform)
     ca = _write_ca(paths)
@@ -390,6 +412,7 @@ def test_cli_trust_refuses_privileged_without_yes(tmp_path, monkeypatch):
 
 
 def test_cli_trust_installs_into_injected_targets(tmp_path, monkeypatch):
+    _certutil_installed(monkeypatch)
     platform = FakePlatform()
     paths, cfg = _patch_cli(monkeypatch, tmp_path, platform)
     _write_ca(paths)
@@ -403,14 +426,8 @@ def test_cli_trust_installs_into_injected_targets(tmp_path, monkeypatch):
 
 
 def test_cli_trust_failure_exits_1_without_traceback(tmp_path, monkeypatch):
-    class NoCertutil(FakePlatform):
-        def run(self, argv):
-            self.commands.append(list(argv))
-            if argv[:1] == ["certutil"]:
-                return 127, "命令不存在: certutil"
-            return 0, ""
-
-    platform = NoCertutil()
+    _certutil_missing(monkeypatch)
+    platform = FakePlatform()
     paths, cfg = _patch_cli(monkeypatch, tmp_path, platform)
     _write_ca(paths)
     _patch_cert_component(monkeypatch, tmp_path)
@@ -418,6 +435,31 @@ def test_cli_trust_failure_exits_1_without_traceback(tmp_path, monkeypatch):
     assert result.exit_code == 1
     assert "certutil" in result.stderr
     assert "Traceback" not in result.stdout
+
+
+def test_cli_trust_exits_4_when_sudo_denied(tmp_path, monkeypatch):
+    """sudo 被拒是提权问题（退出码 4），不是普通运行失败。"""
+    from devproxy.platform.fake import FakeElevated
+
+    class SudoDenied(FakePlatform):
+        def privilege(self):
+            if self._elevated is None:
+
+                class Elev(FakeElevated):
+                    def copy(self, src, dest):
+                        raise PermissionError("sudo: 密码错误")
+
+                self._elevated = Elev(self)
+            return self._elevated
+
+    _certutil_installed(monkeypatch)
+    platform = SudoDenied()
+    paths, cfg = _patch_cli(monkeypatch, tmp_path, platform)
+    _write_ca(paths)
+    _patch_cert_component(monkeypatch, tmp_path)
+    result = CliRunner().invoke(app, ["trust", "--yes"])
+    assert result.exit_code == 4
+    assert "sudo: 密码错误" in result.stderr
 
 
 def test_cli_logs_rejects_unknown_service(tmp_path, monkeypatch):
