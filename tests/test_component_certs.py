@@ -203,6 +203,88 @@ def test_apply_raises_when_certutil_missing(tmp_path):
         raise AssertionError("缺少 certutil 时应当报错")
 
 
+def test_apply_still_installs_system_ca_when_nss_fails(tmp_path):
+    """两步互相独立：没有 certutil 不该连累 curl/Go 的系统信任库。"""
+
+    class NoCertutil(FakePlatform):
+        def run(self, argv):
+            self.commands.append(list(argv))
+            if argv[:1] == ["certutil"]:
+                return 127, "命令不存在: certutil"
+            return 0, ""
+
+    platform = NoCertutil()
+    comp, paths, _ = _injected(tmp_path, platform)
+    _write_ca(paths)
+    try:
+        comp.apply(comp.plan())
+    except RuntimeError as e:
+        assert "certutil" in str(e)
+    else:
+        raise AssertionError("缺少 certutil 时应当报错")
+    # NSS 失败之后，系统信任库那步仍然跑完了
+    assert (tmp_path / "ca" / "devproxy-local.crt").exists()
+    assert ["update-ca-certificates"] in platform.commands
+
+
+def test_apply_still_installs_nss_when_system_ca_fails(tmp_path):
+    """拒绝 sudo / 提权失败时，不需要 root 的 NSS 步仍要跑完。"""
+    from devproxy.platform.fake import FakeElevated
+
+    class CopyBoom(FakePlatform):
+        def privilege(self):
+            if self._elevated is None:
+                class Elev(FakeElevated):
+                    def copy(self, src, dest):
+                        raise RuntimeError("copy 失败")
+
+                self._elevated = Elev(self)
+            return self._elevated
+
+    platform = CopyBoom()
+    comp, paths, _ = _injected(tmp_path, platform)
+    _write_ca(paths)
+    try:
+        comp.apply(comp.plan())
+    except RuntimeError as e:
+        assert "copy 失败" in str(e)
+    else:
+        raise AssertionError("系统信任库失败时应当报错")
+    assert any(c[:1] == ["certutil"] and "-A" in c for c in platform.commands)
+
+
+def test_apply_reports_every_failed_step(tmp_path):
+    from devproxy.platform.fake import FakeElevated
+
+    class AllBoom(FakePlatform):
+        def run(self, argv):
+            self.commands.append(list(argv))
+            if argv[:1] == ["certutil"]:
+                return 127, "命令不存在: certutil"
+            return 0, ""
+
+        def privilege(self):
+            if self._elevated is None:
+                class Elev(FakeElevated):
+                    def copy(self, src, dest):
+                        raise RuntimeError("copy 失败")
+
+                self._elevated = Elev(self)
+            return self._elevated
+
+    platform = AllBoom()
+    comp, paths, _ = _injected(tmp_path, platform)
+    _write_ca(paths)
+    try:
+        comp.apply(comp.plan())
+    except RuntimeError as e:
+        message = str(e)
+        assert "certutil" in message
+        assert "copy 失败" in message
+    else:
+        raise AssertionError("两步都失败时应当报错")
+
+
 def test_apply_raises_when_update_ca_certificates_fails(tmp_path):
     """update-ca-certificates 失败必须报错 —— 否则 CA 只是躺在暂存目录里。"""
     from devproxy.platform.fake import FakeElevated

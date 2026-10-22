@@ -248,20 +248,79 @@ def test_linux_ca_trusted_never_raises_on_binary_file(tmp_path, monkeypatch):
 # -- NSS 库判定 -------------------------------------------------------------
 
 
-def test_linux_nss_trusted_when_certutil_finds_nickname(tmp_path, monkeypatch):
+PEM_OLD = (
+    "-----BEGIN CERTIFICATE-----\n"
+    "T0xEQ0VSVElGSUNBVEUtT0xE\n"
+    "-----END CERTIFICATE-----\n"
+)
+PEM_NEW = (
+    "-----BEGIN CERTIFICATE-----\n"
+    "TkVXQ0VSVElGSUNBVEUtTkVX\n"
+    "-----END CERTIFICATE-----\n"
+)
+
+
+def _nss_platform(tmp_path):
     p = LinuxPlatform(user_home=tmp_path)
     nss = tmp_path / ".pki" / "nssdb"
     nss.mkdir(parents=True)
     (nss / "cert9.db").write_text("", encoding="utf-8")
+    return p
+
+
+def test_linux_nss_trusted_true_when_stored_cert_matches(tmp_path, monkeypatch):
+    """判定依据是库里的**证书内容**，不只是同名条目存在。"""
+    p = _nss_platform(tmp_path)
+    ca = tmp_path / "root.crt"
+    ca.write_text(PEM_OLD, encoding="utf-8")
     calls = []
 
     def fake_run(argv):
         calls.append(argv)
-        return 0, "devproxy Local CA"
+        return 0, PEM_OLD
 
     monkeypatch.setattr(linux_mod, "_run", fake_run)
-    assert p.nss_trusted(tmp_path / "root.crt") is True
+    assert p.nss_trusted(ca) is True
     assert calls[0][:2] == ["certutil", "-L"]
+    assert "-a" in calls[0], "必须让 certutil 打出 PEM 才能比对内容"
+
+
+def test_linux_nss_trusted_false_when_stored_cert_differs(tmp_path, monkeypatch):
+    """Caddy 重新生成 CA 后旧条目还在 —— 同名但内容不同，必须报未信任。"""
+    p = _nss_platform(tmp_path)
+    ca = tmp_path / "root.crt"
+    ca.write_text(PEM_NEW, encoding="utf-8")
+    monkeypatch.setattr(linux_mod, "_run", lambda argv: (0, PEM_OLD))
+    assert p.nss_trusted(ca) is False
+
+
+def test_linux_nss_trusted_ignores_blank_lines_and_crlf(tmp_path, monkeypatch):
+    p = _nss_platform(tmp_path)
+    ca = tmp_path / "root.crt"
+    ca.write_text(PEM_OLD, encoding="utf-8")
+    noisy = "\r\n" + PEM_OLD.replace("\n", "\r\n") + "\r\n\r\n"
+    monkeypatch.setattr(linux_mod, "_run", lambda argv: (0, noisy))
+    assert p.nss_trusted(ca) is True
+
+
+def test_linux_nss_trusted_false_when_entry_missing(tmp_path, monkeypatch):
+    p = _nss_platform(tmp_path)
+    ca = tmp_path / "root.crt"
+    ca.write_text(PEM_OLD, encoding="utf-8")
+    monkeypatch.setattr(
+        linux_mod,
+        "_run",
+        lambda argv: (255, "certutil: could not find cert: devproxy Local CA"),
+    )
+    assert p.nss_trusted(ca) is False
+
+
+def test_linux_nss_trusted_false_when_ca_unreadable(tmp_path, monkeypatch):
+    p = _nss_platform(tmp_path)
+    ca = tmp_path / "root.crt"
+    ca.write_bytes(b"\xff\xfe\x00binary")
+    monkeypatch.setattr(linux_mod, "_run", lambda argv: (0, PEM_OLD))
+    assert p.nss_trusted(ca) is False
 
 
 def test_linux_nss_trusted_false_without_db(tmp_path, monkeypatch):
@@ -273,12 +332,11 @@ def test_linux_nss_trusted_false_without_db(tmp_path, monkeypatch):
 
 
 def test_linux_nss_trusted_false_when_certutil_missing(tmp_path, monkeypatch):
-    p = LinuxPlatform(user_home=tmp_path)
-    nss = tmp_path / ".pki" / "nssdb"
-    nss.mkdir(parents=True)
-    (nss / "cert9.db").write_text("", encoding="utf-8")
+    p = _nss_platform(tmp_path)
+    ca = tmp_path / "root.crt"
+    ca.write_text(PEM_OLD, encoding="utf-8")
     monkeypatch.setattr(linux_mod, "_run", lambda argv: (127, "命令不存在: certutil"))
-    assert p.nss_trusted(tmp_path / "root.crt") is False
+    assert p.nss_trusted(ca) is False
 
 
 def test_fake_platform_nss_trusted_tracks_its_own_set(tmp_path):

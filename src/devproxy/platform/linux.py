@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import subprocess
 import tempfile
@@ -13,6 +14,16 @@ from devproxy.platform.base import (
     SYSTEM_TRUST_DIR,
     ElevatedSession,
 )
+
+
+def _pem_body(text: str) -> str:
+    """PEM 的规范化正文：去掉头尾标记、空行与所有空白。"""
+    lines = (line.strip() for line in text.splitlines())
+    return "".join(line for line in lines if line and not line.startswith("-----"))
+
+
+def _pem_digest(text: str) -> str:
+    return hashlib.sha256(_pem_body(text).encode("utf-8")).hexdigest()
 
 
 def _run(argv: list[str]) -> tuple[int, str]:
@@ -148,12 +159,25 @@ class LinuxPlatform:
         return code == 0
 
     def nss_trusted(self, ca: Path) -> bool:
-        """NSS 库里是否已有该 CA（按 nickname 判定）。只读、非特权。"""
+        """NSS 库里存的证书是否**就是这一份** CA。只读、非特权。
+
+        只按 nickname 判"条目存在"是不够的：Caddy 重新生成内部 CA（删
+        pki/、换 storage、迁移）后旧条目仍在，Chrome 会拒绝新 CA，而工具
+        却以为已就绪、连修复路径都不给。所以让 certutil 打出 PEM 比对内容。
+        """
         nss = self.user_home / ".pki" / "nssdb"
         if not (nss / "cert9.db").exists():
             return False
-        code, _ = _run(["certutil", "-L", "-d", f"sql:{nss}", "-n", CA_NICKNAME])
-        return code == 0
+        try:
+            expected = ca.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return False
+        code, stored = _run(
+            ["certutil", "-L", "-d", f"sql:{nss}", "-n", CA_NICKNAME, "-a"]
+        )
+        if code != 0:
+            return False
+        return _pem_digest(stored) == _pem_digest(expected)
 
     def dns_route_installed(self, backend: str) -> bool:
         if backend == "resolved":

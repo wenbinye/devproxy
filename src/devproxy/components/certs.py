@@ -121,57 +121,72 @@ class CertComponent:
     # -- apply ---------------------------------------------------------
 
     def apply(self, actions: list[Action]) -> None:
+        """两个信任库互相独立：任一步失败，另一步仍要跑完。
+
+        失败不在中途抛出，最后汇总成一条错误 —— 否则先跑的 NSS 步一旦
+        失败（如缺 certutil），系统信任库就永远装不上，反之亦然。
+        """
+        failures: list[tuple[Action, Exception]] = []
         for action in actions:
-            if action.command[:1] == ["install-system-ca"]:
-                elevated = self.platform.privilege()
-                src, dest = Path(action.command[1]), Path(action.command[2])
-                code, msg = elevated.run(["install", "-d", str(dest.parent)])
-                if code != 0:
-                    raise RuntimeError(f"创建信任库目录失败: {msg}")
-                elevated.copy(src, dest)
-                code, msg = elevated.run(["update-ca-certificates"])
-                if code != 0:
-                    # 不检查返回码的话，CA 只是躺在暂存目录里，系统并不认它
-                    raise RuntimeError(
-                        f"update-ca-certificates 失败（CA 未进入系统信任库）: {msg}"
-                    )
-                continue
-            if action.command[:1] == ["install-nss-ca"]:
-                src = Path(action.command[1])
-                nss = Path(action.command[2]).expanduser()
-                nss.mkdir(parents=True, exist_ok=True)
-                code, _ = self.platform.run(["certutil", "-V"])
-                if code != 0:
-                    raise RuntimeError(
-                        "缺少 certutil（Chrome 信任需 NSS 库）：sudo apt install libnss3-tools"
-                    )
-                # 库还不存在时先建一个空库，否则 certutil -A 会失败
-                if not (nss / "cert9.db").exists():
-                    code, msg = self.platform.run(
-                        ["certutil", "-N", "-d", f"sql:{nss}", "--empty-password"]
-                    )
-                    if code != 0:
-                        raise RuntimeError(f"创建 NSS 库失败: {msg}")
-                # 先删同名再装，保证幂等
-                self.platform.run(["certutil", "-d", f"sql:{nss}", "-D", "-n", CA_NAME])
+            try:
+                self._apply_one(action)
+            except Exception as e:  # noqa: BLE001 —— 先收集，最后统一报
+                failures.append((action, e))
+        if failures:
+            detail = "；".join(f"{a.description}（{e}）" for a, e in failures)
+            raise RuntimeError(f"{len(failures)} 个步骤失败：{detail}")
+
+    def _apply_one(self, action: Action) -> None:
+        if action.command[:1] == ["install-system-ca"]:
+            elevated = self.platform.privilege()
+            src, dest = Path(action.command[1]), Path(action.command[2])
+            code, msg = elevated.run(["install", "-d", str(dest.parent)])
+            if code != 0:
+                raise RuntimeError(f"创建信任库目录失败: {msg}")
+            elevated.copy(src, dest)
+            code, msg = elevated.run(["update-ca-certificates"])
+            if code != 0:
+                # 不检查返回码的话，CA 只是躺在暂存目录里，系统并不认它
+                raise RuntimeError(
+                    f"update-ca-certificates 失败（CA 未进入系统信任库）: {msg}"
+                )
+            return
+        if action.command[:1] == ["install-nss-ca"]:
+            src = Path(action.command[1])
+            nss = Path(action.command[2]).expanduser()
+            nss.mkdir(parents=True, exist_ok=True)
+            code, _ = self.platform.run(["certutil", "-V"])
+            if code != 0:
+                raise RuntimeError(
+                    "缺少 certutil（Chrome 信任需 NSS 库）：sudo apt install libnss3-tools"
+                )
+            # 库还不存在时先建一个空库，否则 certutil -A 会失败
+            if not (nss / "cert9.db").exists():
                 code, msg = self.platform.run(
-                    [
-                        "certutil",
-                        "-d",
-                        f"sql:{nss}",
-                        "-A",
-                        "-n",
-                        CA_NAME,
-                        "-t",
-                        "C,,",
-                        "-i",
-                        str(src),
-                    ]
+                    ["certutil", "-N", "-d", f"sql:{nss}", "--empty-password"]
                 )
                 if code != 0:
-                    raise RuntimeError(f"安装 NSS 证书失败: {msg}")
-                continue
-            raise RuntimeError(f"未知动作: {action.command}")
+                    raise RuntimeError(f"创建 NSS 库失败: {msg}")
+            # 先删同名再装，保证幂等
+            self.platform.run(["certutil", "-d", f"sql:{nss}", "-D", "-n", CA_NAME])
+            code, msg = self.platform.run(
+                [
+                    "certutil",
+                    "-d",
+                    f"sql:{nss}",
+                    "-A",
+                    "-n",
+                    CA_NAME,
+                    "-t",
+                    "C,,",
+                    "-i",
+                    str(src),
+                ]
+            )
+            if code != 0:
+                raise RuntimeError(f"安装 NSS 证书失败: {msg}")
+            return
+        raise RuntimeError(f"未知动作: {action.command}")
 
     # -- verify --------------------------------------------------------
 
