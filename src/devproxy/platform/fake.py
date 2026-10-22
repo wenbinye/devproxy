@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 
 from devproxy.platform.base import ElevatedSession
@@ -45,6 +46,20 @@ class FakePlatform:
         self.commands: list[list[str]] = []
         self.written: dict[Path, str] = {}
         self._elevated: FakeElevated | None = None
+        # auto DNS 后端：默认模拟 resolved 在运行
+        self.resolved_running = True
+        # linger：默认未启用，enable_linger() 后置真
+        self.linger = False
+        # verify() 的功能探测：可按需改这些“罐头答案”
+        self.dns_answer: str | None = "127.0.0.1"
+        self.dns_answers: dict[str, str | None] = {}
+        self.dns_queries: list[str] = []
+        self.http_result = True
+        self.http_results: dict[str, bool] = {}
+        self.http_probes: list[str] = []
+        # 单元落盘的隔离目录 —— 绝不读写真实的 ~/.config/systemd/user
+        self._unit_tmp = tempfile.TemporaryDirectory(prefix="devproxy-fake-units-")
+        self.unit_dir = Path(self._unit_tmp.name)
 
     def privilege(self) -> ElevatedSession:
         if self._elevated is None:
@@ -59,13 +74,16 @@ class FakePlatform:
         return "v2.11.7"
 
     def service_unit_path(self, name: str) -> Path:
-        return Path.home() / ".config" / "systemd" / "user" / f"{name}.service"
+        return self.unit_dir / f"{name}.service"
 
     def service_active(self, name: str) -> bool:
         return name in self.active
 
     def install_service(self, name: str, unit: str) -> None:
         self.services[name] = unit
+        path = self.service_unit_path(name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(unit, encoding="utf-8")
 
     def enable_service(self, name: str) -> None:
         self.active.add(name)
@@ -75,6 +93,25 @@ class FakePlatform:
 
     def tail_service_log(self, name: str) -> None:
         pass
+
+    def enable_linger(self) -> tuple[int, str]:
+        self.linger = True
+        self.commands.append(["loginctl", "enable-linger"])
+        return 0, ""
+
+    def linger_enabled(self) -> bool:
+        return self.linger
+
+    def resolved_active(self) -> bool:
+        return self.resolved_running
+
+    def dns_query(self, name: str) -> str | None:
+        self.dns_queries.append(name)
+        return self.dns_answers.get(name, self.dns_answer)
+
+    def http_ok(self, url: str) -> bool:
+        self.http_probes.append(url)
+        return self.http_results.get(url, self.http_result)
 
     def ca_trusted(self, ca: Path) -> bool:
         return ca in self.trusted

@@ -32,6 +32,27 @@ class SetupPlan:
         return not any(r.actions for r in self.reports)
 
 
+def check_component(component: Component) -> tuple[ComponentReport, bool]:
+    """对单个组件调 check()，隔离异常。返回 (报告, check 是否成功执行)。
+
+    doctor 只需要报告；setup 还要知道 check 是否抛过异常（抛过就不再 plan）。
+    """
+    name = getattr(component, "name", "?")
+    try:
+        status = component.check()
+    except Exception as e:  # noqa: BLE001 —— 单组件失败不阻断其他组件
+        return (
+            ComponentReport(
+                name=name,
+                status=Status(ok=False, detail=f"检查失败: {e}", hint="查看上面的报错"),
+                actions=[],
+                component=component,
+            ),
+            False,
+        )
+    return ComponentReport(name=name, status=status, component=component), True
+
+
 def build_plan(components: list[Component]) -> SetupPlan:
     """对每个组件取 check() 与 plan()。plan 为空表示该组件无需变更。
 
@@ -40,36 +61,19 @@ def build_plan(components: list[Component]) -> SetupPlan:
     """
     reports = []
     for c in components:
-        name = getattr(c, "name", "?")
-        try:
-            status = c.check()
-        except Exception as e:  # noqa: BLE001 —— 单组件失败不阻断其他组件
-            reports.append(
-                ComponentReport(
-                    name=name,
-                    status=Status(
-                        ok=False, detail=f"检查失败: {e}", hint="查看上面的报错"
-                    ),
-                    actions=[],
-                    component=c,
-                )
-            )
+        report, checked = check_component(c)
+        if not checked:
+            reports.append(report)
             continue
         try:
             actions = c.plan()
         except Exception as e:  # noqa: BLE001 —— 同上
             actions = []
-            status = Status(
+            report.status = Status(
                 ok=False, detail=f"计算变更失败: {e}", hint="查看上面的报错"
             )
-        reports.append(
-            ComponentReport(
-                name=name,
-                status=status,
-                actions=actions,
-                component=c,
-            )
-        )
+        report.actions = actions
+        reports.append(report)
     return SetupPlan(reports=reports)
 
 
@@ -85,7 +89,11 @@ def _verify(component: Component, fallback: Status) -> Status:
 
 
 def apply_plan(plan: SetupPlan) -> list[tuple[str, Status]]:
-    """逐组件执行；单个组件失败不阻断其他组件。"""
+    """逐组件执行；单个组件失败不阻断其他组件。
+
+    check/plan 阶段已失败且没有任何动作时，verify() 不能把失败覆盖成成功 ——
+    否则组件什么都没做，setup 也会打印 ✔ 并退出 0。
+    """
     results: list[tuple[str, Status]] = []
     for report in plan.reports:
         component = report.component
@@ -95,6 +103,10 @@ def apply_plan(plan: SetupPlan) -> list[tuple[str, Status]]:
         try:
             if report.actions:
                 component.apply(report.actions)
+            if not report.actions and not report.status.ok:
+                # 计划阶段就失败了（或组件不健康却无计可施）—— 保留失败
+                results.append((report.name, report.status))
+                continue
             results.append((report.name, _verify(component, report.status)))
         except Exception as e:  # noqa: BLE001 —— 组件失败不应中断 setup
             results.append(

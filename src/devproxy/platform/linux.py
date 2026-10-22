@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import getpass
 import hashlib
+import ipaddress
 import os
 import subprocess
 import tempfile
@@ -29,9 +31,23 @@ def _pem_digest(text: str) -> str:
 def _run(argv: list[str]) -> tuple[int, str]:
     try:
         proc = subprocess.run(argv, capture_output=True, text=True)
-    except FileNotFoundError:
-        return 127, f"命令不存在: {argv[0]}"
+    except OSError as e:
+        # 命令不存在（FileNotFoundError）、可执行位缺失（PermissionError）等
+        # 都归一为“命令不可用”，让调用方按返回码处理而不是 traceback。
+        return 127, f"命令不可用: {argv[0]}（{e}）"
     return proc.returncode, (proc.stdout or proc.stderr).strip()
+
+
+def _first_ip(text: str) -> str | None:
+    """从 resolvectl / dig 输出里取第一个 A/AAAA 答案。"""
+    for line in text.splitlines():
+        for token in line.replace(",", " ").split():
+            candidate = token.strip("[];()")
+            try:
+                return str(ipaddress.ip_address(candidate))
+            except ValueError:
+                continue
+    return None
 
 
 class LinuxElevated:
@@ -53,9 +69,15 @@ class LinuxElevated:
     def write(self, path: Path, content: str) -> None:
         """通过系统临时目录中的文件 + sudo cp 写入，避免 shell 引号问题。
 
+        父目录不一定存在：`/etc/systemd/resolved.conf.d` 与 `/etc/dnsmasq.d`
+        在干净机器上可能尚未创建（不归任何 dpkg 包所有）。先 `install -d`
+        建目录，否则 sudo cp 必然失败，setup 永远无法收敛。
         临时文件必须放在用户可写的系统临时目录（目标目录本身可能不可写），
         且无论成功失败都要清理。
         """
+        code, msg = self.run(["install", "-d", str(path.parent)])
+        if code != 0:
+            raise PermissionError(f"创建目录 {path.parent} 失败: {msg}")
         fd, tmp_name = tempfile.mkstemp(prefix="devproxy-elev-")
         tmp = Path(tmp_name)
         try:
@@ -136,6 +158,42 @@ class LinuxPlatform:
         """流式跟随服务日志：继承终端 stdio（不捕获），Ctrl-C 自然传播。"""
         subprocess.run(["journalctl", "--user", "-u", name, "-f"])
 
+    def enable_linger(self) -> tuple[int, str]:
+        return _run(["sudo", "loginctl", "enable-linger", getpass.getuser()])
+
+    def linger_enabled(self) -> bool:
+        code, out = _run(
+            ["loginctl", "show-user", getpass.getuser(), "-p", "Linger", "--value"]
+        )
+        return code == 0 and out.strip() == "yes"
+
+    def resolved_active(self) -> bool:
+        code, out = _run(["systemctl", "is-active", "systemd-resolved"])
+        if code == 0 and out.strip() == "active":
+            return True
+        # 部分环境没有 systemd-resolved 的 systemd 单元名，但 resolvectl
+        # 能工作（例如容器）；以能否查询状态作为兜底判据。
+        code, _ = _run(["resolvectl", "status"])
+        return code == 0
+
+    def dns_query(self, name: str) -> str | None:
+        """优先走系统解析器（resolved），失败再直接问本机 dnsmasq。"""
+        code, out = _run(["resolvectl", "query", name])
+        if code == 0:
+            answer = _first_ip(out)
+            if answer is not None:
+                return answer
+        code, out = _run(
+            ["dig", "@127.0.0.1", "-p", str(self.dns_port), name, "+short"]
+        )
+        if code == 0:
+            return _first_ip(out)
+        return None
+
+    def http_ok(self, url: str) -> bool:
+        code, _ = _run(["curl", "-fsS", "--max-time", "3", url])
+        return code == 0
+
     def ca_trusted(self, ca: Path) -> bool:
         """CA 是否**真的在系统信任库里**。
 
@@ -146,10 +204,10 @@ class LinuxPlatform:
         dest = SYSTEM_CA_DEST
         if not dest.exists():
             return False
-        code, msg = _run(
+        code, _ = _run(
             ["openssl", "verify", "-CApath", str(SYSTEM_TRUST_DIR), str(ca)]
         )
-        if code == 127 and "命令不存在" in msg:
+        if code == 127:
             try:
                 return dest.read_text(encoding="utf-8") == ca.read_text(
                     encoding="utf-8"

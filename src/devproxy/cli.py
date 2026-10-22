@@ -47,6 +47,11 @@ EXIT_USAGE = 2
 EXIT_PRECONDITION = 3
 EXIT_SUDO = 4
 
+TRUST_HINT = (
+    "提示：首次 devproxy up 会生成 CA，之后请运行 devproxy trust "
+    "让 curl/Chrome 信任。"
+)
+
 
 def fail(msg: str, code: int = EXIT_FAIL) -> None:
     """以统一形态输出错误并退出（Rich 渲染的一行错误，而非 traceback）。"""
@@ -101,6 +106,19 @@ def build_context(
     return paths, config, store, admin
 
 
+def _require_caddyfile(paths: Paths) -> None:
+    """up/expose 的前置条件：主 Caddyfile 必须已由 setup 生成。
+
+    否则 RouteStore.mutate → CaddyConfig.reload() 会以“reload 失败”退出 1，
+    把“还没 setup”误导成运行故障。按 §9.1 属于前置条件不满足（退出码 3）。
+    """
+    if not paths.caddyfile.exists():
+        fail(
+            f"主 Caddyfile 不存在: {paths.caddyfile}；请先运行 devproxy setup",
+            EXIT_PRECONDITION,
+        )
+
+
 @app.command(context_settings={"ignore_unknown_options": True})
 def up(
     ctx: typer.Context,
@@ -118,7 +136,8 @@ def up(
         err_console.print("缺少启动命令：-- 之后需要 CMD...")
         raise typer.Exit(EXIT_FAIL)
 
-    _, config, store, admin = build_context()
+    paths, config, store, admin = build_context()
+    _require_caddyfile(paths)
     runner = UpRunner(store, config, admin)
 
     def on_ready(domain: str, allocated: int) -> None:
@@ -153,7 +172,8 @@ def expose(
     if not (1 <= port <= 65535):
         fail(f"非法端口 {port}：必须在 1..65535 之间")
 
-    _, config, store, admin = build_context()
+    paths, config, store, admin = build_context()
+    _require_caddyfile(paths)
     # expose 注册的是常驻活路由，reload 必须真的发生 —— Caddy 未运行属于
     # 前置条件不满足（退出码 3），而不是写表失败的运行错误（退出码 1）
     if not admin.is_alive():
@@ -302,14 +322,35 @@ def _components(paths, config, dns_backend=None):
 
 
 def _dns_backend(value: str | None, config: Config) -> str:
-    """解析并校验 DNS 后端。非法值直接拒绝，别悄悄当成 auto。"""
-    backend = value or config.dns_backend
+    """解析并校验 DNS 后端。非法值直接拒绝，别悄悄当成 auto。
+
+    显式传空字符串（--dns-backend ""）是参数错误，不能因为
+    `"" or ...` 的 falsy 语义悄悄退回配置值。
+    """
+    backend = config.dns_backend if value is None else value
     if backend not in DNS_BACKENDS:
         fail(
             f"dns_backend 必须是 {' / '.join(DNS_BACKENDS)}，当前值 {backend!r}",
             EXIT_USAGE,
         )
     return backend
+
+
+def _status_cell(status) -> str:
+    """表格里的“现状”列。
+
+    ok 但 detail 是一条提示（如“尚无 CA 根证书…”）时必须如实展示 ——
+    只写“✔ 就绪”会把“还需要 devproxy trust”这一关键信息藏起来。
+    """
+    if not status.ok:
+        return "✗ " + escape(status.detail)
+    if status.detail and "尚无" in status.detail:
+        return "✔ " + escape(status.detail)
+    return "✔ 就绪"
+
+
+def _interactive() -> bool:
+    return sys.stdin.isatty()
 
 
 @app.command()
@@ -343,7 +384,7 @@ def setup(
     for r in plan.reports:
         table.add_row(
             r.name,
-            "✔ 就绪" if r.status.ok else "✗ " + escape(r.status.detail),
+            _status_cell(r.status),
             "\n".join(escape(a.description) for a in r.actions) or "—",
         )
     console.print(table)
@@ -352,6 +393,8 @@ def setup(
         unhealthy = [r for r in plan.reports if not r.status.ok]
         if not unhealthy:
             console.print("所有组件已就绪，无需变更。")
+            if any("尚无" in r.status.detail for r in plan.reports if r.status.ok):
+                console.print(TRUST_HINT)
             raise typer.Exit(EXIT_OK)
         # 没有可执行的动作、但组件本身不健康 —— 不能谎报"已就绪"
         for r in unhealthy:
@@ -368,6 +411,17 @@ def setup(
             err_console.print("非交互环境且未指定 --yes，拒绝执行需要提权的步骤。")
             raise typer.Exit(EXIT_SUDO)
 
+    # 交互模式下的最后确认（§6.1）；--yes 或非交互环境直接跳过。
+    if not yes and _interactive():
+        prompt = (
+            f"以上 {len(plan.needs_sudo)} 项需要 sudo，继续？"
+            if plan.needs_sudo
+            else "即将执行以上变更，继续？"
+        )
+        if not typer.confirm(prompt, default=True):
+            console.print("已取消。")
+            raise typer.Exit(EXIT_OK)
+
     results = apply_plan(plan)
     ok = True
     for name, status in results:
@@ -380,6 +434,7 @@ def setup(
     if not ok:
         raise typer.Exit(EXIT_FAIL)
     console.print("完成。试试: devproxy up demo -- python3 -m http.server")
+    console.print(TRUST_HINT)
 
 
 @app.command()
@@ -440,14 +495,19 @@ def logs(
 ) -> None:
     """跟踪服务日志。"""
     if service not in ("caddy", "dnsmasq"):
+        # 参数错误按全局约定退出 2（§9.1），而不是运行失败 1
         err_console.print(f"devproxy: 未知服务 {service}（可选 caddy / dnsmasq）")
-        raise typer.Exit(EXIT_FAIL)
+        raise typer.Exit(EXIT_USAGE)
     try:
         # 只读命令：不碰 build_context（它会在用户家目录里建文件）
         _platform().tail_service_log(service)
     except PermissionError as e:
         err_console.print(f"devproxy: {escape(str(e))}")
         raise typer.Exit(EXIT_SUDO)
+    except OSError as e:
+        # journalctl 不存在等：干净报错，不要把 FileNotFoundError 漏成 traceback
+        err_console.print(f"devproxy: 无法读取 {service} 日志: {escape(str(e))}")
+        raise typer.Exit(EXIT_FAIL)
 
 
 def main() -> None:

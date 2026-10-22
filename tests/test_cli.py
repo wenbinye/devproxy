@@ -53,6 +53,8 @@ def _patch_ctx(monkeypatch, tmp_path, admin_alive=True):
     """替换 build_context，注入假 Caddy 与假 Admin API。"""
     paths = Paths(tmp_path / "config", tmp_path / "state", tmp_path / "data")
     paths.ensure_files()
+    # up/expose 以主 Caddyfile 存在为前置条件（缺了应先 devproxy setup）
+    paths.caddyfile.write_text("# test Caddyfile\n", encoding="utf-8")
     cfg = Config(storage=str(paths.data_dir))
     store = RouteStore(paths, cfg, FakeCaddy())
     admin = FakeAdmin(alive=admin_alive)
@@ -197,6 +199,24 @@ def test_expose_when_caddy_not_running_exits_3(env, monkeypatch):
     assert res.exit_code == 3, res.output
     assert "Caddy" in res.output
     assert not (env / "state" / "routes.json").exists(), "前置条件不满足时不得写路由表"
+
+
+def test_up_without_main_caddyfile_exits_3_and_points_at_setup(env, monkeypatch):
+    """还没 setup（主 Caddyfile 不存在）是前置条件问题，不是 reload 运行失败。"""
+    paths, _, _ = _patch_ctx(monkeypatch, env)
+    paths.caddyfile.unlink()
+    res = CliRunner().invoke(app, ["up", "codeup", "--", "sleep", "5"])
+    assert res.exit_code == 3, res.output
+    assert "devproxy setup" in res.output
+
+
+def test_expose_without_main_caddyfile_exits_3(env, monkeypatch):
+    paths, _, _ = _patch_ctx(monkeypatch, env)
+    paths.caddyfile.unlink()
+    res = CliRunner().invoke(app, ["expose", "legacy", "--port", "3000"])
+    assert res.exit_code == 3, res.output
+    assert "devproxy setup" in res.output
+    assert not (env / "state" / "routes.json").exists()
 
 
 # ---------------------------------------------------- I-2: 路由表损坏要干净报错

@@ -7,8 +7,10 @@ Caddy 版本固定，sha256 内置在源码里 —— 上游发布的 checksums.
 from __future__ import annotations
 
 import hashlib
+import os
 import platform as _platform
 import shutil
+import subprocess
 import tarfile
 import tempfile
 import urllib.request
@@ -37,10 +39,21 @@ def caddy_asset_name(os_name: str, arch: str, version: str = CADDY_VERSION) -> s
 
 
 def current_platform_key() -> tuple[str, str]:
+    """返回 (os, arch)。未知平台直接报错，绝不悄悄退回 amd64。"""
     system = _platform.system().lower()
-    os_name = "mac" if system == "darwin" else "linux"
     machine = _platform.machine().lower()
-    arch = "arm64" if machine in ("arm64", "aarch64") else "amd64"
+    if system == "darwin":
+        os_name = "mac"
+    elif system == "linux":
+        os_name = "linux"
+    else:
+        raise RuntimeError(f"不支持的平台: {system}/{machine}")
+    if machine in ("arm64", "aarch64"):
+        arch = "arm64"
+    elif machine in ("x86_64", "amd64"):
+        arch = "amd64"
+    else:
+        raise RuntimeError(f"不支持的平台: {system}/{machine}")
     return os_name, arch
 
 
@@ -52,29 +65,64 @@ def _sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def _binary_version(binary: Path) -> str:
+    """运行 `caddy version`，返回首个字段（如 v2.11.7）；失败返回空串。"""
+    try:
+        proc = subprocess.run(
+            [str(binary), "version"], capture_output=True, text=True, timeout=10
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    if proc.returncode != 0:
+        return ""
+    out = (proc.stdout or proc.stderr).strip()
+    return out.split()[0] if out else ""
+
+
 def download_caddy(dest: Path, version: str = CADDY_VERSION) -> None:
-    """下载并校验后解包出 caddy 二进制。校验失败必须抛异常，不留半个文件。"""
+    """下载并校验后解包出 caddy 二进制。校验失败必须抛异常，不留半个文件。
+
+    校验分两层：内置 sha256（下载包）与 `caddy version`（解包后的二进制）。
+    落盘用同目录临时文件 + os.replace —— 旧二进制正在运行时直接覆盖会
+    触发 ETXTBSY，且半写的二进制会被后续动作当成可用。
+    """
     os_name, arch = current_platform_key()
     key = (os_name, arch)
     if key not in CADDY_SHA256:
         raise RuntimeError(f"不支持的平台: {os_name}/{arch}")
     asset = caddy_asset_name(os_name, arch, version)
     url = RELEASE_BASE.format(version=version) + "/" + asset
-    with tempfile.TemporaryDirectory(prefix="devproxy-caddy-") as tmp:
-        tgz = Path(tmp) / asset
-        with urllib.request.urlopen(url, timeout=120) as r, open(tgz, "wb") as f:
-            shutil.copyfileobj(r, f)
-        actual = _sha256_file(tgz)
-        expected = CADDY_SHA256[key]
-        if actual != expected:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=".caddy-download-", dir=dest.parent)
+    tmp_dest = Path(tmp_name)
+    try:
+        with tempfile.TemporaryDirectory(prefix="devproxy-caddy-") as tmp:
+            tgz = Path(tmp) / asset
+            with urllib.request.urlopen(url, timeout=120) as r, open(tgz, "wb") as f:
+                shutil.copyfileobj(r, f)
+            actual = _sha256_file(tgz)
+            expected = CADDY_SHA256[key]
+            if actual != expected:
+                raise RuntimeError(
+                    f"caddy 包校验失败（{asset}）\n"
+                    f"  期望 sha256: {expected}\n  实际 sha256: {actual}"
+                )
+            with tarfile.open(tgz) as tf:
+                member = tf.getmember("caddy")
+                with tf.extractfile(member) as src, os.fdopen(fd, "wb") as out:
+                    fd = -1  # 已交给 fdopen 管理，避免重复关闭
+                    shutil.copyfileobj(src, out)
+        tmp_dest.chmod(0o755)
+        actual_version = _binary_version(tmp_dest)
+        if actual_version != f"v{version}":
             raise RuntimeError(
-                f"caddy 包校验失败（{asset}）\n  期望 sha256: {expected}\n  实际 sha256: {actual}"
+                f"caddy 二进制版本不符: 期望 v{version}，实际 {actual_version or '无法执行'}"
             )
-        with tarfile.open(tgz) as tf:
-            member = tf.getmember("caddy")
-            with tf.extractfile(member) as src, open(dest, "wb") as out:
-                shutil.copyfileobj(src, out)
-    dest.chmod(0o755)
+        os.replace(tmp_dest, dest)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        tmp_dest.unlink(missing_ok=True)
 
 
 def render_unit(
@@ -84,7 +132,14 @@ def render_unit(
     admin_addr: str,
     env: dict[str, str] | None = None,
 ) -> str:
-    """生成 systemd user 单元。形态与现有的 caddy.service 保持一致。"""
+    """生成 systemd user 单元。形态与现有的 caddy.service 保持一致。
+
+    systemd 单元不做 shell 引号解析：路径里的空白会截断 ExecStart 的参数。
+    caddy_bin / caddyfile 来自配置（用户可改），必须在这里拦住。
+    """
+    for label, value in (("caddy_bin", caddy_bin), ("caddyfile", caddyfile)):
+        if any(c.isspace() for c in str(value)):
+            raise RuntimeError(f"{label} 路径不能包含空白字符: {value}")
     lines = [
         "[Unit]",
         "Description=Caddy local HTTP/HTTPS server (managed by devproxy)",
@@ -129,6 +184,27 @@ class CaddyComponent:
         # 下载属网络操作，默认走真实下载器；测试可注入假实现，保持离线。
         self._downloader = downloader or download_caddy
 
+    # -- 判据 ----------------------------------------------------------
+    def _caddyfile_current(self) -> bool:
+        """主 Caddyfile 是否存在且内容与该组件会生成的一致。"""
+        expected = self._main_caddyfile()
+        try:
+            return (
+                self.paths.caddyfile.exists()
+                and self.paths.caddyfile.read_text(encoding="utf-8") == expected
+            )
+        except (OSError, UnicodeDecodeError):
+            return False
+
+    def _unit_current(self) -> bool:
+        """已安装的单元是否把 ExecStart 指向本工具的主 Caddyfile。"""
+        unit = self.platform.service_unit_path("caddy")
+        try:
+            text = unit.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return False
+        return f"run --config {self.paths.caddyfile}" in text
+
     # -- check ---------------------------------------------------------
     def check(self) -> Status:
         binary = self.config.caddy_bin_path
@@ -145,6 +221,18 @@ class CaddyComponent:
                 detail=f"caddy 版本不符: 期望 v{CADDY_VERSION}，实际 {version}",
                 hint="devproxy setup 会替换为固定版本",
             )
+        if not self._caddyfile_current():
+            return Status(
+                ok=False,
+                detail=f"主 Caddyfile 不存在或已过期: {self.paths.caddyfile}",
+                hint="devproxy setup 会重新生成主 Caddyfile",
+            )
+        if not self._unit_current():
+            return Status(
+                ok=False,
+                detail="caddy 服务单元未指向本工具的 Caddyfile",
+                hint="devproxy setup 会重装 systemd user 单元",
+            )
         if not self.platform.service_active("caddy"):
             return Status(
                 ok=False,
@@ -155,17 +243,22 @@ class CaddyComponent:
 
     # -- plan ----------------------------------------------------------
     def plan(self) -> list[Action]:
-        """就绪标准 = 二进制在位、版本匹配、服务 active。
+        """按缺失项给出动作；全部就绪时返回空列表。
 
-        一切就绪时返回空列表；否则按缺失项给出动作。
-        setcap 与下载绑定 —— 新下载的二进制才需要重新授权；
-        Caddyfile 随服务安装一并生成（sites.caddy 属用户，只 import 不碰）。
+        主 Caddyfile 与单元内容都是**独立判据**：本机就出现过二进制度对、
+        服务 active，但单元仍指向旧 Caddyfile、主 Caddyfile 根本不存在，
+        导致 setup 报“已就绪”而 up 时 reload 必然失败。
+        setcap 与下载/服务绑定 —— 新下载的二进制或服务没起来时才需要重新授权。
         """
-        actions: list[Action] = []
         binary = self.config.caddy_bin_path
-        status = self.check()
-        need_binary = "二进制不存在" in status.detail or "版本不符" in status.detail
+        version = self.platform.binary_version(binary) if binary.exists() else ""
+        need_binary = not binary.exists() or version != f"v{CADDY_VERSION}"
+        need_caddyfile = not self._caddyfile_current()
+        need_unit = not self._unit_current()
         need_service = not self.platform.service_active("caddy")
+        need_linger = not self.platform.linger_enabled()
+
+        actions: list[Action] = []
         if need_binary:
             actions.append(
                 Action(
@@ -185,7 +278,7 @@ class CaddyComponent:
                     privileged=True,
                 )
             )
-        if need_service:
+        if need_caddyfile:
             actions.append(
                 Action(
                     description="生成主 Caddyfile",
@@ -194,11 +287,21 @@ class CaddyComponent:
                     content=self._main_caddyfile(),
                 )
             )
+        if need_service or need_unit:
             actions.append(
                 Action(
                     description="安装并启动 caddy.service（systemd user）",
                     kind="run",
                     command=["install-service", "caddy"],
+                )
+            )
+        if need_linger:
+            actions.append(
+                Action(
+                    description="启用 linger（用户服务开机自启，无需登录）",
+                    kind="run",
+                    command=["enable-linger"],
+                    privileged=True,
                 )
             )
         return actions
@@ -218,9 +321,15 @@ class CaddyComponent:
                 self._downloader(binary)
                 continue
             if action.command[:1] == ["setcap"]:
-                self.platform.privilege().run(action.command)
+                code, msg = self.platform.privilege().run(action.command)
+                if code != 0:
+                    raise RuntimeError(
+                        "setcap 失败（caddy 无法绑定 80/443）："
+                        f"{msg}；请先安装 libcap2-bin（sudo apt install libcap2-bin）"
+                    )
                 continue
             if action.command[:1] == ["install-service"]:
+                was_active = self.platform.service_active("caddy")
                 unit = render_unit(
                     caddy_bin=binary,
                     caddyfile=self.paths.caddyfile,
@@ -228,12 +337,39 @@ class CaddyComponent:
                 )
                 self.platform.install_service("caddy", unit)
                 self.platform.enable_service("caddy")
+                if was_active:
+                    # 单元文件已换（如 ExecStart 指向新 Caddyfile），
+                    # enable --now 对已 active 的单元不会重启，必须显式 restart。
+                    self.platform.restart_service("caddy")
+                continue
+            if action.command[:1] == ["enable-linger"]:
+                code, msg = self.platform.enable_linger()
+                if code != 0:
+                    raise RuntimeError(f"loginctl enable-linger 失败: {msg}")
                 continue
             raise RuntimeError(f"未知动作: {action.command}")
 
+    def _has_configured_site(self) -> bool:
+        """是否有任何真实站点（注释/空行不算）。
+
+        干净机器上 Caddyfile 只 import 两个空文件，Caddy 不会监听 443 ——
+        此时 TLS 探测不可执行，应保持“ok + 提示”而不是把 setup 判成失败。
+        """
+        for path in (self.paths.routes_caddy, self.paths.sites_caddy):
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            if any(
+                line.strip() and not line.strip().startswith("#")
+                for line in text.splitlines()
+            ):
+                return True
+        return False
+
     # -- verify --------------------------------------------------------
     def verify(self) -> Status:
-        """apply 后自检：二进制在位且服务 active，二者缺一不可。"""
+        """apply 后自检：二进制、服务 active、且真的能完成 TLS 握手。"""
         if not self.config.caddy_bin_path.exists():
             return Status(
                 ok=False,
@@ -246,7 +382,18 @@ class CaddyComponent:
                 detail="caddy 服务未处于 active",
                 hint="systemctl --user status caddy",
             )
-        return Status(ok=True, detail="caddy 服务运行中")
+        if not self._has_configured_site():
+            return Status(
+                ok=True,
+                detail="caddy 服务运行中（尚无站点，跳过 TLS 探测）",
+            )
+        if not self.platform.http_ok("https://localhost"):
+            return Status(
+                ok=False,
+                detail="https://localhost TLS 握手失败",
+                hint="systemctl --user status caddy；检查 Caddyfile 与 443 端口占用",
+            )
+        return Status(ok=True, detail="caddy 服务运行中，https://localhost 可访问")
 
     def _main_caddyfile(self) -> str:
         from devproxy.proxy.caddy import build_main_caddyfile

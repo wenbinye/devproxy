@@ -9,8 +9,11 @@ from devproxy.components.caddy import (
     CADDY_SHA256,
     CADDY_VERSION,
     CaddyComponent,
+    _binary_version,
     caddy_asset_name,
+    current_platform_key,
     download_caddy,
+    render_unit,
 )
 from devproxy.config import Config
 from devproxy.paths import Paths
@@ -38,6 +41,25 @@ def _component(tmp_path, platform=None, downloader=None):
     return comp, paths, cfg
 
 
+def _make_ready(comp, platform, cfg) -> None:
+    """把二进制、主 Caddyfile、单元、服务、linger 全部置为就绪。"""
+    binary = Path(cfg.caddy_bin)
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    binary.write_text("#!/bin/sh\n")
+    binary.chmod(0o755)
+    comp.paths.caddyfile.write_text(comp._main_caddyfile(), encoding="utf-8")
+    platform.install_service(
+        "caddy",
+        render_unit(
+            caddy_bin=binary,
+            caddyfile=comp.paths.caddyfile,
+            admin_addr=cfg.admin_addr,
+        ),
+    )
+    platform.active.add("caddy")
+    platform.linger = True
+
+
 def test_asset_name_uses_mac_not_darwin():
     assert caddy_asset_name("mac", "arm64") == f"caddy_{CADDY_VERSION}_mac_arm64.tar.gz"
     assert caddy_asset_name("linux", "amd64") == f"caddy_{CADDY_VERSION}_linux_amd64.tar.gz"
@@ -58,13 +80,65 @@ def test_check_ok_when_binary_and_service_ready(tmp_path):
     comp, paths, cfg = _component(tmp_path)
     platform = FakePlatform()
     comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
-    binary = Path(cfg.caddy_bin)
-    binary.parent.mkdir(parents=True, exist_ok=True)
-    binary.write_text("#!/bin/sh\n")
-    binary.chmod(0o755)
-    platform.active.add("caddy")
+    _make_ready(comp, platform, cfg)
     status = comp.check()
     assert status.ok is True, status.detail
+
+
+def test_check_not_ok_when_caddyfile_missing(tmp_path):
+    """二进制/服务都对，但主 Caddyfile 不存在 —— 不能报“已就绪”。"""
+    comp, paths, cfg = _component(tmp_path)
+    platform = FakePlatform()
+    comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
+    _make_ready(comp, platform, cfg)
+    paths.caddyfile.unlink()
+    status = comp.check()
+    assert status.ok is False
+    assert "Caddyfile" in status.detail
+    assert status.hint
+    actions = comp.plan()
+    assert any(
+        a.kind == "write" and a.path == paths.caddyfile for a in actions
+    ), "Caddyfile 缺失时 plan 必须包含生成动作"
+
+
+def test_check_not_ok_when_caddyfile_stale(tmp_path):
+    comp, paths, cfg = _component(tmp_path)
+    platform = FakePlatform()
+    comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
+    _make_ready(comp, platform, cfg)
+    paths.caddyfile.write_text("旧的配置\n", encoding="utf-8")
+    assert comp.check().ok is False
+    assert any(
+        a.kind == "write" and a.path == paths.caddyfile for a in comp.plan()
+    )
+
+
+def test_plan_reinstalls_unit_when_execstart_points_elsewhere(tmp_path):
+    """运维遗留：单元还指向旧 Caddyfile，服务却是 active。"""
+    comp, paths, cfg = _component(tmp_path)
+    platform = FakePlatform()
+    comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
+    _make_ready(comp, platform, cfg)
+    platform.install_service(
+        "caddy",
+        render_unit(
+            caddy_bin=Path(cfg.caddy_bin),
+            caddyfile=tmp_path / "old" / "Caddyfile",
+            admin_addr=cfg.admin_addr,
+        ),
+    )
+    assert comp.check().ok is False
+    actions = comp.plan()
+    assert any(a.command[:1] == ["install-service"] for a in actions)
+
+
+def test_plan_is_empty_when_everything_ready(tmp_path):
+    comp, paths, cfg = _component(tmp_path)
+    platform = FakePlatform()
+    comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
+    _make_ready(comp, platform, cfg)
+    assert comp.plan() == []
 
 
 def test_check_missing_binary_reports_hint(tmp_path):
@@ -81,18 +155,6 @@ def test_plan_includes_download_when_binary_missing(tmp_path):
     kinds = [a.description for a in actions]
     assert any("下载" in d for d in kinds)
     assert any(a.privileged for a in actions), "setcap 需要提权"
-
-
-def test_plan_is_empty_when_everything_ready(tmp_path):
-    comp, paths, cfg = _component(tmp_path)
-    platform = FakePlatform()
-    comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
-    binary = Path(cfg.caddy_bin)
-    binary.parent.mkdir(parents=True, exist_ok=True)
-    binary.write_text("#!/bin/sh\n")
-    binary.chmod(0o755)
-    platform.active.add("caddy")
-    assert comp.plan() == []
 
 
 def test_apply_writes_unit_and_enables_service(tmp_path):
@@ -192,3 +254,184 @@ def test_plan_replans_setcap_when_binary_present_but_service_inactive(tmp_path):
     assert any("setcap" in d for d in descriptions)
     assert any(a.privileged for a in actions)
     assert any(a.command[:1] == ["install-service"] for a in actions)
+
+
+# -- 单元、平台、下载的下限校验 ---------------------------------------------
+
+
+def test_render_unit_rejects_whitespace_in_paths():
+    with pytest.raises(RuntimeError, match="空白"):
+        render_unit(
+            caddy_bin=Path("/opt/my caddy/caddy"),
+            caddyfile=Path("/home/u/.config/devproxy/Caddyfile"),
+            admin_addr="127.0.0.1:2019",
+        )
+    with pytest.raises(RuntimeError, match="空白"):
+        render_unit(
+            caddy_bin=Path("/opt/caddy"),
+            caddyfile=Path("/home/u/my config/Caddyfile"),
+            admin_addr="127.0.0.1:2019",
+        )
+
+
+def test_current_platform_key_rejects_unknown_arch(monkeypatch):
+    import devproxy.components.caddy as caddy_mod
+
+    monkeypatch.setattr(caddy_mod._platform, "system", lambda: "Linux")
+    monkeypatch.setattr(caddy_mod._platform, "machine", lambda: "ppc64le")
+    with pytest.raises(RuntimeError, match="不支持的平台"):
+        current_platform_key()
+
+
+def test_current_platform_key_rejects_unknown_os(monkeypatch):
+    import devproxy.components.caddy as caddy_mod
+
+    monkeypatch.setattr(caddy_mod._platform, "system", lambda: "Windows")
+    monkeypatch.setattr(caddy_mod._platform, "machine", lambda: "AMD64")
+    with pytest.raises(RuntimeError, match="不支持的平台"):
+        current_platform_key()
+
+
+def test_binary_version_parses_real_binary_output(tmp_path):
+    binary = tmp_path / "caddy"
+    binary.write_text('#!/bin/sh\necho "v2.11.7 h1:abc="\n')
+    binary.chmod(0o755)
+    assert _binary_version(binary) == "v2.11.7"
+
+
+def test_binary_version_empty_when_binary_not_executable(tmp_path):
+    binary = tmp_path / "caddy"
+    binary.write_text("not executable\n")
+    binary.chmod(0o644)
+    assert _binary_version(binary) == ""
+
+
+class _FakeTar:
+    """最小可用的 tar 上下文：只提供 getmember / extractfile。"""
+
+    def __init__(self, payload: bytes):
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def getmember(self, name):
+        return name
+
+    def extractfile(self, member):
+        return io.BytesIO(self.payload)
+
+
+def _patch_download(monkeypatch, payload: bytes):
+    import devproxy.components.caddy as caddy_mod
+
+    monkeypatch.setattr(caddy_mod, "current_platform_key", lambda: ("linux", "amd64"))
+    monkeypatch.setattr(
+        caddy_mod.urllib.request, "urlopen", lambda url, timeout: io.BytesIO(b"tgz")
+    )
+    monkeypatch.setattr(caddy_mod, "_sha256_file", lambda path: CADDY_SHA256[("linux", "amd64")])
+    monkeypatch.setattr(caddy_mod.tarfile, "open", lambda path: _FakeTar(payload))
+
+
+def test_download_caddy_verifies_binary_version_and_replaces_atomically(
+    tmp_path, monkeypatch
+):
+    _patch_download(monkeypatch, b'#!/bin/sh\necho "v' + CADDY_VERSION.encode() + b'"\n')
+    dest = tmp_path / "bin" / "caddy"
+    download_caddy(dest)
+    assert dest.exists()
+    assert dest.stat().st_mode & 0o111, "二进制必须可执行"
+    # 同目录临时文件不得残留
+    assert list(dest.parent.glob(".caddy-download-*")) == []
+
+
+def test_download_caddy_rejects_wrong_binary_version(tmp_path, monkeypatch):
+    _patch_download(monkeypatch, b'#!/bin/sh\necho "v0.0.1"\n')
+    dest = tmp_path / "bin" / "caddy"
+    with pytest.raises(RuntimeError, match="版本不符"):
+        download_caddy(dest)
+    assert not dest.exists(), "版本不符时不能留下目标文件"
+    assert list(dest.parent.glob(".caddy-download-*")) == []
+
+
+def test_setcap_failure_raises_with_libcap_hint(tmp_path):
+    comp, paths, cfg = _component(tmp_path)
+    platform = FakePlatform()
+
+    class FailingElevated:
+        def run(self, argv):
+            return 1, "setcap: command not found"
+
+        def write(self, path, content):
+            pass
+
+        def read(self, path):
+            return ""
+
+        def copy(self, src, dest):
+            pass
+
+    platform.privilege = lambda: FailingElevated()
+    comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
+    with pytest.raises(RuntimeError, match="libcap2-bin"):
+        comp.apply(comp.plan())
+
+
+def test_plan_includes_enable_linger_when_missing(tmp_path):
+    comp, paths, cfg = _component(tmp_path)
+    platform = FakePlatform()
+    comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
+    _make_ready(comp, platform, cfg)
+    platform.linger = False
+    actions = comp.plan()
+    linger = [a for a in actions if a.command[:1] == ["enable-linger"]]
+    assert linger and linger[0].privileged is True
+
+
+def test_apply_enables_linger(tmp_path):
+    comp, paths, cfg = _component(tmp_path)
+    platform = FakePlatform()
+    comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
+    _make_ready(comp, platform, cfg)
+    platform.linger = False
+    comp.apply(comp.plan())
+    assert platform.linger is True
+
+
+def test_verify_checks_real_tls_handshake(tmp_path):
+    comp, paths, cfg = _component(tmp_path)
+    platform = FakePlatform()
+    comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
+    _make_ready(comp, platform, cfg)
+    paths.sites_caddy.write_text("localhost { respond \"hi\" }\n", encoding="utf-8")
+    status = comp.verify()
+    assert status.ok is True, status.detail
+    assert "https://localhost" in platform.http_probes
+
+
+def test_verify_fails_when_tls_probe_fails(tmp_path):
+    comp, paths, cfg = _component(tmp_path)
+    platform = FakePlatform()
+    comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
+    _make_ready(comp, platform, cfg)
+    paths.sites_caddy.write_text("localhost { respond \"hi\" }\n", encoding="utf-8")
+    platform.http_result = False
+    status = comp.verify()
+    assert status.ok is False
+    assert "TLS" in status.detail
+    assert status.hint
+
+
+def test_verify_skips_tls_probe_when_no_site_configured(tmp_path):
+    """干净机器上还没有任何站点 —— TLS 不可执行，保持 ok + 提示。"""
+    comp, paths, cfg = _component(tmp_path)
+    platform = FakePlatform()
+    comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
+    _make_ready(comp, platform, cfg)
+    status = comp.verify()
+    assert status.ok is True
+    assert "尚无站点" in status.detail
+    assert platform.http_probes == []

@@ -108,6 +108,38 @@ def test_build_plan_isolates_plan_exception():
     assert plan.reports[1].status.ok is True
 
 
+def test_apply_plan_keeps_plan_failure_even_if_verify_would_pass():
+    """plan() 抛异常时组件什么都没做 —— verify() 成功也不能覆盖失败。"""
+
+    class PlanBoom(FakeComponent):
+        def plan(self):
+            raise RuntimeError("配置读不出来")
+
+        def verify(self):
+            return Status(ok=True, detail="服务在跑")
+
+    c = PlanBoom("bad", Status(ok=True))
+    results = apply_plan(build_plan([c]))
+    status = dict(results)["bad"]
+    assert status.ok is False
+    assert "配置读不出来" in status.detail
+
+
+def test_apply_plan_keeps_check_failure_even_if_verify_would_pass():
+    class CheckBoom(FakeComponent):
+        def check(self):
+            raise PermissionError("二进制不可执行")
+
+        def verify(self):
+            return Status(ok=True, detail="服务在跑")
+
+    c = CheckBoom("bad", Status(ok=True))
+    results = apply_plan(build_plan([c]))
+    status = dict(results)["bad"]
+    assert status.ok is False
+    assert "二进制不可执行" in status.detail
+
+
 # -- CLI：setup 编排 --------------------------------------------------------
 
 
@@ -293,3 +325,72 @@ def test_cli_setup_noop_with_unhealthy_component_exits_precondition(
     result = CliRunner().invoke(app, ["setup"])
     assert result.exit_code == 3
     assert "坏了" in result.stdout or "坏了" in result.stderr
+
+
+def test_cli_setup_shows_cert_note_and_trust_hint(tmp_path, monkeypatch):
+    """CA 尚未生成时，表格必须展示提示，结尾必须告诉用户 devproxy trust。"""
+    from typer.testing import CliRunner
+
+    from devproxy.cli import app
+
+    comps = [
+        FakeCliComponent(
+            "cert", Status(ok=True, detail="尚无 CA 根证书（将在首条路由注册时由 Caddy 生成）")
+        )
+    ]
+    _patch_cli(monkeypatch, tmp_path, comps)
+    result = CliRunner().invoke(app, ["setup", "--yes"])
+    assert result.exit_code == 0, result.stdout
+    assert "尚无 CA" in result.stdout
+    assert "devproxy trust" in result.stdout
+
+
+def test_cli_setup_rejects_explicit_empty_dns_backend(tmp_path, monkeypatch):
+    """--dns-backend "" 是参数错误，不能靠 falsy 悄悄退回 auto。"""
+    from typer.testing import CliRunner
+
+    from devproxy.cli import app
+
+    comps = [FakeCliComponent("caddy")]
+    _patch_cli(monkeypatch, tmp_path, comps)
+    result = CliRunner().invoke(app, ["setup", "--dns-backend", ""])
+    assert result.exit_code == 2
+    assert comps[0].applied is None
+
+
+def test_cli_setup_asks_for_confirmation_interactively(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    from devproxy.cli import app
+
+    comps = [
+        FakeCliComponent("caddy", Status(ok=False, detail="缺"), [Action(description="写文件")])
+    ]
+    _patch_cli(monkeypatch, tmp_path, comps)
+    monkeypatch.setattr("devproxy.cli._interactive", lambda: True)
+    asked = []
+    monkeypatch.setattr(
+        "devproxy.cli.typer.confirm",
+        lambda prompt, default=True: asked.append(prompt) or True,
+    )
+    result = CliRunner().invoke(app, ["setup"])
+    assert result.exit_code == 0, result.stdout
+    assert asked, "交互模式必须先确认"
+    assert comps[0].applied is not None
+
+
+def test_cli_setup_aborts_when_user_declines(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    from devproxy.cli import app
+
+    comps = [
+        FakeCliComponent("caddy", Status(ok=False, detail="缺"), [Action(description="写文件")])
+    ]
+    _patch_cli(monkeypatch, tmp_path, comps)
+    monkeypatch.setattr("devproxy.cli._interactive", lambda: True)
+    monkeypatch.setattr("devproxy.cli.typer.confirm", lambda *a, **k: False)
+    result = CliRunner().invoke(app, ["setup"])
+    assert result.exit_code == 0
+    assert comps[0].applied is None
+    assert "已取消" in result.stdout

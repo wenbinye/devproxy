@@ -70,9 +70,28 @@ class Platform(Protocol):
 
     def tail_service_log(self, name: str) -> None: ...
 
+    def enable_linger(self) -> tuple[int, str]:
+        """`loginctl enable-linger <user>`：让 user unit 开机自启、无需登录。"""
+
+    def linger_enabled(self) -> bool:
+        """当前用户是否已启用 linger（只读探测）。"""
+
+    def resolved_active(self) -> bool:
+        """systemd-resolved 是否真的在运行（auto DNS 后端的判据）。"""
+
+    def dns_query(self, name: str) -> str | None:
+        """按工具预期的路径解析域名，返回首个 A/AAAA 答案；失败返回 None。"""
+
+    def http_ok(self, url: str) -> bool:
+        """有超时上限的本地 HTTP(S) 探测；成功（2xx/3xx）返回 True。"""
+
     def ca_trusted(self, ca: Path) -> bool: ...
 
     def nss_trusted(self, ca: Path) -> bool:
-        """NSS 库（Chrome/Chromium 的信任库）里是否已有该 CA。"""
+        """NSS 库（Chrome/Chromium 的信任库）里存的证书**内容**是否就是该 CA。
+
+        注意：这是内容比对，不是“同名条目是否存在”—— Caddy 重新生成 CA 后
+        旧条目仍在，只按 nickname 判定会误报“已信任”。
+        """
 
     def dns_route_installed(self, backend: str) -> bool: ...

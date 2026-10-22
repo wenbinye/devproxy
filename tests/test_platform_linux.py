@@ -345,3 +345,141 @@ def test_fake_platform_nss_trusted_tracks_its_own_set(tmp_path):
     assert p.nss_trusted(ca) is False
     p.nss.add(ca)
     assert p.nss_trusted(ca) is True
+
+
+# -- 特权写入前建父目录（干净机器上 /etc/... 目录可能不存在） ----------------
+
+
+def test_linux_elevated_write_creates_parent_dir_before_cp(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_run(argv):
+        calls.append(list(argv))
+        return 0, ""
+
+    monkeypatch.setattr(linux_mod, "_run", fake_run)
+    target = tmp_path / "etc" / "dnsmasq.d" / "devproxy.conf"
+    linux_mod.LinuxElevated().write(target, "hello")
+
+    install = [c for c in calls if c[:2] == ["sudo", "install"]]
+    cp = [c for c in calls if c[:2] == ["sudo", "cp"]]
+    assert install and install[0][2:] == ["-d", str(target.parent)]
+    assert cp, "创建目录后仍须 cp 写入"
+    assert calls.index(install[0]) < calls.index(cp[0]), "install -d 必须在 cp 之前"
+
+
+def test_linux_elevated_write_raises_when_mkdir_fails(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        linux_mod,
+        "_run",
+        lambda argv: (0, "") if argv == ["sudo", "-v"] else (1, "permission denied"),
+    )
+    with pytest.raises(PermissionError, match="创建目录"):
+        linux_mod.LinuxElevated().write(tmp_path / "etc" / "devproxy.conf", "x")
+
+
+# -- resolved 活跃探测 / dns_query / http_ok --------------------------------
+
+
+def test_linux_resolved_active_true_from_systemctl(monkeypatch):
+    monkeypatch.setattr(
+        linux_mod, "_run", lambda argv: (0, "active") if "is-active" in argv else (1, "")
+    )
+    assert LinuxPlatform().resolved_active() is True
+
+
+def test_linux_resolved_active_falls_back_to_resolvectl(monkeypatch):
+    def fake_run(argv):
+        if "is-active" in argv:
+            return 1, "inactive"
+        if argv[:1] == ["resolvectl"]:
+            return 0, "Global"
+        return 1, ""
+
+    monkeypatch.setattr(linux_mod, "_run", fake_run)
+    assert LinuxPlatform().resolved_active() is True
+
+
+def test_linux_resolved_active_false_when_both_fail(monkeypatch):
+    monkeypatch.setattr(linux_mod, "_run", lambda argv: (1, "inactive"))
+    assert LinuxPlatform().resolved_active() is False
+
+
+def test_linux_dns_query_prefers_resolvectl(monkeypatch):
+    calls = []
+
+    def fake_run(argv):
+        calls.append(argv)
+        if argv[:2] == ["resolvectl", "query"]:
+            return 0, "foo.test: 127.0.0.1\n          127.0.0.1"
+        return 1, ""
+
+    monkeypatch.setattr(linux_mod, "_run", fake_run)
+    assert LinuxPlatform().dns_query("foo.test") == "127.0.0.1"
+    assert calls[0][:2] == ["resolvectl", "query"]
+
+
+def test_linux_dns_query_falls_back_to_dig(monkeypatch):
+    calls = []
+
+    def fake_run(argv):
+        calls.append(argv)
+        if argv[:2] == ["resolvectl", "query"]:
+            return 1, "not found"
+        if argv[:1] == ["dig"]:
+            return 0, "127.0.0.1\n::1"
+        return 1, ""
+
+    monkeypatch.setattr(linux_mod, "_run", fake_run)
+    assert LinuxPlatform().dns_query("foo.test") == "127.0.0.1"
+    assert any(c[:1] == ["dig"] for c in calls)
+
+
+def test_linux_dns_query_returns_none_when_unresolvable(monkeypatch):
+    monkeypatch.setattr(linux_mod, "_run", lambda argv: (1, "not found"))
+    assert LinuxPlatform().dns_query("foo.test") is None
+
+
+def test_linux_http_ok_uses_bounded_curl(monkeypatch):
+    calls = []
+
+    def fake_run(argv):
+        calls.append(argv)
+        return 0, ""
+
+    monkeypatch.setattr(linux_mod, "_run", fake_run)
+    assert LinuxPlatform().http_ok("https://localhost") is True
+    assert calls[0][:2] == ["curl", "-fsS"]
+    assert "--max-time" in calls[0]
+
+
+def test_linux_http_ok_false_on_curl_failure(monkeypatch):
+    monkeypatch.setattr(linux_mod, "_run", lambda argv: (7, "connection refused"))
+    assert LinuxPlatform().http_ok("https://localhost") is False
+
+
+# -- linger -----------------------------------------------------------------
+
+
+def test_linux_enable_linger_uses_sudo_loginctl(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        linux_mod,
+        "_run",
+        lambda argv: calls.append(argv) or (0, ""),
+    )
+    code, _ = LinuxPlatform().enable_linger()
+    assert code == 0
+    assert calls[0][:3] == ["sudo", "loginctl", "enable-linger"]
+
+
+def test_linux_linger_enabled_reads_value(monkeypatch):
+    monkeypatch.setattr(
+        linux_mod, "_run", lambda argv: (0, "yes") if "--value" in argv else (1, "")
+    )
+    assert LinuxPlatform().linger_enabled() is True
+
+
+def test_linux_linger_enabled_false(monkeypatch):
+    monkeypatch.setattr(linux_mod, "_run", lambda argv: (0, "no"))
+    assert LinuxPlatform().linger_enabled() is False
