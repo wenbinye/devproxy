@@ -1697,7 +1697,9 @@ git commit -m "📝 docs(devproxy): 重写 README、瘦身 Justfile、补真机�
 
 ## 全部三个计划完成后的收尾
 
-- [ ] **迁移旧测试资产**：`tests/test_devp.py`（967 行）逐条对照下表确认新测试已覆盖，确认后删除旧文件
+- [x] **迁移旧测试资产**：`tests/test_devp.py`（967 行）逐条对照下表确认新测试已覆盖，确认后删除旧文件
+      —— 已完成（2026-10-23）：旧文件与其覆盖的 68 个用例已删除，删除前的单元套件为
+      609 + 18 subtests，删除后为 541 + 18 subtests。
 
 | 旧用例（`tests/test_devp.py`） | 新归属 |
 |---|---|
@@ -1711,6 +1713,9 @@ git commit -m "📝 docs(devproxy): 重写 README、瘦身 Justfile、补真机�
 | 进程组信号转发 / 退出码 / 清理 | Plan 1 Task 5 `test_stop_process_group_kills_grandchildren`、`test_run_*` |
 | `devp selftest` 端到端 | Plan 1 Task 7 `tests/test_integration.py` + `devproxy selftest` |
 
-- [ ] 删除旧的 `devp` 单文件脚本与 `tests/test_devp.py`（逻辑已并入 `src/devproxy/`）
+- [x] 删除旧的 `devp` 单文件脚本与 `tests/test_devp.py`（逻辑已并入 `src/devproxy/`）
+      —— 已完成（2026-10-23）：删除脚本与旧测试，并新增 `docs/legacy-devp.md`
+      记录它的来龙去脉，避免"无声消失"。机器上 `~/.local/bin/devp` 的清理
+      不在仓库范围内，由机器主人处理。
 - [ ] 旧 `Caddyfile` 保留在仓库作历史参考，文件头注明「已迁移，实际生效的是 `~/.config/devproxy/Caddyfile`」
 - [ ] `git tag v0.1.0`

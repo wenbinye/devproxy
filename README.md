@@ -467,4 +467,7 @@ http `14480`，独立 storage 与独立配置目录），完整跑一遍注册 �
 现役的 `caddy.service` 仍然指向它**（迁移会先备份它、再把单元改指向
 `~/.config/devproxy/Caddyfile`）；迁移完成后它才只剩历史参考价值。
 
-根目录的 `devp` 脚本与 `Justfile` 同理（`Justfile` 现在只是转发到 `devproxy` 的兼容壳）。
+根目录的 `devp` 脚本**已删除** —— 它是 `devproxy` 的 1.0 前身：直接 PATCH 现役
+Caddy 的 Admin API 注册路由，注册的东西新工具既看不见也删不掉。它的来龙去脉
+记在 [docs/legacy-devp.md](docs/legacy-devp.md)。`Justfile` 现在只是转发到
+`devproxy` 的兼容壳。
