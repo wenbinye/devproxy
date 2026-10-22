@@ -119,3 +119,28 @@ def test_lock_file_created(paths):
     paths.ensure_files()
     _store(paths).mutate(lambda t: None)
     assert paths.lock_path.exists()
+
+
+def test_mutate_removes_temp_validation_files(paths):
+    """校验用的临时文件必须清掉 —— 留在 state 目录里只是噪音。"""
+    paths.ensure_files()
+    store = _store(paths)
+    store.mutate(lambda t: t.upsert(_route()))
+    assert not (paths.state_dir / "routes.caddy.new").exists()
+    assert not (paths.state_dir / "Caddyfile.new").exists()
+
+
+def test_mutate_removes_temp_validation_files_on_failure(paths):
+    """失败路径同样要清理。"""
+    paths.ensure_files()
+    store = _store(paths, FakeCaddy(validate_ok=False))
+    with pytest.raises(RouteStoreError):
+        store.mutate(lambda t: t.upsert(_route()))
+    assert not (paths.state_dir / "routes.caddy.new").exists()
+    assert not (paths.state_dir / "Caddyfile.new").exists()
+
+    store = _store(paths, FakeCaddy(reload_ok=False))
+    with pytest.raises(RouteStoreError):
+        store.mutate(lambda t: t.upsert(_route()))
+    assert not (paths.state_dir / "routes.caddy.new").exists()
+    assert not (paths.state_dir / "Caddyfile.new").exists()

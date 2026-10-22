@@ -1,4 +1,5 @@
 import json
+import os
 
 import pytest
 
@@ -111,6 +112,43 @@ def test_atomic_write_leaves_no_tmp_file(tmp_path):
     atomic_write(p, "hello")
     assert p.read_text() == "hello"
     assert list(tmp_path.iterdir()) == [p]
+
+
+def test_atomic_write_uses_unique_temp_name(tmp_path):
+    """临时文件名必须唯一 —— 否则两个写者会撞进同一个中间产物。"""
+    p = tmp_path / "x.txt"
+    # 别的进程（不同 pid）留下的临时文件不能被我们覆盖
+    foreign = tmp_path / "x.txt.424242.tmp"
+    foreign.write_text("别人的临时文件", encoding="utf-8")
+    atomic_write(p, "hello")
+    assert p.read_text() == "hello"
+    assert foreign.read_text(encoding="utf-8") == "别人的临时文件"
+
+
+def test_atomic_write_fsyncs_before_replace(tmp_path, monkeypatch):
+    """落盘前必须 fsync —— 否则断电后 replace 可能指向没写进盘的内容。"""
+    calls = []
+    real_fsync = os.fsync
+
+    def spy(fd):
+        calls.append(fd)
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", spy)
+    atomic_write(tmp_path / "x.txt", "hello")
+    assert calls, "写临时文件后必须 fsync"
+
+
+def test_atomic_write_cleans_temp_on_failure(tmp_path, monkeypatch):
+    """写失败时也不能留下临时文件。"""
+
+    def boom(*a, **k):
+        raise OSError("磁盘满了")
+
+    monkeypatch.setattr(os, "replace", boom)
+    with pytest.raises(OSError):
+        atomic_write(tmp_path / "x.txt", "hello")
+    assert list(tmp_path.iterdir()) == []
 
 
 # --------------------- I-6: 渲染期输入校验（routes.json 是真相但不是免检通道）

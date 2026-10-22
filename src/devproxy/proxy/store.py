@@ -68,27 +68,41 @@ class RouteStore:
                 else None
             )
 
-            table = load_table(paths.routes_json)
-            fn(table)
-            rendered = render_caddyfile(table)
+            try:
+                table = load_table(paths.routes_json)
+                fn(table)
+                rendered = render_caddyfile(table)
 
-            ok, msg = self._validate(rendered)
-            if not ok:
-                raise RouteStoreError(f"Caddy 配置校验失败，未做任何修改：\n{msg}")
+                ok, msg = self._validate(rendered)
+                if not ok:
+                    raise RouteStoreError(f"Caddy 配置校验失败，未做任何修改：\n{msg}")
 
-            save_table(paths.routes_json, table)
-            atomic_write(paths.routes_caddy, rendered)
+                save_table(paths.routes_json, table)
+                atomic_write(paths.routes_caddy, rendered)
 
-            ok, msg = self.caddy.reload()
-            if not ok:
-                self._restore(old_json, old_caddy)
-                raise RouteStoreError(f"Caddy reload 失败，已回滚路由表：\n{msg}")
-            return table.routes
+                ok, msg = self.caddy.reload()
+                if not ok:
+                    self._restore(old_json, old_caddy)
+                    raise RouteStoreError(f"Caddy reload 失败，已回滚路由表：\n{msg}")
+                return table.routes
+            finally:
+                # 校验用的临时文件必须清掉 —— 留着它们只是噪音，
+                # 还会让人以为线上有两份配置。
+                self._cleanup_temp()
+
+    def _cleanup_temp(self) -> None:
+        for path in self._temp_paths():
+            path.unlink(missing_ok=True)
+
+    def _temp_paths(self) -> list[Path]:
+        return [
+            self.paths.state_dir / "routes.caddy.new",
+            self.paths.state_dir / "Caddyfile.new",
+        ]
 
     def _validate(self, rendered: str) -> tuple[bool, str]:
         """用临时主 Caddyfile 校验新内容，不动线上文件。"""
-        tmp_routes = self.paths.state_dir / "routes.caddy.new"
-        tmp_main = self.paths.state_dir / "Caddyfile.new"
+        tmp_routes, tmp_main = self._temp_paths()
         atomic_write(tmp_routes, rendered)
         atomic_write(
             tmp_main,

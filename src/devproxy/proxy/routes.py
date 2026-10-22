@@ -117,11 +117,24 @@ class RouteTable:
 
 
 def atomic_write(path: Path, content: str) -> None:
-    """先写临时文件再 os.replace —— 避免读到半截内容。"""
+    """先写临时文件再 os.replace —— 避免读到半截内容。
+
+    临时文件名带 pid：两个写者不会撞进同一个临时文件（撞上就是互相
+    覆盖对方的中间产物，写出来的内容可能混在一起）。写完先 fsync ——
+    否则断电后 os.replace 可能落在一个根本没写进盘的内容上。
+
+    无论成功失败都清掉自己的临时文件。
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(content, encoding="utf-8")
-    os.replace(tmp, path)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def load_table(path: Path) -> RouteTable:
