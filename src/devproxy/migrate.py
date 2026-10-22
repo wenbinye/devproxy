@@ -211,17 +211,30 @@ def _home(platform: Platform, home: Path | None = None) -> Path:
     return getattr(platform, "user_home", None) or Path.home()
 
 
-def _read_unit_text(platform: Platform, path: Path) -> str | None:
+def _read_unit_text(
+    platform: Platform, path: Path, *, interactive: bool = True
+) -> str | None:
     """读单元内容；普通读不到时（权限不足）改走提权会话。
 
     macOS 的 system scope 单元在 /Library/LaunchDaemons —— 权限或归属不对时
     普通用户读不了。读不到就当"没有遗留环境"，等于把用户手工维护的
     Caddyfile 与环境变量悄悄接管掉 —— 那是迁移最不能犯的错。
+
+    interactive=False 时走**非交互**的特权读（sudo -n）：只读命令
+    （doctor）绝不能把密码框弹到用户脸上。
     """
     try:
         return path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         pass
+    if not interactive:
+        reader = getattr(platform, "privilege_read", None)
+        if callable(reader):
+            try:
+                return reader(path)
+            except (OSError, RuntimeError):
+                return None
+        return None
     try:
         return platform.privilege().read(path)
     except (OSError, RuntimeError):
@@ -235,14 +248,19 @@ def detect_legacy(
     unit_dir: Path | None = None,
     *,
     home: Path | None = None,
+    interactive: bool = True,
 ) -> LegacyState | None:
-    """检测是否存在本工具未管理的 caddy 服务。"""
+    """检测是否存在本工具未管理的 caddy 服务。
+
+    interactive=False 用于只读场景（doctor）：读不到单元就当没有，
+    绝不弹密码框。
+    """
     unit_path = (
         unit_dir / "caddy.service" if unit_dir else platform.service_unit_path("caddy")
     )
     if not unit_path.exists():
         return None
-    unit_text = _read_unit_text(platform, unit_path)
+    unit_text = _read_unit_text(platform, unit_path, interactive=interactive)
     if unit_text is None:
         return None
     config_path = unit_config_path(unit_text, _home(platform, home))

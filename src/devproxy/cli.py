@@ -24,7 +24,7 @@ from devproxy.config import (
     load_config,
     validate_config,
 )
-from devproxy.doctor import build_report, report_is_healthy
+from devproxy.doctor import build_report, find_wildcard_sites, report_is_healthy
 from devproxy.migrate import (
     LegacyState,
     MigrationError,
@@ -630,7 +630,15 @@ def doctor(
     """体检：检查所有前置条件。"""
     paths, config, _, _ = build_context()
     backend = _dns_backend(dns_backend, config)
+    platform = _platform()
     reports = build_report(_components(paths, config, backend))
+    # 现役配置里还有通配站点块（*.test）时必须报出来：它与工具生成的
+    # 精确站点块同后缀，会让 TLS 握手整体失败。迁移正是移除它的动作。
+    # 用非交互的探测 —— doctor 是只读命令，绝不能弹密码框。
+    legacy = detect_legacy(platform, paths, interactive=False)
+    wildcards = find_wildcard_sites(
+        paths, config, legacy.config_path if legacy else None
+    )
     table = Table(show_header=True, header_style="bold")
     table.add_column("组件")
     table.add_column("状态")
@@ -643,8 +651,24 @@ def doctor(
             escape(r.status.detail),
             escape(r.status.hint),
         )
+    for path, addresses in wildcards:
+        table.add_row(
+            "caddy 配置",
+            "✗ 通配站点块",
+            escape(f"{path}: {', '.join(addresses)}"),
+            "devproxy setup",
+        )
     console.print(table)
-    if not report_is_healthy(reports):
+    # 表格里的说明会被 Rich 截断 —— 关键信息（影响与修复）单独再打一遍
+    for path, addresses in wildcards:
+        console.print(
+            f"[yellow]⚠ {path} 仍有通配站点块：{', '.join(addresses)}[/yellow]"
+        )
+        console.print(
+            "   通配块与精确站点块同后缀时，Caddy 的 TLS 握手会整体失败；"
+            "修复: devproxy setup（完成迁移，移除通配块）"
+        )
+    if not report_is_healthy(reports) or wildcards:
         raise typer.Exit(EXIT_PRECONDITION)
 
 
