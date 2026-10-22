@@ -4,6 +4,19 @@ version = "0.1.0"
 description = "本地开发环境一键部署与域名网关"
 readme = "README.md"
 requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "Ye Wenbin" }]
+keywords = ["caddy", "dnsmasq", "localhost", "https", "reverse-proxy", "dev-server"]
+classifiers = [
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Testing",
+]
 dependencies = [
     "typer>=0.12",
     "rich>=13",
