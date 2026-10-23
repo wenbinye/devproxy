@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from devproxy.core.config import Config, ConfigError, load_config
+from devproxy.core.config import Config, ConfigError, load_config, validate_config
 
 
 def test_defaults_when_file_missing(tmp_path):
@@ -18,9 +18,9 @@ def test_defaults_when_file_missing(tmp_path):
 
 def test_file_overrides_only_named_keys(tmp_path):
     f = tmp_path / "config.toml"
-    f.write_text('domain_suffix = "dev"\nready_timeout = 5\n', encoding="utf-8")
+    f.write_text('domain_suffix = "example"\nready_timeout = 5\n', encoding="utf-8")
     cfg = load_config(f)
-    assert cfg.domain_suffix == "dev"
+    assert cfg.domain_suffix == "example"
     assert cfg.ready_timeout == 5
     assert cfg.http_port == 80, "未在文件里出现的键保持默认值"
 
@@ -42,7 +42,7 @@ def test_env_data_dir_provides_storage_default(tmp_path, monkeypatch):
     env_dir = tmp_path / "env-data"
     monkeypatch.setenv("DEVPROXY_DATA_DIR", str(env_dir))
     f = tmp_path / "config.toml"
-    f.write_text('domain_suffix = "dev"\n', encoding="utf-8")
+    f.write_text('domain_suffix = "example"\n', encoding="utf-8")
     cfg = load_config(f)
     assert cfg.storage == str(env_dir)
     assert cfg.storage_path == env_dir
@@ -102,9 +102,10 @@ def test_domain_suffix_wrong_type_is_rejected(tmp_path):
 
 
 def test_valid_domain_suffixes_pass(tmp_path):
+    """白名单里的顶级域直接放行（连字符仍由标签格式那一条把关）。"""
     f = tmp_path / "config.toml"
-    f.write_text('domain_suffix = "local-dev"\n', encoding="utf-8")
-    assert load_config(f).domain_suffix == "local-dev"
+    f.write_text('domain_suffix = "example"\n', encoding="utf-8")
+    assert load_config(f).domain_suffix == "example"
 
 
 @pytest.mark.parametrize(
@@ -143,3 +144,109 @@ def test_valid_admin_addr_and_ports_pass(tmp_path):
     assert cfg.admin_addr == "127.0.0.1:2020"
     assert cfg.dns_backend == "resolved"
     assert cfg.admin_base == "http://127.0.0.1:2020"
+
+
+# ------------------------------------- 顶级域白名单（整机 DNS 路由的护栏）
+
+
+@pytest.mark.parametrize("suffix", ["test", "example", "localhost", "invalid"])
+def test_reserved_local_tlds_are_accepted(tmp_path, suffix):
+    """RFC 2606 / 6761 保留给本地用的顶级域直接放行。"""
+    f = tmp_path / "config.toml"
+    f.write_text(f'domain_suffix = "{suffix}"\n', encoding="utf-8")
+    assert load_config(f).domain_suffix == suffix
+
+
+@pytest.mark.parametrize("suffix", ["com", "net", "org", "cn", "dev", "local"])
+def test_public_tlds_are_rejected(tmp_path, suffix):
+    """真实公共顶级域必须被拒 —— 它会被写进整机范围的 DNS 路由。"""
+    f = tmp_path / "config.toml"
+    f.write_text(f'domain_suffix = "{suffix}"\n', encoding="utf-8")
+    with pytest.raises(ConfigError) as cm:
+        load_config(f)
+    message = str(cm.value)
+    assert "domain_suffix" in message
+    assert suffix in message, "报错要带上用户填的那个值"
+    assert "test" in message, "报错要说清该改用什么"
+    assert "allowed_domain_suffixes" in message, "报错要给出显式放行的写法"
+
+
+def test_rejection_message_explains_the_risk(tmp_path):
+    """拒绝理由必须说清楚：整机解析被劫持 / cookie 串味 / HSTS。"""
+    f = tmp_path / "config.toml"
+    f.write_text('domain_suffix = "com"\n', encoding="utf-8")
+    with pytest.raises(ConfigError) as cm:
+        load_config(f)
+    message = str(cm.value)
+    assert "整机" in message
+    assert "cookie" in message
+    assert "HSTS" in message
+
+
+def test_allowed_domain_suffixes_opens_the_gate(tmp_path):
+    """用户在 config.toml 里显式放行 = 用户明确担责，工具必须允许。"""
+    f = tmp_path / "config.toml"
+    f.write_text(
+        'domain_suffix = "dev"\nallowed_domain_suffixes = ["dev"]\n',
+        encoding="utf-8",
+    )
+    cfg = load_config(f)
+    assert cfg.domain_suffix == "dev"
+    assert cfg.allowed_domain_suffixes == ("dev",)
+
+
+def test_allowed_domain_suffixes_default_is_empty(tmp_path):
+    """默认不放行任何公共顶级域。"""
+    assert load_config(tmp_path / "absent.toml").allowed_domain_suffixes == ()
+
+
+def test_allowed_domain_suffixes_only_applies_to_listed_values(tmp_path):
+    """放行 dev 不等于放行 com —— 名单是精确的，不是开关。"""
+    f = tmp_path / "config.toml"
+    f.write_text(
+        'domain_suffix = "com"\nallowed_domain_suffixes = ["dev"]\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError) as cm:
+        load_config(f)
+    assert "domain_suffix" in str(cm.value)
+
+
+def test_allowed_domain_suffixes_accepts_multiple_values(tmp_path):
+    f = tmp_path / "config.toml"
+    f.write_text(
+        'domain_suffix = "dev"\nallowed_domain_suffixes = ["dev", "internal"]\n',
+        encoding="utf-8",
+    )
+    assert load_config(f).allowed_domain_suffixes == ("dev", "internal")
+
+
+@pytest.mark.parametrize("value", ['["a.b"]', '["Dev"]', '["-x"]', '[""]'])
+def test_allowed_domain_suffixes_entries_must_be_labels(tmp_path, value):
+    """放行名单的每一项仍要是单个 DNS 标签 —— 它就是 domain_suffix 的候选值。"""
+    f = tmp_path / "config.toml"
+    f.write_text(f"allowed_domain_suffixes = {value}\n", encoding="utf-8")
+    with pytest.raises(ConfigError) as cm:
+        load_config(f)
+    assert "allowed_domain_suffixes" in str(cm.value)
+
+
+def test_allowed_domain_suffixes_wrong_type_is_rejected(tmp_path):
+    """写成字符串而不是数组要报错 —— 别把 "dev" 当成放行了 dev。"""
+    f = tmp_path / "config.toml"
+    f.write_text('allowed_domain_suffixes = "dev"\n', encoding="utf-8")
+    with pytest.raises(ConfigError) as cm:
+        load_config(f)
+    assert "allowed_domain_suffixes" in str(cm.value)
+
+
+def test_validate_config_rejects_public_tld_directly():
+    """validate_config 是唯一入口 —— 直接构造的 Config 也一样被拦。"""
+    with pytest.raises(ConfigError) as cm:
+        validate_config(Config(domain_suffix="com"))
+    assert "domain_suffix" in str(cm.value)
+
+
+def test_validate_config_accepts_explicitly_allowed_suffix():
+    cfg = Config(domain_suffix="com", allowed_domain_suffixes=("com",))
+    assert validate_config(cfg) is None

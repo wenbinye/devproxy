@@ -10,6 +10,13 @@ from devproxy.cli._shared import EXIT_SUDO
 from devproxy.cli import _shared as s
 
 
+def _print_firefox_note(comp) -> None:
+    """本机装了 Firefox 时提醒它要单独信任 CA。"""
+    note = s.component_note(comp, "firefox_note")
+    if note:
+        s.console.print(f"[yellow]⚠ {escape(note)}[/yellow]")
+
+
 @app.command()
 def trust(
     yes: bool = typer.Option(False, "--yes", help="非交互模式，不询问"),
@@ -23,6 +30,8 @@ def trust(
             s.console.print("尚无 CA 根证书（注册首条路由后由 Caddy 生成），无需变更。")
         else:
             s.console.print("CA 根证书已信任，无需变更。")
+        # 已经信任过了也可能只有 Firefox 不认 —— 同样要提醒
+        _print_firefox_note(comp)
         raise typer.Exit(EXIT_OK)
     # 统一经 _shared._interactive() 判断，测试打桩才能覆盖所有命令
     if any(a.privileged for a in actions) and not yes and not s._interactive():
@@ -43,3 +52,6 @@ def trust(
         s.console.print("已清理 NSS 库中的陈旧 CA 根证书（Chrome 需完全退出重启后生效）")
     else:
         s.console.print("已安装 CA 根证书（Chrome 需完全退出重启后生效）")
+    # Firefox 有自己的证书库 —— 装进系统信任库与 NSS 库对它**无效**。
+    # 只在本机装了 Firefox 时才提，别给没装的人制造噪音。
+    _print_firefox_note(comp)

@@ -993,3 +993,103 @@ def test_platform_construction_failure_is_clean_precondition(env, monkeypatch):
     assert res.exit_code == 3, res.output
     assert "普通用户" in res.output
     assert "Traceback" not in res.output
+
+
+# ------------------------------------- 顶级域白名单的退出码语义
+
+
+def test_setup_rejects_public_tld_from_cli_with_exit_2(env, monkeypatch):
+    """--domain-suffix 传公共顶级域 → 参数错误（2）。
+
+    与写在 config.toml 里的同一个值不同：那属于配置错误（1）。
+    """
+    platform = _fake_setup_platform(monkeypatch, env)
+    res = CliRunner().invoke(app, ["setup", "--domain-suffix", "com"])
+    assert res.exit_code == 2, res.output
+    assert "com" in res.output
+    assert "test" in res.output, "报错要说清该改用什么"
+    assert platform.services == {}, "参数不合法时不该有任何副作用"
+
+
+def test_setup_accepts_tld_explicitly_allowed_in_config(env, monkeypatch):
+    """config.toml 里显式放行后，命令行用同一个后缀必须放行。"""
+    config_dir = env / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.toml").write_text(
+        'allowed_domain_suffixes = ["dev"]\n', encoding="utf-8"
+    )
+    platform = _fake_setup_platform(monkeypatch, env)
+    res = CliRunner().invoke(app, ["setup", "--domain-suffix", "dev"])
+    assert res.exit_code == 0, res.output
+    assert platform.services == {}  # 假平台没装任何东西，但流程走完了
+
+
+def test_config_toml_with_public_tld_exits_1(env, monkeypatch):
+    """写在 config.toml 里属于**配置错误**（1）—— 走 main() 的兜底。"""
+    import sys
+
+    from devproxy import cli
+
+    config_dir = env / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.toml").write_text('domain_suffix = "com"\n', encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", ["devproxy", "setup"])
+    with pytest.raises(SystemExit) as cm:
+        cli.main()
+    assert cm.value.code == 1
+
+
+# ------------------------------------- Firefox 的证书信任提醒
+
+
+class _FakeTrustCert:
+    """假的证书组件：装 CA 的动作与 Firefox 提示都可编排。"""
+
+    name = "cert"
+
+    def __init__(self, *a, **k):
+        self.ca_path = Path("/tmp/fake-root.crt")
+
+    def plan(self):
+        from devproxy.platform.base import Action
+
+        return [Action(description="装 CA", command=["certutil", "-A", "-n", "x"])]
+
+    def apply(self, actions):
+        return None
+
+    def firefox_note(self):
+        return "Firefox 有自己的证书库（cert9.db），需要单独导入 CA"
+
+
+def test_trust_reminds_about_firefox(env, monkeypatch):
+    """Firefox 不读 NSS 库也不读系统信任库 —— 装完必须提醒它单独信任。"""
+    monkeypatch.setattr("devproxy.cli._shared.CertComponent", _FakeTrustCert)
+    res = CliRunner().invoke(app, ["trust", "--yes"])
+    assert res.exit_code == 0, res.output
+    assert "Firefox" in res.output
+    assert "cert9.db" in res.output
+
+
+def test_trust_stays_silent_without_firefox(env, monkeypatch):
+    """本机没装 Firefox 就别提 —— 不制造噪音。"""
+
+    class NoFirefoxCert(_FakeTrustCert):
+        def firefox_note(self):
+            return None
+
+    monkeypatch.setattr("devproxy.cli._shared.CertComponent", NoFirefoxCert)
+    res = CliRunner().invoke(app, ["trust", "--yes"])
+    assert res.exit_code == 0, res.output
+    assert "Firefox" not in res.output
+
+
+def test_trust_tolerates_component_without_firefox_note(env, monkeypatch):
+    """组件没有 firefox_note 这个能力时，trust 照常跑完。"""
+
+    class PlainCert(_FakeTrustCert):
+        firefox_note = None
+
+    monkeypatch.setattr("devproxy.cli._shared.CertComponent", PlainCert)
+    res = CliRunner().invoke(app, ["trust", "--yes"])
+    assert res.exit_code == 0, res.output

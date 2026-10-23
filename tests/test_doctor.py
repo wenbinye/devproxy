@@ -274,3 +274,84 @@ def test_cli_doctor_ok_when_no_wildcard(tmp_path, monkeypatch):
     )
     result = CliRunner().invoke(app, ["doctor"])
     assert result.exit_code == 0, result.stdout
+
+
+# -- Firefox 的证书库提示（提示，不是缺陷） --------------------------------
+
+
+class FakeFirefoxComponent(FakeCliComponent):
+    """带 Firefox 提示的假组件。"""
+
+    def firefox_note(self):
+        return "Firefox 有自己的证书库（cert9.db），需要单独导入 CA"
+
+
+def test_cli_doctor_prints_firefox_note(tmp_path, monkeypatch):
+    """本机有 Firefox：doctor 必须把手动信任的解法说出来。"""
+    from typer.testing import CliRunner
+
+    from devproxy.cli import app
+
+    _patch_cli(monkeypatch, tmp_path, [FakeFirefoxComponent("a", True)])
+    result = CliRunner().invoke(app, ["doctor"])
+    assert result.exit_code == 0, result.stdout
+    assert "Firefox" in result.stdout
+    assert "cert9.db" in result.stdout
+
+
+def test_cli_doctor_without_firefox_note_is_silent(tmp_path, monkeypatch):
+    """组件没有这个能力就当没有 —— 不能因此报错。"""
+    from typer.testing import CliRunner
+
+    from devproxy.cli import app
+
+    _patch_cli(monkeypatch, tmp_path, [FakeCliComponent("a", True)])
+    result = CliRunner().invoke(app, ["doctor"])
+    assert result.exit_code == 0, result.stdout
+    assert "Firefox" not in result.stdout
+
+
+def test_cli_doctor_survives_broken_firefox_note(tmp_path, monkeypatch):
+    """组件的提示方法抛异常时，doctor 仍然要跑完。"""
+    from typer.testing import CliRunner
+
+    from devproxy.cli import app
+
+    class BoomNote(FakeCliComponent):
+        def firefox_note(self):
+            raise RuntimeError("探不了")
+
+    _patch_cli(monkeypatch, tmp_path, [BoomNote("a", True)])
+    result = CliRunner().invoke(app, ["doctor"])
+    assert result.exit_code == 0, result.stdout
+    assert "Traceback" not in result.stdout
+
+
+def test_cli_doctor_with_real_cert_component_hints_firefox(tmp_path, monkeypatch, isolated_home):
+    """真组件 + 真 Firefox profile：hint 与表格都要出现 Firefox 的指引。"""
+    from typer.testing import CliRunner
+
+    from devproxy.cli import app
+    from devproxy.components.certs import CertComponent
+    from devproxy.core.config import Config
+    from devproxy.platform.fake import FakePlatform
+
+    cfg = Config(storage=str(tmp_path / "data"))
+    paths = _patch_cli_with_config(monkeypatch, tmp_path, cfg)
+    ca = cfg.storage_path / "pki" / "authorities" / "local" / "root.crt"
+    ca.parent.mkdir(parents=True, exist_ok=True)
+    ca.write_text("FAKE CA\n", encoding="utf-8")
+    platform = FakePlatform()
+    platform.trusted.add(ca)
+    platform.nss.add(ca)
+    monkeypatch.setattr(
+        "devproxy.cli._shared._components",
+        lambda *a, **k: [CertComponent(platform, paths, cfg)],
+    )
+    profile = isolated_home / ".mozilla" / "firefox" / "abc.default-release"
+    profile.mkdir(parents=True, exist_ok=True)
+    (profile / "cert9.db").write_bytes(b"")
+    result = CliRunner().invoke(app, ["doctor"])
+    assert result.exit_code == 0, result.stdout
+    assert "Firefox" in result.stdout
+    assert "security.enterprise_roots.enabled" in result.stdout

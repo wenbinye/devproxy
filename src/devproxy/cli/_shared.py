@@ -39,7 +39,9 @@ from devproxy.cli._render import _global_scope_notes
 from devproxy.cli._render import _print_notes
 from devproxy.cli._render import _print_trust_hint_if_needed
 from devproxy.cli._render import _status_cell
+from devproxy.cli._render import component_note
 from devproxy.cli._render import fail_for_apply_errors
+from devproxy.cli._render import firefox_notes
 from devproxy.cli._render import print_apply_results
 from devproxy.cli._render import print_noop_unhealthy
 from devproxy.cli._render import print_scope_notes

@@ -136,6 +136,35 @@ def _global_scope_notes(plan) -> list[str]:
     return notes
 
 
+def component_note(component, method: str) -> str | None:
+    """组件通过可选方法提供的说明；方法不存在或抛异常都当作没有。
+
+    能力靠 getattr 探测，不进平台协议 —— 与 `global_scope_note` 同一套路。
+    说明只是提示，探测失败绝不能带崩 doctor 或 trust。
+    """
+    fn = getattr(component, method, None)
+    if not callable(fn):
+        return None
+    try:
+        note = fn()
+    except Exception:  # noqa: BLE001 —— 提示失败不该影响主流程
+        return None
+    return note or None
+
+
+def firefox_notes(reports) -> list[str]:
+    """各组件提供的浏览器信任提示（如 Firefox 有自己的证书库）。
+
+    只有证书组件会提供 —— 别的组件没有这个方法，就是没有提示。
+    """
+    notes = []
+    for r in reports:
+        note = component_note(getattr(r, "component", None), "firefox_note")
+        if note:
+            notes.append(note)
+    return notes
+
+
 def print_noop_unhealthy(reports) -> None:
     """没有可执行动作、但组件不健康时，逐条报出原因与修复提示。"""
     for r in reports:

@@ -273,6 +273,10 @@ Domains=~.test
   或它答不了的时候，全机解析退化为这两个公共解析器（而不是整机断网）；
 - `Domains=~.<后缀>` 决定 dnsmasq 内部把哪个后缀解析到本机。
 
+`Domains=~.<后缀>` 里的后缀**为什么只能是保留顶级域**，见
+[「域名后缀只允许保留顶级域」](#域名后缀只允许保留顶级域) ——
+真实公共顶级域会让**整台机器**该后缀的解析都被劫持。
+
 作为配套，工具保证 dnsmasq 的配置里**始终带 `no-resolv`**
 （除非你自己写了 `resolv-file=`）：dnsmasq 因此**不会**把 `/etc/resolv.conf`
 （resolved 机器上是 `127.0.0.53` 桩）当成上游，否则 resolved ↔ dnsmasq 互指，
@@ -323,6 +327,7 @@ codeup.test {
 | Linux | 系统信任库（`/usr/local/share/ca-certificates/` + `update-ca-certificates`） | curl / Go / Java 等 |
 | Linux | NSS 库 `~/.pki/nssdb` | **Chrome / Chromium 只认 NSS 库** |
 | macOS | 系统钥匙串 `/Library/Keychains/System.keychain` | Safari / Chrome 都读 |
+| 任意 | **Firefox 不读上面任何一处** | Firefox 只认自己 profile 里的 `cert9.db` |
 
 两步是独立的：只装系统信任库，Chrome 照样报 `net::ERR_CERT_AUTHORITY_INVALID`；
 只装 NSS 库，curl 又不认。Linux 上装 NSS 库需要 `certutil`
@@ -330,6 +335,24 @@ codeup.test {
 
 **Linux 上装入 NSS 库后必须完全退出并重启 Chrome** —— 关窗口不算，要从托盘退出进程；
 Chrome 只在启动时读取 NSS 库。
+
+#### Firefox 要单独信任（工具不替你装）
+
+**Firefox 有自己的证书库**（`~/.mozilla/firefox/<profile>/cert9.db`）——
+它既不读 NSS 库，也不读系统信任库。因此 `devproxy trust` 跑完之后，
+**Chrome 正常了，Firefox 仍会报证书错误** —— 这不是工具坏了，是 Firefox 的设计。
+
+两种解法（**都要完全退出并重启 Firefox** 才生效）：
+
+1. **手动导入**：Firefox → 设置 → 隐私与安全 → 证书 → 查看证书 → 导入 →
+   选 `<storage>/pki/authorities/local/root.crt`
+   （默认 `~/.local/share/caddy/pki/authorities/local/root.crt`）；
+2. **让 Firefox 也认系统信任库**：在 `about:config` 里打开
+   `security.enterprise_roots.enabled`（布尔值改为 `true`）。
+
+`devproxy doctor` 在检测到本机装了 Firefox 时会把这条提示打出来；
+`devproxy trust` 装完之后也会提醒一句。**这是提示，不是缺陷** ——
+Firefox 没装 CA 不影响 doctor 的体检结论（Chrome / curl 侧可能完全正常）。
 
 CA 根证书的路径是 `<storage>/pki/authorities/local/root.crt`
 （默认 `~/.local/share/caddy/pki/authorities/local/root.crt`）。
@@ -342,6 +365,7 @@ CA 根证书的路径是 `<storage>/pki/authorities/local/root.crt`
 
 ```toml
 # 域名后缀。devproxy up codeup → https://codeup.test
+# 只允许 RFC 2606 / 6761 保留给本地使用的顶级域：test / example / localhost / invalid
 domain_suffix = "test"
 
 # DNS 后端：auto | resolved | system
@@ -362,13 +386,18 @@ ready_timeout = 60
 
 # caddy 二进制路径（setup 会下载到此处）
 caddy_bin = "~/.local/bin/caddy"
+
+# 额外放行的域名后缀（默认空 —— 不放行任何公共顶级域）。
+# 见下面的「域名后缀只允许保留顶级域」。
+# allowed_domain_suffixes = ["dev"]
 ```
 
 各键的准确语义：
 
 | 键 | 默认 | 说明 |
 |---|---|---|
-| `domain_suffix` | `test` | 单个 DNS 标签（小写字母/数字开头结尾，中间可含连字符，不含点，≤ 63 字符）。非法值在加载配置时就报错 |
+| `domain_suffix` | `test` | 单个 DNS 标签（小写字母/数字开头结尾，中间可含连字符，不含点，≤ 63 字符），**且必须是保留给本地使用的顶级域**（`test` / `example` / `localhost` / `invalid`）。非法值在加载配置时就报错 |
+| `allowed_domain_suffixes` | `[]` | 额外放行的域名后缀（字符串数组）。默认**不放行任何公共顶级域**；写在这里 = 用户明确担责 |
 | `dns_backend` | `auto` | `auto` = resolved 真的在跑就用 resolved，否则用 system。Linux 上可显式指定 `resolved` / `system`；**macOS 没有 systemd-resolved，显式写 `resolved` 会被当成参数错误拒绝（退出码 2）**，`auto` 在 macOS 上静默走每域解析器 |
 | `admin_addr` | `127.0.0.1:2019` | `host:port` 形式。既是 Caddy 的 admin 监听地址，也是 reload 时的目标地址 |
 | `http_port` / `https_port` | `80` / `443` | Caddy 的**全局选项**，写进主 Caddyfile 的全局块，改了就真的换监听端口 |
@@ -386,6 +415,70 @@ devproxy config
 
 **`domain_suffix` 改了不会重写已有路由** —— 已注册路由的域名在注册时固化进 `routes.json`，
 否则正在跑的服务会突然失联。旧路由需要 `devproxy down <name>` 后重新 `up`。
+
+### 域名后缀只允许保留顶级域
+
+`domain_suffix` 只能是 **RFC 2606 / RFC 6761 保留给本地使用的顶级域**：
+
+| 顶级域 | 出处 |
+|---|---|
+| `test` | RFC 6761（**推荐**） |
+| `example` | RFC 2606 |
+| `localhost` | RFC 6761 |
+| `invalid` | RFC 2606 |
+
+`com` / `net` / `org` / `cn` / `dev` / `local` 这些**一律拒绝**，原因是三条：
+
+- **整机解析会被劫持**：后缀会写进**整机范围**的 DNS 路由
+  （Linux：`/etc/systemd/resolved.conf.d/devproxy.conf` 里的 `Domains=~.<后缀>`；
+  macOS：`/etc/resolver/<后缀>`）。写成 `Domains=~.com` 之后，
+  **这台机器全部 `.com` 域名**的解析都先问本地 dnsmasq —— 真实公共顶级域的解析被劫持；
+- **浏览器 cookie 会串味**：拿真实域名做本地站点，登录态会带到真实站点上去；
+- **HSTS 会直接拒绝**：`https://codeup.com` 被 HSTS 强制 HTTPS 且不允许用户例外，
+  本地自签证书一律报错。
+
+用**白名单**而不是黑名单是刻意的：将来新增的公共顶级域不会漏网
+（黑名单一定会漏），而白名单里那四个顶级域本来就是给本地开发用的。
+
+#### 确实要用别的后缀：显式放行
+
+工具允许，但**默认不放行任何公共顶级域** —— 放行是**你明确担责**的选择，
+写在 `config.toml` 里：
+
+```toml
+domain_suffix = "dev"
+allowed_domain_suffixes = ["dev"]
+```
+
+- `allowed_domain_suffixes` 是**精确名单**，不是开关：放行了 `dev` 不等于放行了 `com`；
+- 名单里的每一项仍要是单个 DNS 标签（小写字母/数字开头结尾、不含点）；
+- 名单只影响 `domain_suffix` —— 工具**不会**把它写进任何系统配置，
+  只是允许你把这个后缀用作本地站点的后缀。
+
+**退出码的差别**（同一个非法值，来源不同）：
+
+| 写法 | 退出码 | 含义 |
+|---|---|---|
+| 写在 `config.toml` 里 | **1** | 配置错误 |
+| 用 `--domain-suffix` 传 | **2** | 参数错误 |
+
+#### 升级提示：既有用户可能突然报错
+
+加这道护栏之前，本机 `~/.config/devproxy/config.toml` 里可能已经写着一个
+不在白名单里的 `domain_suffix`（例如 `dev`）。升级后**每一条命令都会报错**
+（配置错误，退出码 1）。两种处理方式：
+
+1. **改用保留顶级域**（推荐）：把 `domain_suffix` 改成 `test`（或 `example` /
+   `localhost` / `invalid`），然后按下面这节的说明处理已有路由；
+2. **显式放行**：在 `config.toml` 里加上
+   `allowed_domain_suffixes = ["<你原来的后缀>"]`，行为与升级前一致。
+
+```bash
+devproxy down <name>    # 旧路由的域名在注册时就固化了 —— 换后缀要重新注册
+devproxy up <name> -- <原来的启动命令>
+```
+
+（`domain_suffix` 改了**不会**自动重写已有路由，见上面「各键的准确语义」一节。）
 
 ### storage 留档：为什么改了 `config.toml` 的 storage 也不生效
 
@@ -562,6 +655,12 @@ devproxy uninstall --yes       # 非交互（CI / 脚本）必须加，否则退
   Chrome 只认 NSS 库，装完必须**完全退出并重启 Chrome**。
 - **`doctor` 说「CA 根证书未被信任（缺少：系统信任库、NSS 库）」**：跑 `devproxy trust`。
   Linux 上若报缺 `certutil`，先 `sudo apt install libnss3-tools`。
+- **Chrome 正常但 Firefox 仍报证书错误**：Firefox 有自己的证书库
+  （`~/.mozilla/firefox/<profile>/cert9.db`），**不读** NSS 库也不读系统信任库。
+  手动导入 CA，或在 `about:config` 打开 `security.enterprise_roots.enabled`，
+  两种做法都要**完全退出并重启 Firefox**。详见上面「Firefox 要单独信任」一节。
+- **升级后每条命令都报「配置项 domain_suffix 非法」**：新加的顶级域白名单挡住了你原来的
+  `domain_suffix`。看上面「升级提示：既有用户可能突然报错」一节。
 - **`doctor` 说「caddy 版本不符」**：setup 会替换为固定版本，重跑 `devproxy setup`。
 - **改了 `config.toml` 的 `storage` 却没生效**：看上面「storage 留档」一节。
 - **域名解析到别的 IP**：`doctor` 不查解析（它只做静态检查），自己查一次

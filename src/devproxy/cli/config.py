@@ -21,6 +21,8 @@ def config() -> None:
             # 生效的 storage（config.toml > DEVPROXY_DATA_DIR > 默认值）
             "storage": cfg.storage,
             "ready_timeout": cfg.ready_timeout,
+            # 额外放行的域名后缀（用户在 config.toml 里显式担责放行的）
+            "allowed_domain_suffixes": list(cfg.allowed_domain_suffixes),
             "paths": {
                 "config_dir": str(paths.config_dir),
                 "state_dir": str(paths.state_dir),

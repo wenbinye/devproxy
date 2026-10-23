@@ -27,6 +27,63 @@ from devproxy.platform.base import (
 
 CA_NAME = CA_NICKNAME
 
+# Firefox 的 profile 根目录候选：
+# - 官方安装包（Linux/macOS/Windows 都是它）：~/.mozilla/firefox
+# - flatpak：~/.var/app/org.mozilla.firefox/.mozilla/firefox
+# - snap：~/snap/firefox/common/.mozilla/firefox
+FIREFOX_PROFILE_ROOTS = (
+    ".mozilla/firefox",
+    ".var/app/org.mozilla.firefox/.mozilla/firefox",
+    "snap/firefox/common/.mozilla/firefox",
+)
+
+# profile 目录里的标志文件。cert9.db 是 Firefox 的**证书库**本身，
+# prefs.js 每个 profile 都有 —— 两者都不是 ~/.mozilla/firefox 下的
+# 杂物目录（如 "Crash Reports"）会有的。
+FIREFOX_PROFILE_MARKERS = ("cert9.db", "prefs.js")
+
+# Firefox 侧的手动信任指引。Firefox **不读** NSS 库，也不读系统信任库 ——
+# 它只认自己 profile 里的 cert9.db。
+FIREFOX_HINT = (
+    "Firefox 有自己的证书库（~/.mozilla/firefox/<profile>/cert9.db），"
+    "既不读 NSS 库也不读系统信任库，需要单独信任："
+    "手动导入该 CA，或在 about:config 打开 "
+    "security.enterprise_roots.enabled 后重启 Firefox"
+)
+
+
+def firefox_profile_dirs(home: Path | None = None) -> list[Path]:
+    """本机用过的 Firefox profile 目录；探不到就返回空列表。
+
+    判据是**profile 目录**，不是可执行文件：
+    - Firefox 的证书库存就在 profile 里（cert9.db）—— 没有 profile 就没有
+      证书库，也就没有"CA 没被 Firefox 信任"这回事；
+    - `which firefox` 会把"装过但从没运行过"也算进来，白白吓唬用户。
+
+    探不到（目录不存在、权限不足、家目录定不出来）一律当作"没有 Firefox"：
+    这条提示是锦上添花，绝不能因此让 doctor 报错。
+    """
+    try:
+        base = Path(home) if home is not None else Path.home()
+    except (OSError, RuntimeError):
+        return []
+    found: list[Path] = []
+    for rel in FIREFOX_PROFILE_ROOTS:
+        try:
+            children = sorted((base / rel).iterdir())
+        except OSError:
+            continue
+        for child in children:
+            try:
+                if not child.is_dir():
+                    continue
+                if not any((child / m).exists() for m in FIREFOX_PROFILE_MARKERS):
+                    continue
+            except OSError:
+                continue
+            found.append(child)
+    return found
+
 
 def _nss_missing_output(text: str) -> bool:
     """`certutil` 的输出是否在说"这个条目不存在"。
@@ -289,6 +346,41 @@ class CertComponent:
             labels.append(f"NSS 库（{nss.error}）")
         return labels
 
+    # -- Firefox -------------------------------------------------------
+
+    def firefox_note(self) -> str | None:
+        """Firefox 在用时的手动信任指引；没有 Firefox 就返回 None。
+
+        这是**提示**，不是缺陷：Firefox 没装 CA 不代表工具坏了 ——
+        Chrome / curl 侧可能完全正常。所以它进的是 hint（"修复"列），
+        不影响 check() 的 ok。
+
+        非协议方法（像 `global_scope_note` 那样靠 getattr 探测）：
+        平台协议不许增删，Firefox 也不必每个平台都实现。
+        """
+        try:
+            profiles = firefox_profile_dirs()
+        except Exception:  # noqa: BLE001 —— 探测失败就当没有 Firefox
+            return None
+        if not profiles:
+            return None
+        if not self.ca_path.exists():
+            # 还没有 CA —— 没有可导入的东西，也就没有提示
+            return None
+        return (
+            f"{FIREFOX_HINT}（CA 路径：{self.ca_path}；"
+            f"你的 Firefox profile：{profiles[0]}）"
+        )
+
+    def _with_firefox(self, hint: str) -> str:
+        """把 Firefox 的提示接到 hint 后面（没有 Firefox 就原样返回）。"""
+        note = self.firefox_note()
+        if not note:
+            return hint
+        if not hint:
+            return note
+        return f"{hint}；{note}"
+
     # -- check ---------------------------------------------------------
 
     def check(self) -> Status:
@@ -310,15 +402,23 @@ class CertComponent:
             detail = f"无法判定 CA 是否被信任（探测失败：{'；'.join(unknown)}）"
             if missing:
                 detail += f"；确定未信任：{'、'.join(missing)}"
-            return Status(ok=False, detail=detail, hint=self._trust_probe_hint())
+            return Status(
+                ok=False,
+                detail=detail,
+                hint=self._with_firefox(self._trust_probe_hint()),
+            )
         if missing:
             return Status(
                 ok=False,
                 detail=f"CA 根证书未被信任（缺少：{'、'.join(missing)}）",
-                hint="devproxy trust",
+                hint=self._with_firefox("devproxy trust"),
             )
         if self._is_macos:
-            return Status(ok=True, detail="CA 根证书已信任（系统钥匙串）")
+            return Status(
+                ok=True,
+                detail="CA 根证书已信任（系统钥匙串）",
+                hint=self._with_firefox(""),
+            )
         # 陈旧根属于"卫生问题"而不是"未就绪"：HTTPS 一切正常，所以 ok 仍是 True；
         # 但也不能谎称完全没问题 —— 警示**前置**到 detail 开头（doctor 表格会截断
         # 长字符串的末尾），同时放进 hint，让"修复"列直接给出动作。
@@ -328,15 +428,19 @@ class CertComponent:
             return Status(
                 ok=False,
                 detail="无法判定 NSS 库中是否存在陈旧 CA 根（库可能被锁或不可读）",
-                hint="检查 certutil/NSS 库是否可读；devproxy trust",
+                hint=self._with_firefox("检查 certutil/NSS 库是否可读；devproxy trust"),
             )
         if stale:
             return Status(
                 ok=True,
                 detail="NSS 库中工具昵称下残留陈旧 CA 根；CA 根证书已信任（系统信任库 + NSS 库）",
-                hint="devproxy trust（清理陈旧 CA 根）",
+                hint=self._with_firefox("devproxy trust（清理陈旧 CA 根）"),
             )
-        return Status(ok=True, detail="CA 根证书已信任（系统信任库 + NSS 库）")
+        return Status(
+            ok=True,
+            detail="CA 根证书已信任（系统信任库 + NSS 库）",
+            hint=self._with_firefox(""),
+        )
 
     # -- plan ----------------------------------------------------------
 

@@ -61,5 +61,9 @@ def doctor(
             "   通配块与精确站点块同后缀时，Caddy 的 TLS 握手会整体失败；"
             "修复: devproxy setup（完成迁移，移除通配块）"
         )
+    # 浏览器侧的信任提示（Firefox 有自己的证书库）同样单独打一遍：
+    # 它是**提示**而不是缺陷 —— 不影响体检结论，但用户必须知道
+    for note in s.firefox_notes(reports):
+        s.console.print(f"[yellow]⚠ {escape(note)}[/yellow]")
     if not report_is_healthy(reports) or wildcards:
         raise typer.Exit(EXIT_PRECONDITION)

@@ -1335,3 +1335,105 @@ def test_cli_trust_exits_4_when_macos_denies_without_gui(tmp_path, monkeypatch):
     shown = (result.stdout or "") + (result.stderr or "")
     assert "终端" in shown or "图形界面" in shown
     assert "devproxy trust" in shown
+
+
+# -- Firefox：有自己的证书库，NSS/系统信任库对它无效 -----------------------
+
+
+def _make_firefox_profile(home: Path, name: str = "abc.default-release") -> Path:
+    """造一个用过的 Firefox profile（含证书库 cert9.db）。"""
+    profile = home / ".mozilla" / "firefox" / name
+    profile.mkdir(parents=True, exist_ok=True)
+    (profile / "cert9.db").write_bytes(b"")
+    return profile
+
+
+def test_firefox_profile_dirs_empty_without_firefox(tmp_path):
+    assert certs_module.firefox_profile_dirs(tmp_path) == []
+
+
+def test_firefox_profile_dirs_finds_profile(tmp_path):
+    profile = _make_firefox_profile(tmp_path)
+    assert certs_module.firefox_profile_dirs(tmp_path) == [profile]
+
+
+def test_firefox_profile_dirs_ignores_non_profile_dirs(tmp_path):
+    """~/.mozilla/firefox 下的杂物目录（如 Crash Reports）不是 profile。"""
+    (tmp_path / ".mozilla" / "firefox" / "Crash Reports").mkdir(parents=True)
+    assert certs_module.firefox_profile_dirs(tmp_path) == []
+
+
+def test_firefox_profile_dirs_probe_failure_is_not_an_error(tmp_path, monkeypatch):
+    """探不到就当没有 Firefox —— 不能抛异常，更不能当成"有 Firefox"。"""
+
+    def boom(*args, **kwargs):
+        raise OSError("权限不足")
+
+    monkeypatch.setattr(Path, "iterdir", boom)
+    assert certs_module.firefox_profile_dirs(tmp_path) == []
+
+
+def test_check_hints_firefox_when_installed(tmp_path, isolated_home):
+    """本机有 Firefox：hint 必须给出可操作的手动信任指引。"""
+    comp, platform, paths = _component(tmp_path)
+    ca = _write_ca(paths)
+    _trust_both(platform, ca)
+    _make_firefox_profile(isolated_home)
+    status = comp.check()
+    assert status.ok is True, "Firefox 没装 CA 不是缺陷，不能因此判失败"
+    assert "Firefox" in status.hint
+    assert "security.enterprise_roots.enabled" in status.hint
+
+
+def test_check_does_not_mention_firefox_when_absent(tmp_path):
+    """没装 Firefox 就别提 —— 不制造噪音。"""
+    comp, platform, paths = _component(tmp_path)
+    ca = _write_ca(paths)
+    _trust_both(platform, ca)
+    status = comp.check()
+    assert status.ok is True
+    assert "Firefox" not in status.hint
+
+
+def test_check_firefox_hint_survives_missing_trust(tmp_path, isolated_home):
+    """CA 还没被信任时，hint 要同时给出 trust 与 Firefox 的解法。"""
+    comp, platform, paths = _component(tmp_path)
+    _write_ca(paths)
+    _make_firefox_profile(isolated_home)
+    status = comp.check()
+    assert status.ok is False
+    assert "devproxy trust" in status.hint
+    assert "Firefox" in status.hint
+
+
+def test_firefox_note_none_without_ca(tmp_path, isolated_home):
+    """还没有 CA 时没什么可导入的 —— 不提示。"""
+    comp, _platform, _paths = _component(tmp_path)
+    _make_firefox_profile(isolated_home)
+    assert comp.firefox_note() is None
+
+
+def test_firefox_note_points_at_ca_path(tmp_path, isolated_home):
+    """提示要说清导入哪个文件。"""
+    comp, _platform, paths = _component(tmp_path)
+    ca = _write_ca(paths)
+    _make_firefox_profile(isolated_home)
+    note = comp.firefox_note()
+    assert note is not None
+    assert str(ca) in note
+    assert "security.enterprise_roots.enabled" in note
+
+
+def test_check_never_raises_when_firefox_probe_breaks(tmp_path, isolated_home, monkeypatch):
+    """探测炸了也不能让 check() 抛异常 —— doctor 依赖它一次列完。"""
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("探不了")
+
+    monkeypatch.setattr(certs_module, "firefox_profile_dirs", boom)
+    comp, platform, paths = _component(tmp_path)
+    ca = _write_ca(paths)
+    _trust_both(platform, ca)
+    status = comp.check()
+    assert status.ok is True
+    assert "Firefox" not in status.hint

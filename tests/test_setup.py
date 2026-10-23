@@ -304,10 +304,10 @@ def test_cli_setup_domain_suffix_override(tmp_path, monkeypatch):
     _patch_cli(monkeypatch, tmp_path, [])
     monkeypatch.setattr("devproxy.cli._shared._components", fake_components)
     result = CliRunner().invoke(
-        app, ["setup", "--domain-suffix", "local", "--dns-backend", "resolved"]
+        app, ["setup", "--domain-suffix", "example", "--dns-backend", "resolved"]
     )
     assert result.exit_code == 0, result.stdout
-    assert seen["suffix"] == "local"
+    assert seen["suffix"] == "example"
     assert seen["backend"] == "resolved"
 
 
