@@ -599,6 +599,35 @@ def test_macos_plan_has_no_setcap(tmp_path):
     assert not any(a.command[:1] == ["setcap"] for a in actions)
 
 
+def test_macos_install_service_action_is_privileged(tmp_path):
+    """macOS 的 caddy 是 /Library/LaunchDaemons 下的 root 守护进程。
+
+    动作的 `privileged` 决定两件事：sudo 清单要不要点名它、非交互环境下
+    要不要因此拒绝执行。漏标会让 setup 谎报"需要 sudo 共 1 项"，并在
+    只剩这一步时**绕过非交互护栏**（`plan.needs_sudo` 为空），然后中途
+    弹密码框 —— 在无 TTY 的场景下就是直接失败。
+    """
+    comp, paths, cfg = _component(tmp_path)
+    platform = _MacPlatform()
+    comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
+    installs = [a for a in comp.plan() if a.command[:1] == ["install-service"]]
+    assert installs, "计划里应有安装 LaunchDaemon 的动作"
+    assert all(a.privileged for a in installs)
+
+
+def test_linux_install_service_action_is_not_privileged(tmp_path):
+    """Linux 的 caddy 是 **user** unit（~/.config/systemd/user）—— 不需要 root。
+
+    与上一条成对：把 macOS 的修法写死成"永远提权"会让 Linux 的 sudo 清单
+    凭空多一项，非交互环境还会因此误退 4。
+    """
+    comp, paths, cfg = _component(tmp_path)
+    comp = CaddyComponent(FakePlatform(), paths, cfg, _fake_downloader)
+    installs = [a for a in comp.plan() if a.command[:1] == ["install-service"]]
+    assert installs, "计划里应有安装 user unit 的动作"
+    assert not any(a.privileged for a in installs)
+
+
 def test_macos_plan_has_no_linger_action(tmp_path):
     """macOS 无 systemd-linger —— 平台报"已启用"，不该计划任何 linger 动作。"""
     comp, paths, cfg = _component(tmp_path)

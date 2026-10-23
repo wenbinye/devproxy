@@ -336,6 +336,12 @@ class CaddyComponent:
                     ),
                     kind="run",
                     command=["install-service", "caddy"],
+                    # macOS 的 caddy 是 /Library/LaunchDaemons 下的 root 守护进程
+                    # （绑 80/443 必须 root）；Linux 是 ~/.config/systemd/user 下的
+                    # **用户** unit，不需要提权。标错方向的两种后果都不小：
+                    # 漏标 → sudo 清单谎报、非交互护栏被绕过、中途弹密码框；
+                    # 多标 → Linux 上凭空多一项 sudo，非交互环境误退 4。
+                    privileged=self.platform.name == "mac",
                 )
             )
         if need_linger:

@@ -11,6 +11,7 @@ import pytest
 from devproxy.components import dns as dns_module
 from devproxy.components.dns import (
     DnsComponent,
+    render_resolver_file,
     render_resolved_conf,
     render_system_dnsmasq_conf,
 )
@@ -390,6 +391,43 @@ class _MacPlatform(FakePlatform):
 
     name = "mac"
     dns_port = 5300
+
+
+def test_check_reports_not_ok_when_resolver_file_has_wrong_content(
+    tmp_path, monkeypatch
+):
+    """macOS 上 /etc/resolver/<后缀> 已存在、但内容不是我们要的（缺 port）。
+
+    `dns_route_installed` 只按**存在性**回答 —— 只靠它，doctor 会谎报"已就绪"，
+    而 `*.test` 实际被送到 127.0.0.1:53（mDNSResponder），不是工具的 dnsmasq
+    （:5300）。真机上就有这种陈年文件（2022 年留下的 `nameserver 127.0.0.1`）。
+
+    check 必须与 plan 用同一套判据：内容不对就是没就绪。
+    """
+    resolver_dir = tmp_path / "etc" / "resolver"
+    resolver_dir.mkdir(parents=True)
+    (resolver_dir / "test").write_text("nameserver 127.0.0.1\n", encoding="utf-8")
+    monkeypatch.setattr(dns_module, "RESOLVER_DIR", resolver_dir)
+
+    comp, platform = _component(tmp_path, backend="auto", platform=_MacPlatform())
+    platform.dns_backends = {"resolver"}  # 平台层"存在即已配置"
+    status = comp.check()
+    assert status.ok is False, "内容不对不能报就绪"
+    assert "resolved" in status.detail or "内容" in status.detail
+
+
+def test_check_ok_when_resolver_file_content_matches(tmp_path, monkeypatch):
+    """对照组：内容正确时 check 必须就绪 —— 否则上一条会退化成"永远报错"。"""
+    resolver_dir = tmp_path / "etc" / "resolver"
+    resolver_dir.mkdir(parents=True)
+    (resolver_dir / "test").write_text(
+        render_resolver_file(5300), encoding="utf-8"
+    )
+    monkeypatch.setattr(dns_module, "RESOLVER_DIR", resolver_dir)
+
+    comp, platform = _component(tmp_path, backend="auto", platform=_MacPlatform())
+    platform.dns_backends = {"resolver"}
+    assert comp.check().ok is True
 
 
 def test_macos_backend_key_is_resolver(tmp_path):

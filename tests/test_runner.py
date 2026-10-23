@@ -76,18 +76,33 @@ _LISTEN_AND_EXIT = (
 
 
 def _process_running(pid: int) -> bool:
-    """僵尸进程不算活着。/proc 不存在时退回 kill(pid,0) 探测。"""
+    """僵尸进程不算活着。/proc 不存在时（macOS）退回 kill(pid,0) 探测。
+
+    两个分支必须合在一条 `except OSError` 里：`FileNotFoundError` 是
+    `OSError` 的子类，单列一条并 `return False` 会让 **macOS 上恒返回 False**
+    —— 因为 macOS 根本没有 /proc。后果不只是两条用例变红：
+    `wait_until(lambda: not _process_running(...))` 这类断言会立刻成立，
+    变成永远为真的空断言，清理逻辑回归时也发现不了。
+    """
     try:
         with open(f"/proc/{pid}/stat") as f:
             return f.read().split(") ", 1)[1][0] != "Z"
-    except FileNotFoundError:
-        return False
     except OSError:
+        # 没有 /proc（macOS）、或读不了 —— 用 ps 探活。
+        # 不能用 os.kill(pid, 0)：它只回答"这个 pid 还在不在"，
+        # 而**僵尸进程**也还在（只是没人回收），Linux 靠 /proc 的 Z 状态
+        # 识别僵尸，macOS 必须靠 ps 的 stat 首字母。
         try:
-            os.kill(pid, 0)
-            return True
-        except ProcessLookupError:
+            out = subprocess.run(
+                ["ps", "-o", "stat=", "-p", str(pid)],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError):
             return False
+        state = out.stdout.strip()
+        return bool(state) and not state.startswith("Z")
 
 
 def test_alloc_port_returns_bindable_port():

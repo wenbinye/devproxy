@@ -135,7 +135,26 @@ class DnsComponent:
 
     # -- check ---------------------------------------------------------
     def check(self) -> Status:
+        """就绪判据必须与 plan 一致 —— 否则 doctor 会说谎。
+
+        `platform.dns_route_installed` 只回答"文件在不在"：macOS 上
+        `/etc/resolver/test` 可能是别的工具多年前留下的 `nameserver 127.0.0.1`
+        （没有 `port 5300`），Linux 上 drop-in 也可能被手改过。文件在、内容不对
+        时仍然报"已就绪"，用户会对着一个 `doctor` 全绿的机器调半天解析。
+
+        所以：内容能读到就以内容为准；读不到（权限）才退回平台的存在性判据 ——
+        那时无法证伪，不该凭空报错。
+        """
         key = self._backend_key()
+        content = self._expected_content()
+        if self._route_in_place(content):
+            return Status(ok=True, detail=f"DNS 路由已配置（{key} 后端）")
+        if self._read_target() is not None:
+            return Status(
+                ok=False,
+                detail=f"DNS 路由内容不是预期（{key} 后端）：{self.target_path}",
+                hint="devproxy setup 会重写",
+            )
         if self.platform.dns_route_installed(key, self.config.domain_suffix):
             return Status(ok=True, detail=f"DNS 路由已配置（{key} 后端）")
         return Status(
@@ -144,14 +163,35 @@ class DnsComponent:
             hint="devproxy setup 会写入（需要 sudo）",
         )
 
+    def _read_target(self) -> str | None:
+        """目标文件的内容；不存在或读不了返回 None（两者都是"不知道"）。"""
+        try:
+            return self.target_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return None
+
     # -- plan ----------------------------------------------------------
+    def _expected_content(self) -> str:
+        """当前平台/后端下，路由文件应有的内容。
+
+        check 与 plan 必须用**同一份**判据 —— 两处各算一遍迟早会漂移，
+        而漂移的表现就是"doctor 说就绪、setup 却要重写"。
+        """
+        if self.platform.name == "mac":
+            return render_resolver_file(self.platform.dns_port)
+        if self.resolved_backend:
+            return render_resolved_conf(
+                port=self.platform.dns_port, domains=[self.config.domain_suffix]
+            )
+        return render_system_dnsmasq_conf(suffix=self.config.domain_suffix)
+
     def plan(self) -> list[Action]:
         """路由已是预期内容时返回空列表 —— 重复 setup 不该再要 sudo、
         更不该再重启系统 resolver（那会造成全机 DNS 抖动）。"""
         if self.platform.name == "mac":
             # macOS 的每域解析器文件：mDNSResponder 会自己重载，
             # 不需要（也不能）重启任何解析服务。
-            content = render_resolver_file(self.platform.dns_port)
+            content = self._expected_content()
             desc = "写入 %s（macOS 每域解析器）" % self.target_path
             if self._route_in_place(content):
                 return []
@@ -165,9 +205,7 @@ class DnsComponent:
                 )
             ]
         if self.resolved_backend:
-            content = render_resolved_conf(
-                port=self.platform.dns_port, domains=[self.config.domain_suffix]
-            )
+            content = self._expected_content()
             desc = "写入 systemd-resolved 路由（*.%s → 127.0.0.1，整机 DNS 作用域）" % (
                 self.config.domain_suffix,
             )
@@ -178,7 +216,7 @@ class DnsComponent:
                 privileged=True,
             )
         else:
-            content = render_system_dnsmasq_conf(suffix=self.config.domain_suffix)
+            content = self._expected_content()
             desc = "写入系统 dnsmasq 路由（*.%s → 127.0.0.1）" % self.config.domain_suffix
             reload_action = Action(
                 description="重载系统 dnsmasq 使路由生效",
