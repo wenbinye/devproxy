@@ -68,6 +68,7 @@ from devproxy.components.certs import CertComponent  # noqa: F401
 from devproxy.components.dns import DnsComponent  # noqa: F401
 from devproxy.components.dnsmasq import DNSMASQ_CONF  # noqa: F401
 from devproxy.components.dnsmasq import DnsmasqComponent  # noqa: F401
+from devproxy.gateway.caddy import CaddyConfig  # noqa: F401
 from devproxy.gateway.runner import UpRunner  # noqa: F401
 from devproxy.gateway.runner import kill_pid_group  # noqa: F401
 from devproxy.gateway.sync import build_sync_plan  # noqa: F401
