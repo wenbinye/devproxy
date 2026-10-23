@@ -14,7 +14,7 @@ from typing import Callable, Iterator, NoReturn
 
 from devproxy.core.config import Config
 from devproxy.core.paths import Paths
-from devproxy.gateway.caddy import CaddyConfig, build_main_caddyfile
+from devproxy.gateway.caddy import CaddyConfig, MainCaddyfileSpec, build_main_caddyfile
 from devproxy.gateway.routes import (
     Route,
     RouteTable,
@@ -130,12 +130,14 @@ class RouteStore:
         atomic_write(
             tmp_main,
             build_main_caddyfile(
-                admin_addr=self.config.admin_addr,
-                storage=self.config.storage_path,
-                routes_caddy=tmp_routes,
-                sites_caddy=self.paths.sites_caddy,
-                http_port=self.config.http_port,
-                https_port=self.config.https_port,
+                MainCaddyfileSpec(
+                    admin_addr=self.config.admin_addr,
+                    storage=self.config.storage_path,
+                    routes_caddy=tmp_routes,
+                    sites_caddy=self.paths.sites_caddy,
+                    http_port=self.config.http_port,
+                    https_port=self.config.https_port,
+                )
             ),
         )
         return self.caddy.validate(tmp_main)

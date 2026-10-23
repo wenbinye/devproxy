@@ -16,6 +16,8 @@ from pathlib import Path
 
 from devproxy.platform.base import (
     CA_NICKNAME,
+    RESOLVED_CONF,
+    SYSTEM_DNSMASQ_CONF,
     SYSTEM_TRUST_DIR,
     ElevatedSession,
     nss_db_dir,
@@ -916,7 +918,7 @@ class LinuxPlatform:
     def dns_route_installed(self, backend: str, suffix: str) -> bool:
         """Linux 的两个后端都是固定路径，不看域名后缀（macOS 才按后缀分文件）。"""
         if backend == "resolved":
-            return Path("/etc/systemd/resolved.conf.d/devproxy.conf").exists()
+            return RESOLVED_CONF.exists()
         if backend == "system":
-            return Path("/etc/dnsmasq.d/devproxy.conf").exists()
+            return SYSTEM_DNSMASQ_CONF.exists()
         return False

@@ -104,15 +104,23 @@ def _caddy_token(value: str) -> str:
     return value if safe else json.dumps(value, ensure_ascii=False)
 
 
-def build_main_caddyfile(
-    *,
-    admin_addr: str,
-    storage: Path,
-    routes_caddy: Path,
-    sites_caddy: Path,
-    http_port: int = 80,
-    https_port: int = 443,
-) -> str:
+@dataclass(frozen=True)
+class MainCaddyfileSpec:
+    """生成主 Caddyfile 所需的全部输入。
+
+    参数收敛成一个值对象：调用点不会再把两个同类型的路径传反，
+    新增字段也只需改这里。
+    """
+
+    admin_addr: str
+    storage: Path
+    routes_caddy: Path
+    sites_caddy: Path
+    http_port: int = 80
+    https_port: int = 443
+
+
+def build_main_caddyfile(spec: MainCaddyfileSpec) -> str:
     """生成主 Caddyfile：唯一全局块 + 两个 import。
 
     被 import 的文件不能含全局块 —— 全局块只能有一个。
@@ -123,12 +131,12 @@ def build_main_caddyfile(
     """
     return (
         "{\n"
-        f"\tadmin {_caddy_token(str(admin_addr))}\n"
-        f"\tstorage file_system {_caddy_token(str(storage))}\n"
-        f"\thttp_port {http_port}\n"
-        f"\thttps_port {https_port}\n"
+        f"\tadmin {_caddy_token(str(spec.admin_addr))}\n"
+        f"\tstorage file_system {_caddy_token(str(spec.storage))}\n"
+        f"\thttp_port {spec.http_port}\n"
+        f"\thttps_port {spec.https_port}\n"
         "}\n"
         "\n"
-        f"import {_caddy_token(str(routes_caddy))}\n"
-        f"import {_caddy_token(str(sites_caddy))}\n"
+        f"import {_caddy_token(str(spec.routes_caddy))}\n"
+        f"import {_caddy_token(str(spec.sites_caddy))}\n"
     )

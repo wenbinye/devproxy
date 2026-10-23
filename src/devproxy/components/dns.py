@@ -14,16 +14,16 @@ from pathlib import Path
 from devproxy.core.config import Config
 from devproxy.core.paths import Paths
 from devproxy.platform.base import (
+    RESOLVED_CONF,
     RESOLVER_DIR,
+    SYSTEM_DNSMASQ_CONF,
     Action,
     Platform,
     Status,
     render_resolver_file,
 )
 
-RESOLVED_CONF_DIR = Path("/etc/systemd/resolved.conf.d")
-RESOLVED_CONF = RESOLVED_CONF_DIR / "devproxy.conf"
-SYSTEM_DNSMASQ_CONF = Path("/etc/dnsmasq.d/devproxy.conf")
+# 路径常量的定义在 `platform/base.py`（单一来源）；这里只导入使用。
 
 # resolved 的整机兜底解析器。披露文案与真正写进配置的必须是同一份 ——
 # 两处各写一遍就会漂移，用户看到的和实际生效的就对不上了。

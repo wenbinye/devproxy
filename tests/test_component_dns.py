@@ -53,6 +53,22 @@ def test_production_paths_point_at_real_system_locations():
     assert _REAL_RESOLVER_DIR == Path("/etc/resolver")
 
 
+def test_dns_route_paths_have_a_single_source():
+    """三个路由路径只在 platform.base 定义；组件与平台实现引用同一对象。
+
+    任何一处重新写回字面量都会让 `is` 断言失败 —— 漂移的后果是
+    “setup 写 A、doctor 查 B、回滚备份 C”。
+    """
+    from devproxy.platform import base, linux, macos
+
+    assert _REAL_RESOLVED_CONF is base.RESOLVED_CONF
+    assert _REAL_SYSTEM_DNSMASQ_CONF is base.SYSTEM_DNSMASQ_CONF
+    assert _REAL_RESOLVER_DIR is base.RESOLVER_DIR
+    assert linux.RESOLVED_CONF is base.RESOLVED_CONF
+    assert linux.SYSTEM_DNSMASQ_CONF is base.SYSTEM_DNSMASQ_CONF
+    assert macos.RESOLVER_DIR is base.RESOLVER_DIR
+
+
 def test_render_resolved_conf_shape():
     out = render_resolved_conf(port=5353, suffix="test")
     assert "[Resolve]" in out
@@ -221,11 +237,8 @@ def test_auto_falls_back_to_system_when_resolved_inactive(tmp_path):
     assert comp.target_path == dns_module.SYSTEM_DNSMASQ_CONF
 
 
-def test_auto_ignores_resolved_conf_dir_when_resolved_inactive(tmp_path, monkeypatch):
+def test_auto_ignores_resolved_conf_dir_when_resolved_inactive(tmp_path):
     """目录存在不是判据 —— 本机的目录就是手工创建的。"""
-    monkeypatch.setattr(
-        dns_module, "RESOLVED_CONF_DIR", tmp_path / "resolved.conf.d"
-    )
     (tmp_path / "resolved.conf.d").mkdir()
     platform = FakePlatform()
     platform.resolved_running = False

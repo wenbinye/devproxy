@@ -72,15 +72,17 @@ def _write_sites_caddy(
 
 def _main_caddyfile_content(paths: Paths, config: Config) -> str:
     """工具自己的主 Caddyfile（全局块 + 两个 import）。"""
-    from devproxy.gateway.caddy import build_main_caddyfile
+    from devproxy.gateway.caddy import MainCaddyfileSpec, build_main_caddyfile
 
     return build_main_caddyfile(
-        admin_addr=config.admin_addr,
-        storage=config.storage_path,
-        routes_caddy=paths.routes_caddy,
-        sites_caddy=paths.sites_caddy,
-        http_port=config.http_port,
-        https_port=config.https_port,
+        MainCaddyfileSpec(
+            admin_addr=config.admin_addr,
+            storage=config.storage_path,
+            routes_caddy=paths.routes_caddy,
+            sites_caddy=paths.sites_caddy,
+            http_port=config.http_port,
+            https_port=config.https_port,
+        )
     )
 
 def _write_main_caddyfile(paths: Paths, config: Config) -> None:

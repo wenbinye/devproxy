@@ -32,7 +32,14 @@ def nss_db_dir(home: Path | None = None) -> Path:
 # macOS 的对应物：CA 进系统钥匙串（Safari/Chrome 都认它），
 # DNS 路由走每域解析器文件（/etc/resolver/<后缀>），不动 /etc/resolv.conf。
 SYSTEM_KEYCHAIN = "/Library/Keychains/System.keychain"
+
+# DNS 路由文件的**单一来源**：组件写入、平台探测、迁移备份都必须引用这里。
+# 三处各写一份字面量迟早会漂移 —— 组件写到 A、平台查 B、迁移备份 C，
+# 表现就是 setup 说成功、doctor 说缺失、回滚删不掉真正被改的文件。
 RESOLVER_DIR = Path("/etc/resolver")
+RESOLVED_CONF_DIR = Path("/etc/systemd/resolved.conf.d")
+RESOLVED_CONF = RESOLVED_CONF_DIR / "devproxy.conf"
+SYSTEM_DNSMASQ_CONF = Path("/etc/dnsmasq.d/devproxy.conf")
 
 
 @dataclass

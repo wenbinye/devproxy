@@ -38,7 +38,6 @@ from devproxy.lifecycle.migrate.legacy import (
     MigrationError,
     detect_legacy,
     load_legacy_storage,
-    resolve_storage,
     resolve_storage_details,
     save_legacy_storage,
     unit_config_path,
@@ -62,8 +61,6 @@ __all__ = [
     "detect_legacy",
     "legacy_storage_path",
     "load_legacy_storage",
-    "migrate",
-    "resolve_storage",
     "resolve_storage_details",
     "rollback",
     "run_migration",
@@ -97,13 +94,19 @@ class MigrationRequest:
 
 @dataclass
 class MigrationOutcome:
-    """迁移的结果：备份对象 + 需要告诉用户的提示。
+    """迁移的结果：备份对象 + 生效配置 + 需要告诉用户的提示。
 
     `notes` 是返回值的一部分，不再是调用方传进来、被就地修改的
     可变输出参数（CQS）。
+
+    `config` 是 storage 连续性处理后的**生效配置**：调用方（setup）
+    必须用它继续组件流程，否则会在主 Caddyfile 里写回旧 storage，
+    让 Caddy 重新生成 CA。把它放进返回值，调用方就不必在迁移前
+    先读一遍遗留 Caddyfile（那是重复读取）。
     """
 
     backup: Backup
+    config: Config
     notes: list[str] = field(default_factory=list)
 
 
@@ -195,43 +198,4 @@ def run_migration(request: MigrationRequest) -> MigrationOutcome:
         notes.extend(_restart_caddy(platform))
     except BaseException as exc:  # noqa: BLE001 —— 含 KeyboardInterrupt，必须还原
         _restore_after_failure(platform, backup, exc, notes=notes)
-    return MigrationOutcome(backup=backup, notes=notes)
-
-
-def migrate(
-    platform: Platform,
-    paths: Paths,
-    config: Config,
-    state: LegacyState,
-    *,
-    dnsmasq_conf: Path | None = None,
-    dns_route: Path | None = None,
-    backend: str | None = None,
-    notes: list[str] | None = None,
-) -> Backup:
-    """兼容入口：返回备份对象，并把提示追加进 `notes`（若提供）。
-
-    `cli/_migrate.py` 仍按这个形状调用（CLI 不在本批修改范围）。新代码
-    请直接用 `MigrationRequest` + `run_migration()`，提示从
-    `MigrationOutcome.notes` 取，不要再依赖可变输出参数。
-    """
-    try:
-        outcome = run_migration(
-            MigrationRequest(
-                platform=platform,
-                paths=paths,
-                config=config,
-                state=state,
-                dnsmasq_conf=dnsmasq_conf,
-                dns_route=dns_route,
-                backend=backend,
-            )
-        )
-    except MigrationError as exc:
-        # 失败路径也要把已收集的提示交给调用方（CLI 会在报错前打印）
-        if notes is not None:
-            notes.extend(exc.notes)
-        raise
-    if notes is not None:
-        notes.extend(outcome.notes)
-    return outcome.backup
+    return MigrationOutcome(backup=backup, config=config, notes=notes)

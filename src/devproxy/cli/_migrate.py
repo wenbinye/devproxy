@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from dataclasses import field
 from pathlib import Path
 
 from rich.markup import escape
@@ -16,8 +15,10 @@ from devproxy.core.config import Config
 from devproxy.core.paths import Paths
 from devproxy.lifecycle.migrate import LegacyState
 from devproxy.lifecycle.migrate import MigrationError
-from devproxy.lifecycle.migrate import migrate
+from devproxy.lifecycle.migrate import MigrationOutcome
+from devproxy.lifecycle.migrate import MigrationRequest
 from devproxy.lifecycle.migrate import rollback as do_rollback
+from devproxy.lifecycle.migrate import run_migration
 from devproxy.platform.base import Platform
 
 from devproxy.cli import _shared as s
@@ -36,13 +37,14 @@ class MigrateRequest:
     config: Config
     state: LegacyState
     yes: bool = False
-    notes: list[str] = field(default_factory=list)
 
 
-def _migrate_legacy(req: MigrateRequest) -> None:
+def _migrate_legacy(req: MigrateRequest) -> MigrationOutcome:
     """把遗留的 caddy 服务迁到本工具管理之下。
 
     迁移会改写用户的单元与 Caddyfile —— 非交互环境必须显式 --yes。
+    返回迁移结果：调用方必须用 `outcome.config` 继续后续组件流程
+    （其中已包含遗留 Caddyfile 的 storage）。
     """
     s.console.print("[yellow]检测到遗留的 caddy 服务（非本工具管理）[/yellow]")
     s.console.print(f"  单元: {req.state.unit_path}")
@@ -57,24 +59,25 @@ def _migrate_legacy(req: MigrateRequest) -> None:
         if not typer.confirm("即将迁移上述遗留环境（会改写单元与 Caddyfile），继续？", default=True):
             s.console.print("已取消：什么都没改（迁移未开始）。")
             raise typer.Exit(EXIT_DECLINED)
-    collected = list(req.notes)
     try:
-        backup = migrate(
-            req.platform,
-            req.paths,
-            req.config,
-            req.state,
-            dnsmasq_conf=s.DNSMASQ_CONF.expanduser(),
-            dns_route=s.default_dns_route(req.platform, req.paths, req.config),
-            notes=collected,
+        outcome = run_migration(
+            MigrationRequest(
+                platform=req.platform,
+                paths=req.paths,
+                config=req.config,
+                state=req.state,
+                dnsmasq_conf=s.DNSMASQ_CONF.expanduser(),
+                dns_route=s.default_dns_route(req.platform, req.paths, req.config),
+            )
         )
     except MigrationError as e:
         # 失败路径也要把提示打出来：用户得知道丢了哪些块、sites.caddy 有没有被覆盖
-        s._print_notes(collected)
+        s._print_notes(e.notes)
         s.fail(str(e), EXIT_FAIL)
-    s._print_notes(collected)
-    s.console.print(f"已备份到: {backup.directory}")
-    s.console.print(f"回滚命令: devproxy setup --rollback {backup.directory}")
+    s._print_notes(outcome.notes)
+    s.console.print(f"已备份到: {outcome.backup.directory}")
+    s.console.print(f"回滚命令: devproxy setup --rollback {outcome.backup.directory}")
+    return outcome
 
 
 def _caddy_unit_exists(platform) -> bool:

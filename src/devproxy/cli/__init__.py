@@ -13,6 +13,7 @@ import typer
 from rich.markup import escape
 
 from devproxy.cli._shared import EXIT_FAIL, DevProxyGroup, err_console
+from devproxy.core.caddy_env import CaddyEnvArchiveError
 from devproxy.core.config import ConfigError
 from devproxy.gateway.routes import RouteTableError
 from devproxy.gateway.store import RouteStoreError
@@ -41,7 +42,7 @@ from devproxy.cli import (  # noqa: E402,F401
 def main() -> None:
     try:
         app()
-    except (ConfigError, RouteStoreError, RouteTableError) as e:
+    except (CaddyEnvArchiveError, ConfigError, RouteStoreError, RouteTableError) as e:
         # 兜底：领域异常绝不能以 traceback 形态漏到终端
         err_console.print(f"devproxy: {escape(str(e))}")
         sys.exit(EXIT_FAIL)

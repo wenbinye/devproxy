@@ -7,6 +7,7 @@ from typer.testing import CliRunner
 
 from devproxy.cli import app
 from devproxy.cli._shared import DevProxyGroup
+from devproxy.core.caddy_env import CaddyEnvArchiveError
 from devproxy.core.config import Config, ConfigError
 from devproxy.core.paths import Paths
 from devproxy.gateway.routes import Route, RouteTableError
@@ -353,7 +354,16 @@ def test_config_with_corrupt_routes_file_is_clean_error(env, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "exc", [RouteStoreError("boom"), RouteTableError("损坏"), ConfigError("坏")]
+    "exc",
+    [
+        RouteStoreError("boom"),
+        RouteTableError("损坏"),
+        ConfigError("坏"),
+        pytest.param(
+            CaddyEnvArchiveError("环境变量留档损坏"),
+            id="caddy-env-archive",
+        ),
+    ],
 )
 def test_main_backstop_turns_domain_errors_into_exit_1(monkeypatch, exc):
     """main() 兜底：领域异常绝不能以 traceback 的形式漏到终端。"""
@@ -424,6 +434,73 @@ def _seed_legacy_unit(platform, tmp_path, caddyfile_text=None):
         encoding="utf-8",
     )
     return unit, old_cfg
+
+
+class _CountingPath(Path):
+    """统计 read_text 次数的路径：证明 setup 没有在迁移前预读。"""
+
+    if hasattr(type(Path()), "_flavour"):  # Python 3.11 的路径子类需要它
+        _flavour = type(Path())._flavour
+
+    reads: list[str] = []
+
+    def read_text(self, *args, **kwargs):
+        type(self).reads.append(str(self))
+        return super().read_text(*args, **kwargs)
+
+
+def test_setup_does_not_pre_read_legacy_caddyfile(env, monkeypatch, tmp_path):
+    """遗留 Caddyfile 只由迁移内部读取；setup 不再为了 storage 预读一遍。"""
+    from devproxy.cli import setup as setup_mod
+    from devproxy.lifecycle.migrate import LegacyState
+    from devproxy.platform.fake import FakePlatform
+
+    _CountingPath.reads = []
+    platform = FakePlatform()
+    monkeypatch.setattr(
+        "devproxy.cli._shared.DNSMASQ_CONF", tmp_path / "dnsmasq.conf"
+    )
+    monkeypatch.setattr(
+        "devproxy.cli._shared.default_dns_route",
+        lambda *a, **k: tmp_path / "resolved.conf",
+    )
+    paths = Paths(tmp_path / "config", tmp_path / "state", tmp_path / "data")
+    paths.ensure_files()
+    old_cfg = tmp_path / "old" / "Caddyfile"
+    old_cfg.parent.mkdir(parents=True)
+    legacy_storage = tmp_path / "legacy-data"
+    old_cfg.write_text(
+        "{\n"
+        f"\tstorage file_system {legacy_storage}\n"
+        "}\n\nlocalhost {\n\ttls internal\n}\n",
+        encoding="utf-8",
+    )
+    unit = platform.service_unit_path("caddy")
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    unit.write_text("ExecStart=/bin/caddy run --config /old/Caddyfile\n", encoding="utf-8")
+    state = LegacyState(
+        unit_path=unit,
+        config_path=_CountingPath(str(old_cfg)),
+        env={"MINIKUBE_IP": "1.2.3.4"},
+    )
+    monkeypatch.setattr(setup_mod, "detect_legacy", lambda *a, **k: state)
+
+    real_migrate = setup_mod._migrate_legacy
+    reads_before_migration: list[str] = []
+
+    def wrapped(req):
+        reads_before_migration.extend(_CountingPath.reads)
+        return real_migrate(req)
+
+    monkeypatch.setattr(setup_mod, "_migrate_legacy", wrapped)
+    config = setup_mod._maybe_migrate(
+        platform, paths, Config(storage=str(tmp_path / "config-data")), "auto", True
+    )
+
+    assert reads_before_migration == [], "setup 在迁移前不该读遗留 Caddyfile"
+    assert _CountingPath.reads, "迁移内部仍要读取（storage 与站点拆分各一次）"
+    # 生效配置必须从 MigrationOutcome 带回，组件流程才不会写回旧 storage
+    assert config.storage_path == legacy_storage
 
 
 def test_setup_migrates_legacy_caddy(env, monkeypatch, tmp_path):

@@ -18,8 +18,6 @@ from devproxy.lifecycle.migrate import (
     detect_legacy,
     legacy_storage_path,
     load_legacy_storage,
-    migrate,
-    resolve_storage,
     resolve_storage_details,
     rollback,
     run_migration,
@@ -70,17 +68,23 @@ def _legacy_state(tmp_path, unit_text=None, caddyfile_text=None):
     return LegacyState(unit_path=unit_path, config_path=old_cfg, env={"MINIKUBE_IP": "1.2.3.4"})
 
 
-def _migrate(platform, paths, config, state, tmp_path, notes=None):
+def _run_migration(platform, paths, config, state, tmp_path):
     """迁移，但把 dnsmasq 配置与 DNS 路由文件指向 tmp_path（绝不碰真实系统）。"""
-    return migrate(
-        platform,
-        paths,
-        config,
-        state,
-        dnsmasq_conf=tmp_path / "dnsmasq.conf",
-        dns_route=tmp_path / "resolved.conf",
-        notes=notes,
+    return run_migration(
+        MigrationRequest(
+            platform=platform,
+            paths=paths,
+            config=config,
+            state=state,
+            dnsmasq_conf=tmp_path / "dnsmasq.conf",
+            dns_route=tmp_path / "resolved.conf",
+        )
     )
+
+
+def _migrate(platform, paths, config, state, tmp_path):
+    """只要备份对象的快捷方式。"""
+    return _run_migration(platform, paths, config, state, tmp_path).backup
 
 
 # -- Caddyfile 拆分 ------------------------------------------------------------
@@ -439,15 +443,17 @@ def test_migrate_backup_covers_every_file_to_be_touched(tmp_path):
     state = _legacy_state(tmp_path)
     dnsmasq_conf = tmp_path / "dnsmasq.conf"
     dnsmasq_conf.write_text("port=5353\n", encoding="utf-8")
-    backup = migrate(
-        platform,
-        paths,
-        Config(),
-        state,
-        dnsmasq_conf=dnsmasq_conf,
-        dns_route=tmp_path / "resolved.conf",
+    outcome = run_migration(
+        MigrationRequest(
+            platform=platform,
+            paths=paths,
+            config=Config(),
+            state=state,
+            dnsmasq_conf=dnsmasq_conf,
+            dns_route=tmp_path / "resolved.conf",
+        )
     )
-    originals = {e.original for e in backup.entries}
+    originals = {e.original for e in outcome.backup.entries}
     assert state.unit_path in originals, "单元会被改写"
     assert paths.sites_caddy in originals, "个人站点会被写入"
     assert paths.caddyfile in originals, "主 Caddyfile 会被生成"
@@ -478,18 +484,11 @@ def test_migrate_does_not_overwrite_existing_sites_caddy(tmp_path):
     state = _legacy_state(
         tmp_path, caddyfile_text="localhost {\n\ttls internal\n}\n"
     )
-    notes: list[str] = []
-    migrate(
-        platform,
-        paths,
-        Config(),
-        state,
-        dnsmasq_conf=tmp_path / "dnsmasq.conf",
-        dns_route=tmp_path / "resolved.conf",
-        notes=notes,
-    )
+    outcome = _run_migration(platform, paths, Config(), state, tmp_path)
     assert paths.sites_caddy.read_text() == "mine.example { respond \"hi\" }\n"
-    assert any("sites.caddy" in n for n in notes), "必须告诉用户个人站点没被迁走"
+    assert any(
+        "sites.caddy" in n for n in outcome.notes
+    ), "必须告诉用户个人站点没被迁走"
 
 
 def test_migrate_states_that_personal_sites_are_no_longer_served(tmp_path):
@@ -510,10 +509,9 @@ def test_migrate_states_that_personal_sites_are_no_longer_served(tmp_path):
             "api.example.com {\n\treverse_proxy 1.2.3.4:80\n}\n"
         ),
     )
-    notes: list[str] = []
-    _migrate(platform, paths, Config(), state, tmp_path, notes=notes)
-    joined = "\n".join(notes)
-    assert "不再被服务" in joined, f"必须明说站点不再被服务：{notes}"
+    outcome = _run_migration(platform, paths, Config(), state, tmp_path)
+    joined = "\n".join(outcome.notes)
+    assert "不再被服务" in joined, f"必须明说站点不再被服务：{outcome.notes}"
     assert "localhost" in joined and "api.example.com" in joined, "必须点名涉及的地址"
     assert str(state.config_path) in joined, "必须点名要从哪个文件合并"
     assert str(paths.sites_caddy) in joined, "必须点名要合并到哪个文件"
@@ -538,18 +536,18 @@ def test_migrate_unit_falls_back_to_legacy_binary_when_config_binary_missing(tmp
             f"ExecStart={legacy_bin} run --config /old/Caddyfile\n"
         ),
     )
-    notes: list[str] = []
-    _migrate(
+    outcome = _run_migration(
         platform,
         paths,
         Config(caddy_bin=str(tmp_path / "not-downloaded" / "caddy")),
         state,
         tmp_path,
-        notes=notes,
     )
     unit = platform.services["caddy"]
     assert f"ExecStart={legacy_bin} run" in unit, unit
-    assert any("沿用遗留" in n for n in notes), f"必须说明用了哪个二进制：{notes}"
+    assert any(
+        "沿用遗留" in n for n in outcome.notes
+    ), f"必须说明用了哪个二进制：{outcome.notes}"
 
 
 def test_migrate_preserves_unit_env(tmp_path):
@@ -666,15 +664,14 @@ def test_migrate_restores_backup_on_keyboard_interrupt(tmp_path, monkeypatch):
         raise KeyboardInterrupt
 
     monkeypatch.setattr(platform, "install_service", interrupt)
-    notes: list[str] = []
     with pytest.raises(MigrationError) as ei:
-        _migrate(platform, paths, Config(), state, tmp_path, notes=notes)
+        _migrate(platform, paths, Config(), state, tmp_path)
     message = str(ei.value)
     assert "中断" in message
     assert "devproxy setup --rollback" in message
     assert state.unit_path.read_text(encoding="utf-8") == original_unit
     assert paths.sites_caddy.read_text(encoding="utf-8").strip() == ""
-    assert any("丢弃" in n for n in notes), "失败前的提示也必须交给调用方"
+    assert any("丢弃" in n for n in ei.value.notes), "失败前的提示也必须交给调用方"
 
 
 def test_migrate_refuses_unconfirmed_legacy_state(tmp_path):
@@ -821,14 +818,7 @@ def test_migrate_aborts_when_caddy_validate_fails(tmp_path, monkeypatch):
     monkeypatch.setattr(platform, "run", fake_run)
 
     with pytest.raises(MigrationError) as ei:
-        migrate(
-            platform,
-            paths,
-            config,
-            state,
-            dnsmasq_conf=tmp_path / "dnsmasq.conf",
-            dns_route=tmp_path / "resolved.conf",
-        )
+        _migrate(platform, paths, config, state, tmp_path)
     assert "校验" in str(ei.value)
     assert state.unit_path.read_text(encoding="utf-8") == original_unit
     assert not paths.caddyfile.exists(), "校验不过就不该写主 Caddyfile"
@@ -841,18 +831,9 @@ def test_migrate_skips_validation_when_binary_missing(tmp_path):
     paths.ensure_files()
     platform = FakePlatform()
     state = _legacy_state(tmp_path)
-    notes: list[str] = []
     config = Config(caddy_bin=str(tmp_path / "absent"))
-    migrate(
-        platform,
-        paths,
-        config,
-        state,
-        dnsmasq_conf=tmp_path / "dnsmasq.conf",
-        dns_route=tmp_path / "resolved.conf",
-        notes=notes,
-    )
-    assert any("跳过配置校验" in n for n in notes)
+    outcome = _run_migration(platform, paths, config, state, tmp_path)
+    assert any("跳过配置校验" in n for n in outcome.notes)
     assert paths.caddyfile.exists()
 
 
@@ -882,21 +863,18 @@ def test_validate_falls_back_to_legacy_unit_binary(tmp_path, monkeypatch):
         return 0, ""
 
     monkeypatch.setattr(platform, "run", fake_run)
-    notes: list[str] = []
-    migrate(
+    outcome = _run_migration(
         platform,
         paths,
         Config(caddy_bin=str(tmp_path / "absent")),
         state,
-        dnsmasq_conf=tmp_path / "dnsmasq.conf",
-        dns_route=tmp_path / "resolved.conf",
-        notes=notes,
+        tmp_path,
     )
     validate_calls = [c for c in calls if "validate" in c]
     assert validate_calls, "必须真的跑一次 caddy validate"
     assert validate_calls[0][0] == str(legacy_bin)
-    assert any("遗留单元" in n for n in notes)
-    assert not any("跳过配置校验" in n for n in notes)
+    assert any("遗留单元" in n for n in outcome.notes)
+    assert not any("跳过配置校验" in n for n in outcome.notes)
 
 
 def test_validate_still_skips_when_no_binary_anywhere(tmp_path):
@@ -905,17 +883,14 @@ def test_validate_still_skips_when_no_binary_anywhere(tmp_path):
     paths.ensure_files()
     platform = FakePlatform()
     state = _legacy_state(tmp_path)
-    notes: list[str] = []
-    migrate(
+    outcome = _run_migration(
         platform,
         paths,
         Config(caddy_bin=str(tmp_path / "absent")),
         state,
-        dnsmasq_conf=tmp_path / "dnsmasq.conf",
-        dns_route=tmp_path / "resolved.conf",
-        notes=notes,
+        tmp_path,
     )
-    assert any("跳过配置校验" in n for n in notes)
+    assert any("跳过配置校验" in n for n in outcome.notes)
 
 
 def test_unit_exec_start_parsed():
@@ -971,31 +946,36 @@ def test_migrate_keeps_legacy_storage_so_ca_stays(tmp_path):
             "localhost {\n\ttls internal\n}\n"
         ),
     )
-    notes: list[str] = []
-    migrate(
-        platform,
-        paths,
-        Config(storage=str(tmp_path / "config-caddy-data")),
-        state,
-        dnsmasq_conf=tmp_path / "dnsmasq.conf",
-        dns_route=tmp_path / "resolved.conf",
-        notes=notes,
+    outcome = run_migration(
+        MigrationRequest(
+            platform=platform,
+            paths=paths,
+            config=Config(storage=str(tmp_path / "config-caddy-data")),
+            state=state,
+            dnsmasq_conf=tmp_path / "dnsmasq.conf",
+            dns_route=tmp_path / "resolved.conf",
+        )
     )
     caddyfile = paths.caddyfile.read_text(encoding="utf-8")
     assert f"storage file_system {legacy_storage}" in caddyfile
-    assert any("storage" in n and str(legacy_storage) in n for n in notes), "差异必须说出来"
+    assert any(
+        "storage" in n and str(legacy_storage) in n for n in outcome.notes
+    ), "差异必须说出来"
+    # 生效配置必须带回：setup 要用它继续组件流程，不能写回旧 storage
+    assert outcome.config.storage_path == legacy_storage
     # 留档：之后的 setup 必须用同一个地方，否则 CA 会重新生成
     assert str(legacy_storage) in paths.caddy_storage.read_text(encoding="utf-8")
 
 
-def test_resolve_storage_keeps_config_when_same(tmp_path):
+def test_resolve_storage_details_keeps_config_when_same(tmp_path):
     state = _legacy_state(
         tmp_path,
         caddyfile_text="{\n\tstorage file_system /same\n}\n\nlocalhost {\n}\n",
     )
     config = Config(storage="/same")
-    same, note = resolve_storage(config, state)
+    same, legacy, note = resolve_storage_details(config, state)
     assert note is None
+    assert legacy == Path("/same")
     assert same.storage_path == config.storage_path
 
 
@@ -1048,10 +1028,18 @@ def test_dropped_blocks_note_lists_addresses(tmp_path):
             "http://*.test {\n\tredir https://{host}{uri} permanent\n}\n"
         ),
     )
-    notes: list[str] = []
-    _migrate(platform, paths, Config(), state, tmp_path, notes=notes)
-    dropped_notes = [n for n in notes if "丢弃" in n]
-    assert dropped_notes, notes
+    outcome = run_migration(
+        MigrationRequest(
+            platform=platform,
+            paths=paths,
+            config=Config(),
+            state=state,
+            dnsmasq_conf=tmp_path / "dnsmasq.conf",
+            dns_route=tmp_path / "resolved.conf",
+        )
+    )
+    dropped_notes = [n for n in outcome.notes if "丢弃" in n]
+    assert dropped_notes, outcome.notes
     assert "*.test" in dropped_notes[0]
     assert "http://*.test" in dropped_notes[0]
     assert "备份" in dropped_notes[0]
@@ -1085,14 +1073,7 @@ def test_migrate_creates_import_targets_before_validation(tmp_path, monkeypatch)
         return 0, ""
 
     monkeypatch.setattr(platform, "run", fake_run)
-    migrate(
-        platform,
-        paths,
-        config,
-        state,
-        dnsmasq_conf=tmp_path / "dnsmasq.conf",
-        dns_route=tmp_path / "resolved.conf",
-    )
+    _migrate(platform, paths, config, state, tmp_path)
     assert seen.get("missing") == [], "校验时 import 目标必须已经存在"
 
 
@@ -1125,14 +1106,30 @@ def test_resolve_storage_details_returns_path_when_already_same(tmp_path):
 # -- 留档：原子写入与损坏告警 -------------------------------------------------
 
 
-def test_load_extra_env_warns_instead_of_silently_dropping_corrupt_archive(tmp_path):
-    from devproxy.core.caddy_env import load_extra_env
+def test_load_extra_env_fails_loudly_on_corrupt_archive(tmp_path):
+    """留档存在却解析不了 → 抛异常，绝不静默当成空（会丢 MINIKUBE_IP）。"""
+    from devproxy.core.caddy_env import CaddyEnvArchiveError, load_extra_env
 
     paths = _paths(tmp_path)
     paths.ensure_files()
     paths.caddy_env.write_text("{ 截断", encoding="utf-8")
-    with pytest.warns(UserWarning, match="环境变量留档"):
-        assert load_extra_env(paths) == {}
+    with pytest.raises(CaddyEnvArchiveError) as ei:
+        load_extra_env(paths)
+    message = str(ei.value)
+    assert str(paths.caddy_env) in message, "必须点名是哪个文件"
+    assert "修复" in message and "删除" in message, "必须给出修复办法"
+    assert "MINIKUBE_IP" in message, "必须说明后果"
+
+
+def test_load_extra_env_rejects_non_object_json(tmp_path):
+    """合法 JSON 但不是对象（如数组）同样是坏留档。"""
+    from devproxy.core.caddy_env import CaddyEnvArchiveError, load_extra_env
+
+    paths = _paths(tmp_path)
+    paths.ensure_files()
+    paths.caddy_env.write_text('["MINIKUBE_IP", "1.2.3.4"]', encoding="utf-8")
+    with pytest.raises(CaddyEnvArchiveError, match="JSON 对象"):
+        load_extra_env(paths)
 
 
 def test_load_extra_env_missing_file_is_silent(tmp_path):
@@ -1206,9 +1203,6 @@ def test_save_legacy_storage_is_atomic_when_replace_fails(tmp_path, monkeypatch)
 def test_public_type_hints_resolve():
     from typing import get_type_hints
 
-    from devproxy.lifecycle.migrate.legacy import resolve_storage
-
-    assert get_type_hints(resolve_storage)
     assert get_type_hints(resolve_storage_details)
-    assert get_type_hints(migrate)
     assert get_type_hints(run_migration)
+    assert get_type_hints(MigrationRequest)

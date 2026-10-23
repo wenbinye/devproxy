@@ -26,7 +26,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from devproxy.gateway.caddy import build_main_caddyfile
+from devproxy.gateway.caddy import MainCaddyfileSpec, build_main_caddyfile
 from devproxy.gateway.routes import Route, RouteTable, render_caddyfile
 
 UPSTREAM_BODY = b"hello-from-upstream"
@@ -282,12 +282,14 @@ def _write_sandbox_configs(
         routes_file.write_text(render_caddyfile(RouteTable()), encoding="utf-8")
         caddyfile.write_text(
             build_main_caddyfile(
-                admin_addr=f"127.0.0.1:{admin_port}",
-                storage=tmp / "data",
-                routes_caddy=routes_file,
-                sites_caddy=sites_file,
-                http_port=http_port,
-                https_port=https_port,
+                MainCaddyfileSpec(
+                    admin_addr=f"127.0.0.1:{admin_port}",
+                    storage=tmp / "data",
+                    routes_caddy=routes_file,
+                    sites_caddy=sites_file,
+                    http_port=http_port,
+                    https_port=https_port,
+                )
             ),
             encoding="utf-8",
         )

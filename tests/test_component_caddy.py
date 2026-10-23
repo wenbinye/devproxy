@@ -16,6 +16,7 @@ from devproxy.components.caddy import (
     current_platform_key,
     download_caddy,
 )
+from devproxy.core.caddy_env import CaddyEnvArchiveError
 from devproxy.core.config import Config
 from devproxy.core.paths import Paths
 from devproxy.platform.fake import FakePlatform
@@ -41,6 +42,30 @@ def _component(tmp_path, platform=None, downloader=None):
         platform or FakePlatform(), paths, cfg, downloader or _fake_downloader
     )
     return comp, paths, cfg
+
+
+def test_corrupt_extra_env_archive_fails_at_construction(tmp_path):
+    """构造期必须中断：坏留档被当成空会静默丢掉 MINIKUBE_IP。"""
+    paths = _paths(tmp_path)
+    paths.ensure_files()
+    paths.caddy_env.write_text("{ 截断", encoding="utf-8")
+    with pytest.raises(CaddyEnvArchiveError, match="环境变量留档"):
+        CaddyComponent(
+            FakePlatform(),
+            paths,
+            Config(storage=str(paths.data_dir)),
+            _fake_downloader,
+        )
+
+
+def test_missing_extra_env_archive_is_normal(tmp_path):
+    """文件不存在是正常情况（没有迁移留档），构造不该报错。"""
+    paths = _paths(tmp_path)
+    paths.ensure_files()
+    comp = CaddyComponent(
+        FakePlatform(), paths, Config(storage=str(paths.data_dir)), _fake_downloader
+    )
+    assert comp.extra_env == {}
 
 
 def _make_ready(comp, platform, cfg) -> None:

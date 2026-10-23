@@ -542,13 +542,15 @@ class CaddyComponent:
         return Status(ok=True, detail=f"caddy 服务运行中，{url} 可访问")
 
     def _main_caddyfile(self) -> str:
-        from devproxy.gateway.caddy import build_main_caddyfile
+        from devproxy.gateway.caddy import MainCaddyfileSpec, build_main_caddyfile
 
         return build_main_caddyfile(
-            admin_addr=self.config.admin_addr,
-            storage=self.config.storage_path,
-            routes_caddy=self.paths.routes_caddy,
-            sites_caddy=self.paths.sites_caddy,
-            http_port=self.config.http_port,
-            https_port=self.config.https_port,
+            MainCaddyfileSpec(
+                admin_addr=self.config.admin_addr,
+                storage=self.config.storage_path,
+                routes_caddy=self.paths.routes_caddy,
+                sites_caddy=self.paths.sites_caddy,
+                http_port=self.config.http_port,
+                https_port=self.config.https_port,
+            )
         )

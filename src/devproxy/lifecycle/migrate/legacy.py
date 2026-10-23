@@ -260,17 +260,6 @@ def resolve_storage_details(
     )
     return replace(config, storage=str(legacy)), legacy, note
 
-def resolve_storage(
-    config: Config, state: LegacyState
-) -> tuple[Config, str | None]:
-    """兼容入口：返回 (生效的配置, 提示语)。
-
-    CLI（`cli/setup.py`）仍按两元组解包；需要遗留 storage 路径的调用方
-    请用 `resolve_storage_details`。
-    """
-    updated, _, note = resolve_storage_details(config, state)
-    return updated, note
-
 def save_legacy_storage(paths: Paths, storage: Path | None) -> None:
     """留档生效的 storage 路径 —— 之后的 setup 必须用同一个地方。"""
     path = paths.caddy_storage

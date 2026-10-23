@@ -234,7 +234,7 @@ def test_selftest_uses_dynamic_ports_and_production_caddyfile(
     monkeypatch.setattr(selftest, "_caddy_version", lambda _: (2, 7, 0))
     monkeypatch.setattr(selftest, "_free_ports", lambda n: [21001, 21002, 21003])
     monkeypatch.setattr(
-        selftest, "build_main_caddyfile", lambda **kwargs: "MARKER-CADDYFILE\n"
+        selftest, "build_main_caddyfile", lambda spec: "MARKER-CADDYFILE\n"
     )
 
     def fake_adapt(caddy_bin_, caddyfile, config_json):

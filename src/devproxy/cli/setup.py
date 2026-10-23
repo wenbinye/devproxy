@@ -21,7 +21,6 @@ from devproxy.cli._shared import UP_EXAMPLE
 from devproxy.core.config import ConfigError
 from devproxy.core.config import validate_config
 from devproxy.lifecycle.migrate import detect_legacy
-from devproxy.lifecycle.migrate import resolve_storage
 
 from devproxy.cli import _shared as s
 
@@ -65,23 +64,25 @@ def _maybe_migrate(platform, paths, config, backend: str, yes: bool):
 
     组件会读迁移留下的状态（单元环境变量、storage）。backend 先折进
     config，迁移与后续组件拿到的就是同一个后端。
+
+    遗留 Caddyfile 只在迁移内部读一次：storage 连续性与提示都由
+    `run_migration` 一次解析完成，生效配置从 `MigrationOutcome.config`
+    取回。这里若先调 `resolve_storage_details` 预读，同一文件就会被读两遍。
     """
     config = replace(config, dns_backend=backend)
     state = detect_legacy(platform, paths)
     if state is None:
         return config
-    config, storage_note = resolve_storage(config, state)
-    _migrate_legacy(
+    outcome = _migrate_legacy(
         MigrateRequest(
             platform=platform,
             paths=paths,
             config=config,
             state=state,
             yes=yes,
-            notes=[storage_note] if storage_note else [],
         )
     )
-    return config
+    return outcome.config
 
 
 def _confirm_or_exit(plan, yes: bool) -> None:

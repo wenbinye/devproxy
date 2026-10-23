@@ -7,6 +7,7 @@ from pathlib import Path
 from devproxy.gateway.caddy import (
     CaddyAdmin,
     CaddyConfig,
+    MainCaddyfileSpec,
     build_main_caddyfile,
 )
 
@@ -130,10 +131,12 @@ def test_reload_timeout_returns_false(tmp_path):
 
 def test_build_main_caddyfile_shape(tmp_path):
     out = build_main_caddyfile(
-        admin_addr="127.0.0.1:2019",
-        storage=Path("/data/caddy"),
-        routes_caddy=Path("/state/routes.caddy"),
-        sites_caddy=Path("/config/sites.caddy"),
+        MainCaddyfileSpec(
+            admin_addr="127.0.0.1:2019",
+            storage=Path("/data/caddy"),
+            routes_caddy=Path("/state/routes.caddy"),
+            sites_caddy=Path("/config/sites.caddy"),
+        )
     )
     assert "admin 127.0.0.1:2019" in out
     assert "storage file_system /data/caddy" in out
@@ -145,12 +148,14 @@ def test_build_main_caddyfile_shape(tmp_path):
 def test_build_main_caddyfile_emits_ports(tmp_path):
     """http_port / https_port 必须真的进 Caddyfile —— 否则配置里的键形同虚设。"""
     out = build_main_caddyfile(
-        admin_addr="127.0.0.1:2019",
-        storage=Path("/data/caddy"),
-        routes_caddy=Path("/state/routes.caddy"),
-        sites_caddy=Path("/config/sites.caddy"),
-        http_port=8080,
-        https_port=8443,
+        MainCaddyfileSpec(
+            admin_addr="127.0.0.1:2019",
+            storage=Path("/data/caddy"),
+            routes_caddy=Path("/state/routes.caddy"),
+            sites_caddy=Path("/config/sites.caddy"),
+            http_port=8080,
+            https_port=8443,
+        )
     )
     assert "http_port 8080" in out
     assert "https_port 8443" in out
@@ -159,10 +164,12 @@ def test_build_main_caddyfile_emits_ports(tmp_path):
 def test_build_main_caddyfile_default_ports(tmp_path):
     """默认值 80/443 —— 生成结果与旧行为一致。"""
     out = build_main_caddyfile(
-        admin_addr="127.0.0.1:2019",
-        storage=Path("/data/caddy"),
-        routes_caddy=Path("/state/routes.caddy"),
-        sites_caddy=Path("/config/sites.caddy"),
+        MainCaddyfileSpec(
+            admin_addr="127.0.0.1:2019",
+            storage=Path("/data/caddy"),
+            routes_caddy=Path("/state/routes.caddy"),
+            sites_caddy=Path("/config/sites.caddy"),
+        )
     )
     assert "http_port 80" in out
     assert "https_port 443" in out
@@ -262,10 +269,12 @@ def test_api_malformed_status_line_returns_zero_not_exception():
 def test_build_main_caddyfile_quotes_paths_with_spaces(tmp_path):
     """含空格的合法路径必须被引用成单个 token，否则 Caddyfile 语法错误。"""
     out = build_main_caddyfile(
-        admin_addr="127.0.0.1:2019",
-        storage=Path("/Volumes/My Disk/caddy"),
-        routes_caddy=Path("/state/my routes.caddy"),
-        sites_caddy=Path("/config/sites.caddy"),
+        MainCaddyfileSpec(
+            admin_addr="127.0.0.1:2019",
+            storage=Path("/Volumes/My Disk/caddy"),
+            routes_caddy=Path("/state/my routes.caddy"),
+            sites_caddy=Path("/config/sites.caddy"),
+        )
     )
     assert 'storage file_system "/Volumes/My Disk/caddy"' in out
     assert 'import "/state/my routes.caddy"' in out
@@ -276,10 +285,12 @@ def test_build_main_caddyfile_quotes_paths_with_spaces(tmp_path):
 def test_build_main_caddyfile_escapes_newline_instead_of_injecting_lines():
     """路径里的换行不得变成额外配置行（否则等于配置注入）。"""
     out = build_main_caddyfile(
-        admin_addr="127.0.0.1:2019",
-        storage=Path("/data/a\nb"),
-        routes_caddy=Path("/state/routes.caddy"),
-        sites_caddy=Path("/config/sites.caddy"),
+        MainCaddyfileSpec(
+            admin_addr="127.0.0.1:2019",
+            storage=Path("/data/a\nb"),
+            routes_caddy=Path("/state/routes.caddy"),
+            sites_caddy=Path("/config/sites.caddy"),
+        )
     )
     assert 'storage file_system "/data/a\\nb"' in out
     assert not any(line.strip() == "b" for line in out.splitlines())
