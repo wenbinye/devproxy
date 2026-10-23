@@ -450,3 +450,23 @@ def test_cli_run_starts_caddy_in_foreground_and_stops_on_sigint(tmp_path):
     assert marker.read_text(encoding="utf-8") == "term", "caddy 没收到 SIGTERM"
     # 前台模式不留痕迹
     assert not (tmp_path / "state" / "routes.json").exists()
+
+
+def test_run_with_other_config_ignores_active_service(
+    env, validator, foreground, monkeypatch
+):
+    """`--config` 指向**别的** Caddyfile 时不该被"服务在跑"拦住。
+
+    服务加载的是主 Caddyfile；另一份配置通常用另一组端口（调试、隔离实例
+    就是为这个），此时端口并不冲突。真撞上了，Caddy 自己会报
+    "address already in use" —— 那比这里的推测准确。
+    """
+    monkeypatch.setattr(
+        "devproxy.cli._shared._platform",
+        lambda: _FakePlatform("linux", True),
+    )
+    other = env[0].config_dir / "other.Caddyfile"
+    other.write_text("# 另一份配置\n", encoding="utf-8")
+    res = _invoke(["run", "--config", str(other)])
+    assert res.exit_code == 0, res.output
+    assert foreground == [(env[2], other)], "应该照常起前台实例"

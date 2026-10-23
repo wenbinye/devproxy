@@ -168,6 +168,7 @@ Caddy 的内部 CA **在第一次加载 `tls internal` 站点时**才生成 —�
 | `devproxy selftest` | 隔离 Caddy 实例端到端自检 |
 | `devproxy uninstall` | 卸载：停服务、移除单元、DNS 路由与（可选）CA。默认保守保留你的配置、个人站点、Caddy 存储与备份 |
 | `devproxy sync` | 按项目根目录的 `devproxy.toml` 同步路由声明（全组共享一份） |
+| `devproxy run` | **前台**托管 Caddy（不装服务、不留状态，Ctrl-C 退出）。没有 systemd 的环境（容器 / WSL）用它替代服务 |
 
 常用选项：
 
@@ -186,14 +187,15 @@ Caddy 的内部 CA **在第一次加载 `tls internal` 站点时**才生成 —�
 | `--ready-timeout S` | `up` | 就绪等待秒数（默认取 `config.toml` 的 `ready_timeout`） |
 | `--file <路径>` | `sync` | 显式指定 `devproxy.toml`（默认从当前目录逐级向上查找） |
 | `--prune` | `sync` | 移除本文件里已删掉的路由（只动本文件声明过的；非交互时须加 `--yes`） |
+| `--config <路径>` | `run` | 要加载的 Caddyfile（默认主 Caddyfile） |
 
 ### 退出码
 
 | 码 | 含义 |
 |---|---|
 | 0 | 成功 |
-| 1 | 运行失败（子进程退出、reload 失败、路由表损坏、迁移被拒绝、**`sync` 发现路由与声明冲突**……） |
-| 2 | 参数错误（非法路由名 / 非法端口、缺少 `--`、未知日志服务名、非法 `dns_backend`、非法 `--domain-suffix`、**`sync` 的配置文件缺失或非法**） |
+| 1 | 运行失败（子进程退出、reload 失败、路由表损坏、迁移被拒绝、**`sync` 发现路由与声明冲突**、`run` 的 Caddy 配置校验失败……） |
+| 2 | 参数错误（非法路由名 / 非法端口、缺少 `--`、未知日志服务名、非法 `dns_backend`、非法 `--domain-suffix`、**`sync` 的配置文件缺失或非法**、**`run --config` 指定的文件不存在**） |
 | 3 | 前置条件不满足（Caddy 未运行、主 Caddyfile 不存在、`doctor` 体检不通过） |
 | 4 | 需要提权但当前非交互（未加 `--yes`），**或用户在确认提示上选择了「否」** |
 
@@ -722,6 +724,50 @@ devproxy uninstall --yes       # 非交互（CI / 脚本）必须加，否则退
 
 ---
 
+## 没有 systemd 的环境：用 `devproxy run` 托管
+
+`devproxy setup` 在 Linux 上靠 **systemd user 单元**托管 Caddy，在 macOS 上靠 **launchd**。
+容器、WSL、精简发行版里这两样常常没有 —— 此时路由就没人托管了
+（路由表是文件，但**得有个 Caddy 进程去加载它**）。
+
+`devproxy run` 就是那个宿主：
+
+```bash
+devproxy run                    # 前台托管 Caddy，Ctrl-C 退出
+devproxy run --config <路径>    # 加载另一份 Caddyfile（通常配另一组端口）
+```
+
+它的行为：
+
+- **stdio 直通终端** —— Caddy 的日志实时打出来（`devproxy logs caddy` 跟随的是
+  journal / 日志文件，这是直接接管进程本身）；
+- **Ctrl-C 干净退出** —— 转发 SIGTERM 给 Caddy，等它优雅收尾（最多 10 秒，
+  超时才强杀），devproxy 退出码 0；
+- **不装服务、不写任何状态** —— 前台模式 = 不留痕迹（`routes.json` 之类一概不动）。
+
+启动前有三道前置检查（不满足时退出码 **3**，并给出该平台对应的修复命令）：
+
+| 情况 | 提示 |
+|---|---|
+| Caddy 二进制不在 | `devproxy setup` |
+| 主 Caddyfile 不存在 | `devproxy setup` |
+| **现役 caddy 服务还在跑** | Linux：`systemctl --user stop caddy`；macOS：`launchctl bootout system/com.devproxy.caddy` |
+
+> 第三条只在加载**主 Caddyfile** 时生效 —— 那份正是服务单元加载的，两边抢同一批端口。
+> `--config` 指向别的文件时通常用的是另一组端口，不该拦；真撞上端口冲突，
+> Caddy 自己会报 `address already in use`，那比工具的推测准确。
+
+**它和别的命令的区别**：
+
+| | `run` | `setup` | `selftest` | `logs caddy` |
+|---|---|---|---|---|
+| 托管方式 | 前台进程 | systemd / launchd 服务 | 前台进程（跑完即删） | 不托管，只跟随日志 |
+| 用哪套配置 | 现役主 Caddyfile | — | **隔离**实例（临时端口与 storage） | — |
+| 写系统状态 | 不写 | 装服务、改 /etc | 不写（都在临时目录） | 不写 |
+| 退出后 | 路由不再被服务 | 路由继续在 | 什么都没留下 | 无所谓 |
+
+---
+
 ## 平台支持与差异
 
 | | Linux | macOS |
@@ -733,6 +779,7 @@ devproxy uninstall --yes       # 非交互（CI / 脚本）必须加，否则退
 | dnsmasq 二进制 | `/usr/sbin/dnsmasq` | 系统不带，需 Homebrew：固定探测 `/opt/homebrew/sbin` → `/usr/local/sbin` → `/usr/sbin` |
 | CA 信任 | 系统信任库 + NSS 库 | 系统钥匙串 |
 | 开机自启 | `loginctl enable-linger` | launchd `RunAtLoad`（macOS 无 linger 概念） |
+| 停掉 caddy 服务 | `systemctl --user stop caddy` | `launchctl bootout system/com.devproxy.caddy` |
 
 **macOS 上 caddy 以 root 运行**：这是 macOS 绑 80/443 的唯一干净解法，代价是所有站点的
 运行权限都提到 root，且 CA、storage、日志会留下 root 属主的文件。
@@ -777,6 +824,9 @@ devproxy uninstall --yes       # 非交互（CI / 脚本）必须加，否则退
   `devproxy down <name>` 清掉。
 - **`devproxy logs dnsmasq`** 看 dnsmasq 的日志；Linux 是 journalctl，macOS 是
   `~/.local/state/devproxy/logs/dnsmasq.log`。
+- **`devproxy run` 提示「caddy 服务仍在运行，80/443 已被占用」**：先按提示停掉服务
+  （Linux `systemctl --user stop caddy`，macOS `launchctl bootout system/com.devproxy.caddy`），
+  或者用 `--config` 指向一份用别的端口的 Caddyfile。
 
 真机验证清单见 [docs/verification-checklist.md](docs/verification-checklist.md) ——
 里面列了自动化测试覆盖不到、必须在真实机器上逐条跑的行为。

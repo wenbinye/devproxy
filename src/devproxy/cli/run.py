@@ -61,8 +61,16 @@ def _require_caddy_binary(config: Config) -> None:
         )
 
 
-def _require_no_active_service() -> None:
-    """现役 caddy 服务在跑 → 80/443 已被占，前台实例必然绑不上端口。"""
+def _require_no_active_service(paths: Paths, caddyfile: Path) -> None:
+    """现役 caddy 服务在跑 → 80/443 已被占，前台实例必然绑不上端口。
+
+    **只针对主 Caddyfile**：那份配置正是服务单元加载的，两边抢同一批端口。
+    `--config` 指向别的文件时通常用的是另一组端口（调试、隔离实例就是为这个），
+    此时不该拦 —— 真撞上端口冲突，让 Caddy 自己报 "address already in use"，
+    那条信息比这里的推测准确。
+    """
+    if caddyfile != paths.caddyfile:
+        return
     platform = s._platform()
     if not platform.service_active("caddy"):
         return
@@ -89,7 +97,7 @@ def run(
     paths, config, _, _ = s.build_context()
     caddyfile = _resolve_caddyfile(paths, config_path)
     _require_caddy_binary(config)
-    _require_no_active_service()
+    _require_no_active_service(paths, caddyfile)
 
     # 启动前先校验：配置坏了当场说清楚，而不是让 Caddy 起不来再猜
     caddy = s.CaddyConfig(
