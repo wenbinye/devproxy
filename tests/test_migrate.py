@@ -8,9 +8,9 @@ from pathlib import Path
 
 import pytest
 
-from devproxy.backup import load_backup
-from devproxy.config import Config
-from devproxy.migrate import (
+from devproxy.core.backup import load_backup
+from devproxy.core.config import Config
+from devproxy.lifecycle.migrate import (
     LegacyState,
     MigrationError,
     default_dns_route,
@@ -23,7 +23,7 @@ from devproxy.migrate import (
     unit_config_path,
     unit_env,
 )
-from devproxy.paths import Paths
+from devproxy.core.paths import Paths
 from devproxy.platform.fake import FakePlatform
 from tests.support import ElevatedReader, UnreadablePath
 
@@ -693,7 +693,7 @@ def test_validate_still_skips_when_no_binary_anywhere(tmp_path):
 
 
 def test_unit_exec_start_parsed():
-    from devproxy.migrate import unit_exec_start
+    from devproxy.lifecycle.migrate import unit_exec_start
 
     assert unit_exec_start(
         "[Service]\nExecStart=/opt/caddy run --config /etc/Caddyfile\n"

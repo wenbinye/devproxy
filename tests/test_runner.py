@@ -10,10 +10,10 @@ from pathlib import Path
 import pytest
 
 import devproxy
-from devproxy.config import Config
-from devproxy.proxy.caddy import CaddyAdmin
-from devproxy.proxy.routes import Route
-from devproxy.proxy.runner import (
+from devproxy.core.config import Config
+from devproxy.gateway.caddy import CaddyAdmin
+from devproxy.gateway.routes import Route
+from devproxy.gateway.runner import (
     PreconditionError,
     UpError,
     UpRunner,
@@ -23,7 +23,7 @@ from devproxy.proxy.runner import (
     reachable,
     stop_process_group,
 )
-from devproxy.proxy.store import RouteStore
+from devproxy.gateway.store import RouteStore
 
 from .support import wait_until
 
@@ -413,10 +413,10 @@ def test_run_signal_forwards_to_group_and_deregisters(paths, tmp_path):
     runner_main.write_text(
         "import os, sys\n"
         "sys.path.insert(0, os.environ['DEVPROXY_SRC'])\n"
-        "from devproxy.config import Config\n"
-        "from devproxy.paths import default_paths\n"
-        "from devproxy.proxy.runner import UpRunner\n"
-        "from devproxy.proxy.store import RouteStore\n"
+        "from devproxy.core.config import Config\n"
+        "from devproxy.core.paths import default_paths\n"
+        "from devproxy.gateway.runner import UpRunner\n"
+        "from devproxy.gateway.store import RouteStore\n"
         "\n"
         "class FakeCaddy:\n"
         "    def validate(self, caddyfile=None):\n"

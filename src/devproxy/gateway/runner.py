@@ -17,11 +17,11 @@ import time
 from pathlib import Path
 from typing import Callable
 
-from devproxy.config import Config
-from devproxy.proxy.caddy import CaddyAdmin
-from devproxy.proxy.names import domain_for, validate_name
-from devproxy.proxy.routes import Route, RouteTable
-from devproxy.proxy.store import RouteStore
+from devproxy.core.config import Config
+from devproxy.gateway.caddy import CaddyAdmin
+from devproxy.gateway.names import domain_for, validate_name
+from devproxy.gateway.routes import Route, RouteTable
+from devproxy.gateway.store import RouteStore
 
 HEARTBEAT_INTERVAL = 30.0
 

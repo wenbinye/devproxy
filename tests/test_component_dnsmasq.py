@@ -8,8 +8,8 @@ import pytest
 from pathlib import Path
 
 from devproxy.components.dnsmasq import DnsmasqComponent, merge_dnsmasq_config
-from devproxy.config import Config
-from devproxy.paths import Paths
+from devproxy.core.config import Config
+from devproxy.core.paths import Paths
 from devproxy.platform.fake import FakePlatform
 
 

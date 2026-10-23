@@ -6,8 +6,8 @@ from typer.testing import CliRunner
 from devproxy.cli import app
 from devproxy.components import certs as certs_module
 from devproxy.components.certs import CertComponent
-from devproxy.config import Config
-from devproxy.paths import Paths
+from devproxy.core.config import Config
+from devproxy.core.paths import Paths
 from devproxy.platform.base import Action
 from devproxy.platform.fake import FakePlatform
 

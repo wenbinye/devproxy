@@ -11,8 +11,8 @@ import hashlib
 import json
 from pathlib import Path
 
-from devproxy.config import Config
-from devproxy.paths import Paths
+from devproxy.core.config import Config
+from devproxy.core.paths import Paths
 from devproxy.platform.base import (
     RESOLVER_DIR,
     Action,

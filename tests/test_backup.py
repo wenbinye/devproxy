@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from devproxy import backup as backup_mod
-from devproxy.backup import BackupManager, BackupRestoreError, load_backup
+from devproxy.core import backup as backup_mod
+from devproxy.core.backup import BackupManager, BackupRestoreError, load_backup
 
 
 def test_create_backs_up_existing_files(tmp_path):

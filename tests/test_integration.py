@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from devproxy.proxy.routes import Route, RouteTable, render_caddyfile
+from devproxy.gateway.routes import Route, RouteTable, render_caddyfile
 
 CADDY = Path(os.environ.get("DEVPROXY_TEST_CADDY", Path.home() / ".local" / "bin" / "caddy"))
 
@@ -62,7 +62,7 @@ def _fetch(host, port, ctx):
 
 def test_exact_block_serves_route_and_withholds_cert_for_unknown():
     """精确块：已注册域名可用；未注册域名拿不到证书。"""
-    from devproxy.proxy.selftest import run_selftest
+    from devproxy.gateway.selftest import run_selftest
 
     result = run_selftest(CADDY)
     for desc, ok in result.checks:

@@ -2,10 +2,10 @@ import json
 
 import pytest
 
-from devproxy.config import Config
-from devproxy.proxy.caddy import CaddyConfig
-from devproxy.proxy.routes import Route
-from devproxy.proxy.store import RouteStore, RouteStoreError
+from devproxy.core.config import Config
+from devproxy.gateway.caddy import CaddyConfig
+from devproxy.gateway.routes import Route
+from devproxy.gateway.store import RouteStore, RouteStoreError
 
 
 class FakeCaddy:

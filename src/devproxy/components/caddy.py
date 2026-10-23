@@ -18,9 +18,9 @@ import urllib.request
 from pathlib import Path
 from typing import Callable
 
-from devproxy.config import Config
-from devproxy.migrate import load_extra_env
-from devproxy.paths import Paths
+from devproxy.core.config import Config
+from devproxy.lifecycle.migrate import load_extra_env
+from devproxy.core.paths import Paths
 from devproxy.platform.base import Action, Platform, Status, unit_exec_argv
 
 CADDY_VERSION = "2.11.7"
@@ -517,7 +517,7 @@ class CaddyComponent:
         return Status(ok=True, detail=f"caddy 服务运行中，{url} 可访问")
 
     def _main_caddyfile(self) -> str:
-        from devproxy.proxy.caddy import build_main_caddyfile
+        from devproxy.gateway.caddy import build_main_caddyfile
 
         return build_main_caddyfile(
             admin_addr=self.config.admin_addr,

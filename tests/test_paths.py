@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from devproxy.paths import Paths, default_paths, default_state_dir
+from devproxy.core.paths import Paths, default_paths, default_state_dir
 
 
 def test_derived_paths(tmp_path):

@@ -6,10 +6,10 @@ import pytest
 from typer.testing import CliRunner
 
 from devproxy.cli import DevProxyGroup, app
-from devproxy.config import Config, ConfigError
-from devproxy.paths import Paths
-from devproxy.proxy.routes import Route, RouteTableError
-from devproxy.proxy.store import RouteStore, RouteStoreError
+from devproxy.core.config import Config, ConfigError
+from devproxy.core.paths import Paths
+from devproxy.gateway.routes import Route, RouteTableError
+from devproxy.gateway.store import RouteStore, RouteStoreError
 
 
 class FakeCaddy:
@@ -572,7 +572,7 @@ def test_setup_persists_legacy_storage_for_later_setups(env, monkeypatch, tmp_pa
 
 
 def _write_storage_pair(env, config_storage: str, stored_storage: str):
-    from devproxy.paths import default_paths
+    from devproxy.core.paths import default_paths
 
     paths = default_paths()
     paths.config_toml.parent.mkdir(parents=True, exist_ok=True)
@@ -644,7 +644,7 @@ def test_setup_prints_the_working_example(env, monkeypatch):
     """终端上打出来的示例必须是同一个能跑通的写法。"""
     from devproxy.cli import UP_EXAMPLE
     from devproxy.platform.base import Action, Status
-    from devproxy.setup import ComponentReport, SetupPlan
+    from devproxy.lifecycle.setup import ComponentReport, SetupPlan
 
     report = ComponentReport(
         name="caddy",

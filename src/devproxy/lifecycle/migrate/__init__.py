@@ -16,9 +16,9 @@ import tempfile
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from devproxy.backup import Backup, BackupManager, BackupRestoreError
-from devproxy.config import Config
-from devproxy.paths import Paths
+from devproxy.core.backup import Backup, BackupManager, BackupRestoreError
+from devproxy.core.config import Config
+from devproxy.core.paths import Paths
 from devproxy.platform.base import Platform
 
 # .test 相关的通配块由工具接管（精确域名由 routes.caddy 动态生成）——
@@ -463,7 +463,7 @@ def _write_sites_caddy(
 
 def _main_caddyfile_content(paths: Paths, config: Config) -> str:
     """工具自己的主 Caddyfile（全局块 + 两个 import）。"""
-    from devproxy.proxy.caddy import build_main_caddyfile
+    from devproxy.gateway.caddy import build_main_caddyfile
 
     return build_main_caddyfile(
         admin_addr=config.admin_addr,

@@ -3,7 +3,7 @@ import os
 
 import pytest
 
-from devproxy.proxy.routes import (
+from devproxy.gateway.routes import (
     Route,
     RouteTable,
     RouteTableError,

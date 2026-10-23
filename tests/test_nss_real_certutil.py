@@ -18,8 +18,8 @@ from pathlib import Path
 import pytest
 
 from devproxy.components.certs import CertComponent
-from devproxy.config import Config
-from devproxy.paths import Paths
+from devproxy.core.config import Config
+from devproxy.core.paths import Paths
 from devproxy.platform.base import Action
 from devproxy.platform.linux import LinuxPlatform
 

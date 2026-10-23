@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from devproxy.proxy import selftest
-from devproxy.proxy.selftest import (
+from devproxy.gateway import selftest
+from devproxy.gateway.selftest import (
     MIN_CADDY_VERSION,
     TRUST_DISABLED_LOG,
     _caddy_version,

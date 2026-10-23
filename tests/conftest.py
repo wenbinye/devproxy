@@ -1,6 +1,6 @@
 import pytest
 
-from devproxy.paths import Paths
+from devproxy.core.paths import Paths
 
 
 @pytest.fixture

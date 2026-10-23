@@ -25,7 +25,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from devproxy.proxy.routes import Route, RouteTable, render_caddyfile
+from devproxy.gateway.routes import Route, RouteTable, render_caddyfile
 
 ADMIN_PORT = 20191
 HTTPS_PORT = 14443

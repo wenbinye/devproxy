@@ -15,8 +15,8 @@ from devproxy.components.dns import (
     render_resolved_conf,
     render_system_dnsmasq_conf,
 )
-from devproxy.config import Config
-from devproxy.paths import Paths
+from devproxy.core.config import Config
+from devproxy.core.paths import Paths
 from devproxy.platform.fake import FakePlatform
 
 # 夹具生效之前先记下生产值 —— 守卫用例靠它断言"测试隔离没有把生产路径也改掉"。

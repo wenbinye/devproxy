@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from devproxy.config import Config, ConfigError, load_config
+from devproxy.core.config import Config, ConfigError, load_config
 
 
 def test_defaults_when_file_missing(tmp_path):

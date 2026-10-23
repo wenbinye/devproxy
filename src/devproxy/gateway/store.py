@@ -12,10 +12,10 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, Iterator
 
-from devproxy.config import Config
-from devproxy.paths import Paths
-from devproxy.proxy.caddy import CaddyConfig, build_main_caddyfile
-from devproxy.proxy.routes import (
+from devproxy.core.config import Config
+from devproxy.core.paths import Paths
+from devproxy.gateway.caddy import CaddyConfig, build_main_caddyfile
+from devproxy.gateway.routes import (
     Route,
     RouteTable,
     atomic_write,

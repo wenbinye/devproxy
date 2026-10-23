@@ -20,7 +20,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from devproxy.paths import default_state_dir
+from devproxy.core.paths import default_state_dir
 from devproxy.platform.base import (
     RESOLVER_DIR,
     ElevatedSession,

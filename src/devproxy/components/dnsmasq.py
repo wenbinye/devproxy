@@ -13,8 +13,8 @@ import shutil
 import time
 from pathlib import Path
 
-from devproxy.config import Config
-from devproxy.paths import Paths
+from devproxy.core.config import Config
+from devproxy.core.paths import Paths
 from devproxy.platform.base import Action, Platform, Status
 
 DNSMASQ_CONF = Path("~/.config/dnsmasq/dnsmasq.conf")

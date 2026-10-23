@@ -17,15 +17,15 @@ from devproxy.components.caddy import CaddyComponent
 from devproxy.components.certs import CertComponent
 from devproxy.components.dns import DnsComponent
 from devproxy.components.dnsmasq import DNSMASQ_CONF, DnsmasqComponent
-from devproxy.config import (
+from devproxy.core.config import (
     DNS_BACKENDS,
     Config,
     ConfigError,
     load_config,
     validate_config,
 )
-from devproxy.doctor import build_report, find_wildcard_sites, report_is_healthy
-from devproxy.migrate import (
+from devproxy.lifecycle.doctor import build_report, find_wildcard_sites, report_is_healthy
+from devproxy.lifecycle.migrate import (
     LegacyState,
     MigrationError,
     default_dns_route,
@@ -35,19 +35,19 @@ from devproxy.migrate import (
     resolve_storage,
     rollback as do_rollback,
 )
-from devproxy.paths import Paths, default_paths
-from devproxy.proxy.caddy import CaddyAdmin, CaddyConfig
-from devproxy.proxy.names import InvalidNameError, domain_for, validate_name
-from devproxy.proxy.routes import Route, RouteTableError, load_table, render_caddyfile
-from devproxy.proxy.runner import (
+from devproxy.core.paths import Paths, default_paths
+from devproxy.gateway.caddy import CaddyAdmin, CaddyConfig
+from devproxy.gateway.names import InvalidNameError, domain_for, validate_name
+from devproxy.gateway.routes import Route, RouteTableError, load_table, render_caddyfile
+from devproxy.gateway.runner import (
     PreconditionError,
     UpError,
     UpRunner,
     kill_pid_group,
     reachable,
 )
-from devproxy.proxy.store import RouteStore, RouteStoreError
-from devproxy.setup import apply_plan, build_plan
+from devproxy.gateway.store import RouteStore, RouteStoreError
+from devproxy.lifecycle.setup import apply_plan, build_plan
 
 console = Console()
 err_console = Console(stderr=True)
@@ -368,7 +368,7 @@ def config() -> None:
 @app.command()
 def selftest() -> None:
     """隔离 Caddy 实例端到端自检（不碰生产 443/2019）。"""
-    from devproxy.proxy.selftest import run_selftest
+    from devproxy.gateway.selftest import run_selftest
 
     _, config, _, _ = build_context()
     result = run_selftest(config.caddy_bin_path)
@@ -515,7 +515,7 @@ def _migrate_legacy(
 
 def _do_rollback(directory: Path) -> None:
     """按备份目录回滚。"""
-    from devproxy.backup import BackupRestoreError, load_backup
+    from devproxy.core.backup import BackupRestoreError, load_backup
 
     try:
         backup = load_backup(directory)

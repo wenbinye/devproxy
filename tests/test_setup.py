@@ -1,5 +1,5 @@
 from devproxy.platform.base import Action, Status
-from devproxy.setup import apply_plan, build_plan
+from devproxy.lifecycle.setup import apply_plan, build_plan
 
 
 class FakeComponent:
@@ -169,8 +169,8 @@ class FakeCliComponent:
 
 
 def _patch_cli(monkeypatch, tmp_path, components):
-    from devproxy.config import Config
-    from devproxy.paths import Paths
+    from devproxy.core.config import Config
+    from devproxy.core.paths import Paths
     from devproxy.platform.fake import FakePlatform
 
     paths = Paths(tmp_path / "config", tmp_path / "state", tmp_path / "data")

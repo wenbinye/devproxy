@@ -1,6 +1,6 @@
 import pytest
 
-from devproxy.proxy.names import InvalidNameError, domain_for, validate_name
+from devproxy.gateway.names import InvalidNameError, domain_for, validate_name
 
 
 @pytest.mark.parametrize("name", ["codeup", "codeup-web", "a1-b2-c3", "x", "x" * 63])

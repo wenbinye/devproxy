@@ -4,7 +4,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from devproxy.proxy.caddy import (
+from devproxy.gateway.caddy import (
     CaddyAdmin,
     CaddyConfig,
     build_main_caddyfile,

@@ -1,4 +1,4 @@
-from devproxy.doctor import build_report, report_is_healthy
+from devproxy.lifecycle.doctor import build_report, report_is_healthy
 from devproxy.platform.base import Status
 
 
@@ -56,8 +56,8 @@ class FakeCliComponent:
 
 
 def _patch_cli(monkeypatch, tmp_path, components):
-    from devproxy.config import Config
-    from devproxy.paths import Paths
+    from devproxy.core.config import Config
+    from devproxy.core.paths import Paths
 
     paths = Paths(tmp_path / "config", tmp_path / "state", tmp_path / "data")
     paths.ensure_files()
@@ -116,7 +116,7 @@ def test_cli_doctor_handles_check_exception_without_traceback(tmp_path, monkeypa
 
 
 def _patch_cli_with_config(monkeypatch, tmp_path, cfg):
-    from devproxy.paths import Paths
+    from devproxy.core.paths import Paths
 
     paths = Paths(tmp_path / "config", tmp_path / "state", tmp_path / "data")
     paths.ensure_files()
@@ -131,7 +131,7 @@ def test_cli_doctor_uses_config_dns_backend(tmp_path, monkeypatch):
     from typer.testing import CliRunner
 
     from devproxy.cli import app
-    from devproxy.config import Config
+    from devproxy.core.config import Config
 
     cfg = Config(storage=str(tmp_path / "data"), dns_backend="system")
     _patch_cli_with_config(monkeypatch, tmp_path, cfg)
@@ -151,7 +151,7 @@ def test_cli_doctor_accepts_dns_backend_override(tmp_path, monkeypatch):
     from typer.testing import CliRunner
 
     from devproxy.cli import app
-    from devproxy.config import Config
+    from devproxy.core.config import Config
 
     cfg = Config(storage=str(tmp_path / "data"), dns_backend="system")
     _patch_cli_with_config(monkeypatch, tmp_path, cfg)
@@ -171,7 +171,7 @@ def test_cli_doctor_rejects_invalid_dns_backend(tmp_path, monkeypatch):
     from typer.testing import CliRunner
 
     from devproxy.cli import app
-    from devproxy.config import Config
+    from devproxy.core.config import Config
 
     cfg = Config(storage=str(tmp_path / "data"))
     _patch_cli_with_config(monkeypatch, tmp_path, cfg)
@@ -184,9 +184,9 @@ def test_cli_doctor_rejects_invalid_dns_backend(tmp_path, monkeypatch):
 
 def test_find_wildcard_sites_detects_test_wildcard(tmp_path):
     """工具的设计前提是"精确站点块、没有通配"。"""
-    from devproxy.config import Config
-    from devproxy.doctor import find_wildcard_sites
-    from devproxy.paths import Paths
+    from devproxy.core.config import Config
+    from devproxy.lifecycle.doctor import find_wildcard_sites
+    from devproxy.core.paths import Paths
 
     paths = Paths(tmp_path / "config", tmp_path / "state", tmp_path / "data")
     paths.ensure_files()
@@ -200,9 +200,9 @@ def test_find_wildcard_sites_detects_test_wildcard(tmp_path):
 
 def test_find_wildcard_sites_ignores_other_suffix(tmp_path):
     """别的后缀的通配块与本工具无关（*.local.yikuaigao.com 不算）。"""
-    from devproxy.config import Config
-    from devproxy.doctor import find_wildcard_sites
-    from devproxy.paths import Paths
+    from devproxy.core.config import Config
+    from devproxy.lifecycle.doctor import find_wildcard_sites
+    from devproxy.core.paths import Paths
 
     paths = Paths(tmp_path / "config", tmp_path / "state", tmp_path / "data")
     paths.ensure_files()
@@ -221,7 +221,7 @@ def test_cli_doctor_reports_wildcard_and_exits_3(tmp_path, monkeypatch):
     from typer.testing import CliRunner
 
     from devproxy.cli import app
-    from devproxy.config import Config
+    from devproxy.core.config import Config
 
     cfg = Config(storage=str(tmp_path / "data"))
     paths = _patch_cli_with_config(monkeypatch, tmp_path, cfg)
@@ -241,7 +241,7 @@ def test_cli_doctor_ok_when_no_wildcard(tmp_path, monkeypatch):
     from typer.testing import CliRunner
 
     from devproxy.cli import app
-    from devproxy.config import Config
+    from devproxy.core.config import Config
 
     cfg = Config(storage=str(tmp_path / "data"))
     paths = _patch_cli_with_config(monkeypatch, tmp_path, cfg)

@@ -15,8 +15,8 @@ from devproxy.components.caddy import (
     current_platform_key,
     download_caddy,
 )
-from devproxy.config import Config
-from devproxy.paths import Paths
+from devproxy.core.config import Config
+from devproxy.core.paths import Paths
 from devproxy.platform.fake import FakePlatform
 from tests.support import ElevatedReader, UnreadablePath
 

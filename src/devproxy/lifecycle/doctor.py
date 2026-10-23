@@ -5,8 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from devproxy.components.base import Component
-from devproxy.migrate import wildcard_addresses
-from devproxy.setup import ComponentReport, check_component
+from devproxy.lifecycle.migrate import wildcard_addresses
+from devproxy.lifecycle.setup import ComponentReport, check_component
 
 
 def build_report(components: list[Component]) -> list[ComponentReport]:
