@@ -152,8 +152,8 @@ Caddy 的内部 CA **在第一次加载 `tls internal` 站点时**才生成 —�
 | `--yes` | `setup` / `trust` | 非交互模式，不询问（需要提权的场景必须加） |
 | `--rollback <目录>` | `setup` | 从指定备份目录回滚 |
 | `--dry-run` | `uninstall` | 只打印将要执行的步骤，不做任何变更、不需要 sudo |
-| `--purge` | `uninstall` | 额外删除 Caddy 存储、备份目录与下载的 caddy 二进制 |
-| `--remove-ca` | `uninstall` | 强制卸载 CA（包括本工具接管前就存在的 CA） |
+| `--purge` | `uninstall` | 直接删除 Caddy 存储、备份目录与下载的 caddy 二进制（不给就在交互时问） |
+| `--remove-ca` | `uninstall` | 直接卸载 CA（不给就在交互时问；迁移来的 CA 默认保留） |
 | `--port N` | `up` | 显式指定端口（默认自动分配）；被占用时直接失败 |
 | `--port N` | `expose` | **必填**：上游已在监听的端口 |
 | `--ready-timeout S` | `up` | 就绪等待秒数（默认取 `config.toml` 的 `ready_timeout`） |
@@ -450,9 +450,17 @@ devproxy setup --rollback ~/.local/state/devproxy/backups/2026-10-22T12-00-00Z
 
 ```bash
 devproxy uninstall --dry-run   # 先看它会做什么，不做任何变更、不需要 sudo
-devproxy uninstall             # 交互确认后执行
+devproxy uninstall             # 交互式：逐项提问，最后再确认一次
 devproxy uninstall --yes       # 非交互（CI / 脚本）必须加，否则退 4
 ```
+
+**交互式会问什么**（这两个选择都有对应的 flag，给了就不再问）：
+
+1. 「还要删除 Caddy 存储（CA 与证书）、迁移备份与下载的 caddy 二进制吗？」—— 默认**否**
+2. 「要把 CA 从系统信任库卸载吗？」—— 只在 CA 属于「迁移前就存在」时问，默认**否**
+3. 最后确认「即将执行以上卸载步骤，继续？」—— 默认**否**
+
+答「是」之后工具会**重建并重画计划**，让你看清多出来的是哪几步，再进入最终确认。
 
 **默认会做**（按这个顺序）：
 
@@ -480,8 +488,9 @@ devproxy uninstall --yes       # 非交互（CI / 脚本）必须加，否则退
 - **迁移来的 CA 默认不卸载**：如果存在 `caddy-storage.json` 留档，说明这个 CA 在本工具接管**之前**就存在、
   你的站点在用。此时跳过并提示；确实要卸就显式加 `--remove-ca`。
 
-**`--purge` 才会额外删除**：`~/.local/share/caddy`、`backups/`、`config.caddy_bin_path`。
-注意最后一项默认是 `~/.local/bin/caddy` —— 如果你自己装过 caddy，`--purge` 会把它一起删掉。
+**「连存储一起删」被选中时才额外删除**（交互答「是」，或显式 `--purge`）：
+`~/.local/share/caddy`、`backups/`、`config.caddy_bin_path`。
+注意最后一项默认是 `~/.local/bin/caddy` —— 如果你自己装过 caddy，这一步会把它一起删掉。
 
 **迁移过的机器**：卸载不会自动还原遗留环境。原始 `caddy.service` 与 `Caddyfile` 在
 `backups/<时间戳>/` 里，工具会在结尾把路径打出来；要回到迁移前的状态用

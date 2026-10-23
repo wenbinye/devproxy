@@ -21,12 +21,12 @@ def uninstall(
     purge: bool = typer.Option(
         False,
         "--purge",
-        help="额外删除 Caddy 存储、备份目录与下载的 caddy 二进制",
+        help="直接删除 Caddy 存储、备份与下载的 caddy 二进制（不给就在交互时问）",
     ),
     remove_ca: bool = typer.Option(
         False,
         "--remove-ca",
-        help="强制卸载 CA（包括本工具接管前就存在的 CA）",
+        help="直接卸载 CA（不给就在交互时问；迁移来的 CA 默认保留）",
     ),
 ) -> None:
     """卸载 devproxy：停止服务、移除单元、DNS 路由与（可选）CA。
@@ -35,15 +35,19 @@ def uninstall(
     """
     paths, config, _, _ = s.build_context()
     platform = s._platform()
-    try:
-        plan = s.build_uninstall_plan(
+
+    def _plan(purge_: bool, remove_ca_: bool):
+        return s.build_uninstall_plan(
             platform,
             paths,
             config,
-            purge=purge,
-            remove_ca=remove_ca,
+            purge=purge_,
+            remove_ca=remove_ca_,
             dry_run=dry_run,
         )
+
+    try:
+        plan = _plan(purge, remove_ca)
     except Exception as e:  # noqa: BLE001 —— 计划失败必须变成可读信息 + 退出码 1
         s.fail(str(e))
 
@@ -59,10 +63,32 @@ def uninstall(
         s.console.print("预览结束：未执行任何变更。")
         raise typer.Exit(EXIT_OK)
 
-    if not yes:
-        if not s._interactive():
-            s.err_console.print("非交互环境且未指定 --yes，拒绝执行卸载。")
-            raise typer.Exit(EXIT_DECLINED)
+    interactive = s._interactive() and not yes
+    if not interactive and not yes:
+        s.err_console.print("非交互环境且未指定 --yes，拒绝执行卸载。")
+        raise typer.Exit(EXIT_DECLINED)
+
+    if interactive:
+        # 两个"可选破坏面"逐项问：命令行给了就跳过，没给就问 ——
+        # 免得用户为了卸载先记住两个不常用的 flag。
+        chosen_purge = purge
+        chosen_remove_ca = remove_ca
+        if not purge:
+            chosen_purge = s.typer.confirm(
+                "还要删除 Caddy 存储（CA 与证书）、迁移备份与下载的 caddy 二进制吗？"
+                "（不可恢复）",
+                default=False,
+            )
+        if not remove_ca and plan.ca_kept:
+            chosen_remove_ca = s.typer.confirm(
+                "要把 CA 从系统信任库卸载吗？"
+                "（它在本工具接管前就存在，你的站点可能仍在使用）",
+                default=False,
+            )
+        if chosen_purge != purge or chosen_remove_ca != remove_ca:
+            plan = _plan(chosen_purge, chosen_remove_ca)
+            s.console.print("")
+            s.render_uninstall_plan(plan, dry_run=False)
         if not s.typer.confirm("即将执行以上卸载步骤，继续？", default=False):
             s.console.print("已取消：什么都没改（未执行任何变更）。")
             raise typer.Exit(EXIT_DECLINED)

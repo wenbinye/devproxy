@@ -98,6 +98,9 @@ class UninstallPlan:
     kept: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     migration_backup: Path | None = None
+    # CA 因为「迁移前就存在」的启发式被保留 —— CLI 据此决定要不要问用户
+    # 「要卸载它吗」。用结构化字段而不是在 notes 里找子串：文案一改就失效。
+    ca_kept: bool = False
 
     @property
     def needs_sudo(self) -> list[Action]:
@@ -277,14 +280,15 @@ def _plan_ca(
         return
     archived = paths.caddy_storage.exists()
     if archived and not remove_ca:
+        plan.ca_kept = True
         plan.notes.append(
             "检测到 storage 留档，CA 可能是你原有的，已保留；"
-            "要卸请显式加 --remove-ca。"
+            "要卸请显式加 --remove-ca（或交互时回答「是」）。"
         )
         plan.kept.append(f"CA 根证书：{ca}（迁移前已存在，站点可能仍在使用）")
         return
     if archived and remove_ca:
-        plan.notes.append("已按 --remove-ca 强制卸载迁移前就存在的 CA。")
+        plan.notes.append("已选择强制卸载迁移前就存在的 CA。")
 
     if platform.name == "mac":
         trusted = _probe_ca_trusted(platform, ca) if probe else True
@@ -398,7 +402,7 @@ def _plan_state_files(plan: UninstallPlan, paths: Paths) -> None:
 def _plan_purge(
     plan: UninstallPlan, paths: Paths, config: Config, *, purge: bool
 ) -> None:
-    """--purge 才删：Caddy 存储、备份目录、下载的 caddy 二进制。"""
+    """只有在选择「连存储一起删」时才删：Caddy 存储、备份目录、下载的 caddy 二进制。"""
     if not purge:
         return
     storage = config.storage_path
@@ -406,7 +410,7 @@ def _plan_purge(
         plan.actions.append(
             Action(
                 description=(
-                    f"删除 Caddy 存储 {storage}（--purge：CA、证书与站点数据一并删除）"
+                    f"删除 Caddy 存储 {storage}（CA、证书与站点数据一并删除）"
                 ),
                 kind="delete",
                 path=storage,
@@ -417,7 +421,7 @@ def _plan_purge(
             Action(
                 description=(
                     f"删除备份目录 {paths.backup_dir}"
-                    "（--purge：含迁移备份，删除后无法回滚）"
+                    "（含迁移备份，删除后无法回滚）"
                 ),
                 kind="delete",
                 path=paths.backup_dir,

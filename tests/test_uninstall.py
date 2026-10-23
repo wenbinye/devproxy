@@ -458,7 +458,7 @@ def test_plan_remove_ca_forces_migrated_ca_removal(paths, tmp_path):
         platform, paths, config, purge=False, remove_ca=True, targets=targets
     )
     assert any(c[:1] == ["remove-linux-system-ca"] for c in commands(plan))
-    assert any("--remove-ca" in note for note in plan.notes)
+    assert any("迁移前就存在" in note for note in plan.notes)
 
 
 def test_plan_ca_matches_fingerprint_not_nickname(paths, tmp_path):
@@ -971,3 +971,126 @@ def test_cli_purge_deletes_storage_backups_and_binary(
     assert not config.storage_path.exists()
     assert not paths.backup_dir.exists()
     assert not config.caddy_bin_path.exists()
+
+
+# -- 交互式逐项提问：flag 给了就跳过，没给就问 -----------------------------
+
+
+def test_cli_interactive_asks_purge_and_redraws_plan(
+    paths, tmp_path, monkeypatch, isolated_cli_platform
+):
+    """没给 --purge 时交互提问；答「是」后**重建计划并重画**，但最终确认仍是否决。
+
+    用户不必先记住 `--purge` 才能删干净 —— 这是这次交互化的目的。
+    """
+    config = make_config(paths)
+    targets = make_targets(tmp_path)
+    seed_service(isolated_cli_platform, "caddy")
+    seed_state(paths)
+    config.storage_path.mkdir(parents=True, exist_ok=True)
+    _patch_cli(monkeypatch, paths, config, targets, isolated_cli_platform)
+    monkeypatch.setattr("devproxy.cli._shared._interactive", lambda: True)
+
+    asked: list[str] = []
+    answers = iter([True, False])  # ① 连存储一起删？是  ② 最终确认？否
+
+    def fake_confirm(message, **kwargs):
+        asked.append(str(message))
+        return next(answers)
+
+    monkeypatch.setattr("devproxy.cli._shared.typer.confirm", fake_confirm)
+
+    result = CliRunner().invoke(app, ["uninstall"])
+    assert result.exit_code == 4, result.output
+    assert len(asked) == 2
+    assert "Caddy 存储" in asked[0], "第一问问的就是存储/备份"
+    assert "删除 Caddy 存储" in result.output, "答是之后要重画包含该步骤的计划"
+    assert paths.caddyfile.exists(), "最终否决 → 什么都没执行"
+    assert not isolated_cli_platform.commands
+
+
+def test_cli_interactive_declining_purge_keeps_conservative_plan(
+    paths, tmp_path, monkeypatch, isolated_cli_platform
+):
+    """第一问答「否」→ 不重建计划，最终确认只问一次。"""
+    config = make_config(paths)
+    targets = make_targets(tmp_path)
+    seed_service(isolated_cli_platform, "caddy")
+    seed_state(paths)
+    config.storage_path.mkdir(parents=True, exist_ok=True)
+    _patch_cli(monkeypatch, paths, config, targets, isolated_cli_platform)
+    monkeypatch.setattr("devproxy.cli._shared._interactive", lambda: True)
+
+    asked: list[str] = []
+    monkeypatch.setattr(
+        "devproxy.cli._shared.typer.confirm",
+        lambda message, **kw: asked.append(str(message)) or False,
+    )
+
+    result = CliRunner().invoke(app, ["uninstall"])
+    assert result.exit_code == 4, result.output
+    assert len(asked) == 2
+    assert "Caddy 存储" in asked[0]
+    assert "继续" in asked[1]
+    assert "删除 Caddy 存储" not in result.output
+    assert paths.caddyfile.exists()
+
+
+def test_cli_explicit_purge_skips_that_question(
+    paths, tmp_path, monkeypatch, isolated_cli_platform
+):
+    """显式给了 --purge 就不再问它 —— 脚本化用法保持原样。"""
+    config = make_config(paths)
+    targets = make_targets(tmp_path)
+    seed_service(isolated_cli_platform, "caddy")
+    seed_state(paths)
+    config.storage_path.mkdir(parents=True, exist_ok=True)
+    _patch_cli(monkeypatch, paths, config, targets, isolated_cli_platform)
+    monkeypatch.setattr("devproxy.cli._shared._interactive", lambda: True)
+
+    asked: list[str] = []
+    monkeypatch.setattr(
+        "devproxy.cli._shared.typer.confirm",
+        lambda message, **kw: asked.append(str(message)) or False,
+    )
+
+    result = CliRunner().invoke(app, ["uninstall", "--purge"])
+    assert result.exit_code == 4, result.output
+    assert len(asked) == 1, "只应剩最后的总体确认"
+    assert "继续" in asked[0]
+    assert "删除 Caddy 存储" in result.output, "计划里本来就该有这一步"
+    assert paths.caddyfile.exists()
+
+
+def test_cli_interactive_asks_about_migrated_ca(
+    paths, tmp_path, monkeypatch, isolated_cli_platform
+):
+    """迁移来的 CA（有 storage 留档）默认保留，但要给用户一个“卸掉”的机会。"""
+    config = make_config(paths)
+    targets = make_targets(tmp_path)
+    seed_service(isolated_cli_platform, "caddy")
+    seed_state(paths, include_storage_archive=True)
+    ca = config.storage_path / "pki" / "authorities" / "local" / "root.crt"
+    ca.parent.mkdir(parents=True, exist_ok=True)
+    ca.write_text("-----BEGIN CERTIFICATE-----\n", encoding="utf-8")
+    # 让假平台认为这张 CA 真的在信任库里 —— 否则"无可移除"是正确行为，
+    # 测不到"用户答是之后计划里多出一步"。
+    isolated_cli_platform.trusted.add(ca)
+    _patch_cli(monkeypatch, paths, config, targets, isolated_cli_platform)
+    monkeypatch.setattr("devproxy.cli._shared._interactive", lambda: True)
+
+    asked: list[str] = []
+    answers = iter([False, True, False])  # 存储？否  卸 CA？是  最终确认？否
+
+    def fake_confirm(message, **kwargs):
+        asked.append(str(message))
+        return next(answers)
+
+    monkeypatch.setattr("devproxy.cli._shared.typer.confirm", fake_confirm)
+
+    result = CliRunner().invoke(app, ["uninstall"])
+    assert result.exit_code == 4, result.output
+    assert len(asked) == 3
+    assert "CA" in asked[1]
+    assert "移除 CA" in result.output or "卸载 CA" in result.output
+    assert not isolated_cli_platform.commands, "最终否决 → 未执行"
