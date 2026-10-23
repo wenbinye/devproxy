@@ -51,13 +51,18 @@ def global_scope_disclosure(port: int) -> str:
     )
 
 
-def render_resolved_conf(*, port: int, domains: list[str]) -> str:
-    suffix = ",".join(f"~.{d.lstrip('.')}" for d in domains)
+def render_resolved_conf(*, port: int, suffix: str) -> str:
+    """systemd-resolved 的 drop-in 内容。
+
+    `Domains=` 是**空格分隔**的域名列表；逗号不是分隔符。工具只需要
+    维护一个后缀，参数保持单值 —— 免得将来有人传两个域名时生成
+    `Domains=~.test,~.dev` 这种整行无效、双方却都不报错的配置。
+    """
     return (
         "[Resolve]\n"
         f"DNS=127.0.0.1:{port}\n"
         f"FallbackDNS={FALLBACK_DNS}\n"
-        f"Domains={suffix}\n"
+        f"Domains=~.{suffix.lstrip('.')}\n"
     )
 
 
@@ -89,14 +94,19 @@ class DnsComponent:
         /etc/systemd/resolved.conf.d 可能只是被手工创建过；反过来干净机器
         上目录不存在也不代表 resolved 没装。目录存在与否都不是可靠信号。
 
-        macOS 根本没有 systemd-resolved —— 恒为 False，后端恒为 resolver。
+        macOS 根本没有 systemd-resolved：auto 静默走 resolver，但用户
+        **显式**要求 resolved 时必须报错 —— 否则显式输入被悄悄改成另一种
+        行为，用户永远不知道自己的配置没生效。
         """
-        if self.platform.name == "mac":
-            return False
-        if self.backend == "system":
-            return False
         if self.backend == "resolved":
+            if self.platform.name == "mac":
+                raise RuntimeError(
+                    "macOS 不支持 resolved 后端（没有 systemd-resolved），"
+                    "请使用 auto 或 system"
+                )
             return True
+        if self.platform.name == "mac" or self.backend == "system":
+            return False
         return self.platform.resolved_active()
 
     @property
@@ -105,19 +115,26 @@ class DnsComponent:
 
         macOS 是每域解析器文件（/etc/resolver/<后缀>）—— 不动 /etc/resolv.conf。
         """
+        if self.resolved_backend:
+            return RESOLVED_CONF
         if self.platform.name == "mac":
             return RESOLVER_DIR / self.config.domain_suffix.lstrip(".")
-        return RESOLVED_CONF if self.resolved_backend else SYSTEM_DNSMASQ_CONF
+        return SYSTEM_DNSMASQ_CONF
 
-    def _backend_key(self) -> str:
+    def _backend_key(self, resolved: bool | None = None) -> str:
         """本次要写/要查的 DNS 路由后端。
 
+        `resolved` 可由调用方传入已算好的结果，避免同一轮重复探测。
         macOS 没有 systemd-resolved，用 launchd 之外的 resolver 机制
         （/etc/resolver/<suffix>），后端名是 "resolver"。
         """
+        if resolved is None:
+            resolved = self.resolved_backend
+        if resolved:
+            return "resolved"
         if self.platform.name == "mac":
             return "resolver"
-        return "resolved" if self.resolved_backend else "system"
+        return "system"
 
     # -- 披露 ------------------------------------------------------------
     def global_scope_note(self) -> str | None:
@@ -143,10 +160,21 @@ class DnsComponent:
         时仍然报"已就绪"，用户会对着一个 `doctor` 全绿的机器调半天解析。
 
         所以：内容能读到就以内容为准；读不到（权限）才退回平台的存在性判据 ——
-        那时无法证伪，不该凭空报错。
+        那时无法证伪，不该凭空报错。这条回退由 `_route_in_place()` 统一实现，
+        check 与 plan 共用，避免"doctor 绿而 setup 又要重写并重启解析器"。
         """
-        key = self._backend_key()
-        content = self._expected_content()
+        try:
+            resolved = self.resolved_backend
+            key = self._backend_key(resolved)
+            content = self._expected_content(resolved)
+        except RuntimeError as e:
+            # 配置与平台不匹配（如 macOS 显式指定 resolved）：如实报配置错误，
+            # 但 check 依然不抛异常。
+            return Status(
+                ok=False,
+                detail=str(e),
+                hint="把 dns_backend 改为 auto 或 system",
+            )
         if self._route_in_place(content):
             return Status(ok=True, detail=f"DNS 路由已配置（{key} 后端）")
         if self._read_target() is not None:
@@ -155,8 +183,6 @@ class DnsComponent:
                 detail=f"DNS 路由内容不是预期（{key} 后端）：{self.target_path}",
                 hint="devproxy setup 会重写",
             )
-        if self.platform.dns_route_installed(key, self.config.domain_suffix):
-            return Status(ok=True, detail=f"DNS 路由已配置（{key} 后端）")
         return Status(
             ok=False,
             detail=f"DNS 路由缺失（{key} 后端）：{self.target_path}",
@@ -171,27 +197,34 @@ class DnsComponent:
             return None
 
     # -- plan ----------------------------------------------------------
-    def _expected_content(self) -> str:
+    def _expected_content(self, resolved: bool | None = None) -> str:
         """当前平台/后端下，路由文件应有的内容。
 
         check 与 plan 必须用**同一份**判据 —— 两处各算一遍迟早会漂移，
         而漂移的表现就是"doctor 说就绪、setup 却要重写"。
+        `resolved` 可由调用方传入，避免同一轮重复探测。
         """
+        # 先取 resolved_backend 完成平台适用性校验（macOS 显式 resolved 会抛）。
+        if resolved is None:
+            resolved = self.resolved_backend
         if self.platform.name == "mac":
             return render_resolver_file(self.platform.dns_port)
-        if self.resolved_backend:
+        if resolved:
             return render_resolved_conf(
-                port=self.platform.dns_port, domains=[self.config.domain_suffix]
+                port=self.platform.dns_port, suffix=self.config.domain_suffix
             )
         return render_system_dnsmasq_conf(suffix=self.config.domain_suffix)
 
     def plan(self) -> list[Action]:
         """路由已是预期内容时返回空列表 —— 重复 setup 不该再要 sudo、
         更不该再重启系统 resolver（那会造成全机 DNS 抖动）。"""
+        # content 只算一次：分支只决定文案与 reload 动作。两处各算一遍
+        # 不只是浪费探测，并发状态变化时甚至会与后端选择不一致。
+        resolved = self.resolved_backend
+        content = self._expected_content(resolved)
         if self.platform.name == "mac":
             # macOS 的每域解析器文件：mDNSResponder 会自己重载，
             # 不需要（也不能）重启任何解析服务。
-            content = self._expected_content()
             desc = "写入 %s（macOS 每域解析器）" % self.target_path
             if self._route_in_place(content):
                 return []
@@ -204,8 +237,7 @@ class DnsComponent:
                     privileged=True,
                 )
             ]
-        if self.resolved_backend:
-            content = self._expected_content()
+        if resolved:
             desc = "写入 systemd-resolved 路由（*.%s → 127.0.0.1，整机 DNS 作用域）" % (
                 self.config.domain_suffix,
             )
@@ -216,7 +248,6 @@ class DnsComponent:
                 privileged=True,
             )
         else:
-            content = self._expected_content()
             desc = "写入系统 dnsmasq 路由（*.%s → 127.0.0.1）" % self.config.domain_suffix
             reload_action = Action(
                 description="重载系统 dnsmasq 使路由生效",
@@ -305,10 +336,10 @@ class DnsComponent:
         if not path.exists():
             return {}
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            state_payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return {}
-        return data if isinstance(data, dict) else {}
+        return state_payload if isinstance(state_payload, dict) else {}
 
     def _record_state(self, path: Path, content: str) -> None:
         payload = {
@@ -324,23 +355,32 @@ class DnsComponent:
     def _route_in_place(self, content: str) -> bool:
         """路由是否已是预期内容。
 
-        三重判据，缺一不可：
-        1. 目标文件还在 —— 用户删掉后 setup 不能还说“已就绪”；
-        2. 文件读得到时，直接比内容（用户在 /etc 下改过就重写）；
-        3. 文件读不到时（普通用户未必能读 /etc 下的文件），退回 state 目录里
-           上次写入的哈希。
+        判据按可用信息逐级退让：
+        1. 文件读得到 → 直接比内容（用户在 /etc 下改过就重写）；
+        2. 文件读不到 / 不可见（普通用户未必能读 /etc 下的文件）→ 先比 state
+           目录里上次写入的哈希；
+        3. 连 state 也对不上 → 退回平台的存在性判据。此时无法证伪，
+           不该凭空报错；plan 与 check 必须共用这条回退，否则 doctor 报绿
+           而 setup 又要 sudo 重写并重启整机解析器。
         """
-        if not self.target_path.exists():
-            return False
         digest = _sha256(content)
-        try:
-            current = self.target_path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            current = None
-        if current is not None:
-            return _sha256(current) == digest
-        state = self._read_state()
-        return (
-            state.get("content_sha256") == digest
-            and state.get("path") == str(self.target_path)
+        current = None
+        if self.target_path.exists():
+            try:
+                current = self.target_path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                current = None
+            if current is not None:
+                return _sha256(current) == digest
+            state = self._read_state()
+            if (
+                state.get("content_sha256") == digest
+                and state.get("path") == str(self.target_path)
+            ):
+                return True
+        # 文件不存在或普通用户读不到（如 root:root 0600），且 state 哈希缺失/
+        # 过期：平台的"文件存在"判据是此时唯一可用的信息。check 与 plan 必须
+        # 共用它——否则 doctor 报绿而 setup 又要 sudo 重写并重启整机解析器。
+        return self.platform.dns_route_installed(
+            self._backend_key(), self.config.domain_suffix
         )

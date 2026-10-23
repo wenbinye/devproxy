@@ -7,7 +7,6 @@ Caddy 版本固定，sha256 内置在源码里 —— 上游发布的 checksums.
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import platform as _platform
 import shutil
@@ -18,6 +17,7 @@ import urllib.request
 from pathlib import Path
 from typing import Callable
 
+from devproxy.components.base import has_localhost_site, probe_url
 from devproxy.core.config import Config
 from devproxy.core.caddy_env import load_extra_env
 from devproxy.core.paths import Paths
@@ -65,6 +65,20 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def _exec_line_argv(text: str, field: str) -> list[str] | None:
+    """从 systemd 单元文本里取某个 `Exec*=` 字段的 argv。
+
+    launchd 的 plist 没有这些字段（返回 None）—— 调用方据此跳过检查。
+    """
+    prefix = f"{field}="
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.startswith(prefix):
+            args = line[len(prefix):].split()
+            return args or None
+    return None
 
 
 def _binary_version(binary: Path) -> str:
@@ -165,23 +179,19 @@ class CaddyComponent:
         不对时普通用户读不了。"读不到"绝不等于"单元过期"：那样 doctor 会
         永远报红，setup 每次都要重装单元并再要一次密码。
 
-        这里必须走非交互的特权读（sudo -n）：doctor 承诺只读、无副作用，
-        绝不能因为一个读不到的单元就把密码框弹到用户脸上。
+        这里必须走协议里的**非交互**特权读（Linux 上是 `sudo -n`）：
+        doctor 承诺只读、无副作用，绝不能因为一个读不到的单元就把密码框
+        弹到用户脸上。`privilege()` 会构造交互式提权会话（可能弹密码），
+        因此这里绝不回退到它。
         """
         try:
             return unit.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             pass
-        reader = getattr(self.platform, "privilege_read", None)
-        if callable(reader):
-            try:
-                return reader(unit)
-            except (OSError, RuntimeError):
-                return None
         try:
-            return self.platform.privilege().read(unit)
+            return self.platform.privilege_read(unit)
         except (OSError, RuntimeError):
-            # 提权也读不到（sudo 不可用等）—— 返回 None，由调用方决定。
+            # 平台实现自身失败也要守住 check 的"永不抛异常"契约。
             return None
 
     def _unit_current(self) -> bool:
@@ -196,6 +206,11 @@ class CaddyComponent:
 
         两种单元格式都要认：systemd 的 ExecStart= 行与 launchd 的
         ProgramArguments 数组（后者是数组，逐个元素比对）。
+
+        ExecReload 也只对 systemd 单元检查（launchd 没有该字段）：
+        `admin_addr` 变了但 ExecStart 不变时，旧单元里的 `--address`
+        已经过期，单元必须重装。老版本装出的单元可能没有 ExecReload 行，
+        那种情况按"兼容"放过 —— 否则升级后 doctor 会无谓地报红一次。
         """
         unit = self.platform.service_unit_path("caddy")
         if not unit.exists():
@@ -213,18 +228,33 @@ class CaddyComponent:
             "--config",
             str(self.paths.caddyfile),
         ]
-        return argv[: len(expected)] == expected
+        if argv[: len(expected)] != expected:
+            return False
+        installed_reload = _exec_line_argv(text, "ExecReload")
+        if installed_reload is None:
+            return True
+        return installed_reload == [
+            str(self.config.caddy_bin_path),
+            "reload",
+            "--config",
+            str(self.paths.caddyfile),
+            "--address",
+            self.config.admin_addr,
+        ]
 
-    def _need_binary(self) -> bool:
+    def _need_binary(self, version: str | None = None) -> bool:
         """二进制判据：不存在，或版本与固定版本不符（含"版本读不出来"）。
 
         check 与 plan 必须共用它 —— 否则同一行既写"已就绪"又写"下载"，
-        而且每次 setup 都会重复下载。
+        而且每次 setup 都会重复下载。`version` 可由调用方传入已测得的
+        结果，避免同一轮里再跑一次 `caddy version`。
         """
         binary = self.config.caddy_bin_path
         if not binary.exists():
             return True
-        return self.platform.binary_version(binary) != f"v{CADDY_VERSION}"
+        if version is None:
+            version = self.platform.binary_version(binary)
+        return version != f"v{CADDY_VERSION}"
 
     def _service_hint(self) -> str:
         """服务相关的修复提示（按平台给不同的命令）。"""
@@ -242,7 +272,7 @@ class CaddyComponent:
                 hint=f"devproxy setup 会自动下载 {CADDY_VERSION}",
             )
         version = self.platform.binary_version(binary)
-        if self._need_binary():
+        if self._need_binary(version):
             return Status(
                 ok=False,
                 detail=(
@@ -277,6 +307,14 @@ class CaddyComponent:
                     else "systemctl --user start caddy"
                 ),
             )
+        # linger 也必须是就绪判据的一部分：没开 linger 时用户服务不会
+        # 开机自启，重启机器后 caddy 根本不在了 —— 与 plan 的判据保持一致。
+        if not self.platform.linger_enabled():
+            return Status(
+                ok=False,
+                detail="linger 未启用（用户服务不会开机自启）",
+                hint="devproxy setup（会执行 loginctl enable-linger，需要 sudo）",
+            )
         return Status(ok=True, detail=f"caddy {CADDY_VERSION} 已就绪")
 
     # -- plan ----------------------------------------------------------
@@ -289,10 +327,13 @@ class CaddyComponent:
         setcap 与下载/服务绑定 —— 新下载的二进制或服务没起来时才需要重新授权。
         """
         binary = self.config.caddy_bin_path
-        need_binary = self._need_binary()
+        # 一次快照：同一轮里重复探测会在状态变化时给出自相矛盾的分支。
+        version = self.platform.binary_version(binary) if binary.exists() else ""
+        need_binary = self._need_binary(version)
         need_caddyfile = not self._caddyfile_current()
         need_unit = not self._unit_current()
-        need_service = not self.platform.service_active("caddy")
+        caddy_active = self.platform.service_active("caddy")
+        need_service = not caddy_active
         need_linger = not self.platform.linger_enabled()
 
         actions: list[Action] = []
@@ -353,13 +394,23 @@ class CaddyComponent:
                     privileged=True,
                 )
             )
-        if need_binary and not need_unit and self.platform.service_active("caddy"):
-            # 二进制被换掉了，但单元与服务都不用动 —— 跑着的还是旧版本，
-            # "已固定到 2.11.7" 的承诺要等到下次重启才兑现。显式重启一次。
+        if (need_binary or need_caddyfile) and caddy_active and not need_unit:
+            # 运行中的 Caddy 不会自己发现二进制或主 Caddyfile 变了：
+            # - 换了二进制：跑着的还是旧版本；
+            # - 只改了主 Caddyfile（http_port / admin_addr / storage …）：
+            #   单元与服务都没变，只写文件等于什么都没生效。
+            # 单元/服务本身要重装的不在这里重启 —— install-service 分支
+            # 会处理（was_active → restart），避免重复重启两次。
             # 放在最后：setcap 必须先做完，否则重启后绑不上 80/443。
+            if need_binary and need_caddyfile:
+                description = "重启 caddy 服务以使用新二进制与新主 Caddyfile"
+            elif need_binary:
+                description = f"重启 caddy 服务以使用新下载的 {CADDY_VERSION}"
+            else:
+                description = "重启 caddy 服务以加载新的主 Caddyfile"
             actions.append(
                 Action(
-                    description=f"重启 caddy 服务以使用新下载的 {CADDY_VERSION}",
+                    description=description,
                     kind="run",
                     command=["restart-service", "caddy"],
                 )
@@ -445,42 +496,16 @@ class CaddyComponent:
         return False
 
     def _has_localhost_site(self) -> bool:
-        """sites.caddy 里是否有 localhost 站点块。
-
-        只有 *.test 站点的机器上没有 localhost 站点 —— 那时探 localhost
-        验的是"站点名匹配"而不是"服务活着"。
-        """
-        try:
-            text = self.paths.sites_caddy.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            return False
-        for line in text.splitlines():
-            s = line.strip()
-            if not s or s.startswith("#"):
-                continue
-            if "localhost" in s.split("{")[0]:
-                return True
-        return False
+        """sites.caddy 里是否有 localhost 站点块（精确匹配站点地址）。"""
+        return has_localhost_site(self.paths.sites_caddy)
 
     def _probe_url(self) -> str | None:
         """TLS 探测目标：优先首条已注册路由，其次确有 localhost 站点时的 localhost。
 
-        与 CertComponent 的做法一致：机器上只有 codeup.test 这类站点时，
-        拿 https://localhost 去探会因证书名不匹配而握手失败，把正常的机器
-        判成故障（setup 退 1）。没有可探的目标时返回 None。
+        判据由 `components.base.probe_url` 统一提供 —— 证书组件用的是
+        同一份实现，避免两处逻辑再次漂移。没有可探目标时返回 None。
         """
-        try:
-            data = json.loads(self.paths.routes_json.read_text(encoding="utf-8"))
-        except (OSError, ValueError, UnicodeDecodeError):
-            data = {}
-        routes = data.get("routes") if isinstance(data, dict) else None
-        for route in routes or []:
-            domain = route.get("domain") if isinstance(route, dict) else None
-            if isinstance(domain, str) and domain:
-                return f"https://{domain}"
-        if self._has_localhost_site():
-            return "https://localhost"
-        return None
+        return probe_url(self.paths.routes_json, self.paths.sites_caddy)
 
     # -- verify --------------------------------------------------------
     def verify(self) -> Status:

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from devproxy.components.base import has_localhost_site, probe_url
 from devproxy.components.caddy import (
     CADDY_SHA256,
     CADDY_VERSION,
@@ -75,6 +76,34 @@ def _make_ready(comp, platform, cfg) -> None:
 def test_asset_name_uses_mac_not_darwin():
     assert caddy_asset_name("mac", "arm64") == f"caddy_{CADDY_VERSION}_mac_arm64.tar.gz"
     assert caddy_asset_name("linux", "amd64") == f"caddy_{CADDY_VERSION}_linux_amd64.tar.gz"
+
+
+def test_has_localhost_site_matches_address_tokens_not_substrings(tmp_path):
+    site = tmp_path / "sites.caddy"
+    site.write_text(
+        "https://localhost:8443, example.test { respond \"hi\" }\n", encoding="utf-8"
+    )
+    assert has_localhost_site(site) is True
+
+    site.write_text("foo.localhost.test { respond \"hi\" }\n", encoding="utf-8")
+    assert has_localhost_site(site) is False
+
+
+def test_probe_url_prefers_route_over_localhost(tmp_path):
+    site = tmp_path / "sites.caddy"
+    site.write_text("localhost { respond \"hi\" }\n", encoding="utf-8")
+    routes = tmp_path / "routes.json"
+    routes.write_text(
+        json.dumps({"version": 1, "routes": [{"domain": "codeup.test"}]}),
+        encoding="utf-8",
+    )
+    assert probe_url(routes, site) == "https://codeup.test"
+
+
+def test_probe_url_none_without_route_or_localhost_site(tmp_path):
+    site = tmp_path / "sites.caddy"
+    site.write_text("codeup.test { respond \"hi\" }\n", encoding="utf-8")
+    assert probe_url(tmp_path / "missing.json", site) is None
 
 
 def test_sha256_covers_four_platforms():
@@ -505,6 +534,101 @@ def test_check_and_plan_agree_when_version_matches(tmp_path):
     assert not any("下载" in a.description for a in comp.plan())
 
 
+def test_plan_restarts_service_when_only_main_caddyfile_changed(tmp_path):
+    """只改主 Caddyfile（如 https_port）时单元与服务都没变 —— 也必须重启。
+
+    只写文件等于什么都没生效：运行中的 Caddy 仍持有旧配置，而后续
+    `devproxy up` 会按新配置连 admin API，报一个完全无关的错误。
+    """
+    from dataclasses import replace
+
+    comp, paths, cfg = _component(tmp_path)
+    platform = FakePlatform()
+    comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
+    _make_ready(comp, platform, cfg)
+
+    new_cfg = replace(cfg, https_port=8443)
+    comp = CaddyComponent(platform, paths, new_cfg, _fake_downloader)
+    actions = comp.plan()
+
+    assert not any(a.command[:1] == ["install-service"] for a in actions)
+    assert any(a.command[:2] == ["restart-service", "caddy"] for a in actions), actions
+    idx_write = next(
+        i for i, a in enumerate(actions) if a.kind == "write" and a.path == paths.caddyfile
+    )
+    idx_restart = next(
+        i
+        for i, a in enumerate(actions)
+        if a.command[:2] == ["restart-service", "caddy"]
+    )
+    assert idx_write < idx_restart, "必须先写文件再重启"
+
+
+def test_apply_restarts_service_for_caddyfile_only_change(tmp_path):
+    """Caddyfile-only 场景的 restart-service 动作必须真的重启。"""
+    from dataclasses import replace
+
+    comp, paths, cfg = _component(tmp_path)
+    platform = FakePlatform()
+    comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
+    _make_ready(comp, platform, cfg)
+    comp = CaddyComponent(
+        platform, paths, replace(cfg, https_port=8443), _fake_downloader
+    )
+    restarted = []
+    platform.restart_service = lambda name: restarted.append(name)
+    comp.apply(comp.plan())
+    assert restarted == ["caddy"]
+
+
+def test_check_not_ok_when_linger_disabled(tmp_path):
+    """没开 linger 时用户服务不会开机自启 —— check 与 plan 判据必须一致。"""
+    comp, paths, cfg = _component(tmp_path)
+    platform = FakePlatform()
+    comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
+    _make_ready(comp, platform, cfg)
+    platform.linger = False
+
+    status = comp.check()
+    assert status.ok is False
+    assert "linger" in status.detail
+    assert any(a.command[:1] == ["enable-linger"] for a in comp.plan())
+
+
+def test_plan_probes_binary_version_and_service_only_once(tmp_path):
+    """一次 plan 只该探测一次版本与一次服务状态（避免同轮自相矛盾）。"""
+    comp, paths, cfg = _component(tmp_path)
+    platform = FakePlatform()
+    comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
+    _make_ready(comp, platform, cfg)
+
+    version_calls = []
+    active_calls = []
+    platform.binary_version = lambda binary: version_calls.append(binary) or f"v{CADDY_VERSION}"
+    original_active = platform.service_active
+    platform.service_active = lambda name: active_calls.append(name) or original_active(name)
+
+    comp.plan()
+    assert len(version_calls) == 1
+    assert active_calls.count("caddy") == 1
+
+
+def test_unit_current_checks_exec_reload_address(tmp_path):
+    """admin_addr 变了但 ExecStart 不变时，旧单元里的 --address 已过期。"""
+    from dataclasses import replace
+
+    comp, paths, cfg = _component(tmp_path)
+    platform = FakePlatform()
+    comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
+    _make_ready(comp, platform, cfg)
+
+    comp = CaddyComponent(
+        platform, paths, replace(cfg, admin_addr="127.0.0.1:2020"), _fake_downloader
+    )
+    assert comp._unit_current() is False
+    assert any(a.command[:1] == ["install-service"] for a in comp.plan())
+
+
 def test_plan_restarts_service_when_binary_is_replaced(tmp_path):
     """换了二进制却不重启 —— 跑着的还是旧版本，"已固定版本"只在下次重启兑现。"""
     comp, paths, cfg = _component(tmp_path)
@@ -670,7 +794,10 @@ class _UnreadableUnitPlatform(_MacPlatform):
         return UnreadablePath(str(super().service_unit_path(name)))
 
     def privilege(self):
-        return ElevatedReader(self)
+        raise AssertionError("读单元只能走非交互的 privilege_read")
+
+    def privilege_read(self, path):
+        return ElevatedReader(self).read(path)
 
 
 def test_unit_current_survives_permission_denied_read(tmp_path):

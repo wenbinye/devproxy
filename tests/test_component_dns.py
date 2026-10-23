@@ -54,10 +54,17 @@ def test_production_paths_point_at_real_system_locations():
 
 
 def test_render_resolved_conf_shape():
-    out = render_resolved_conf(port=5353, domains=["test"])
+    out = render_resolved_conf(port=5353, suffix="test")
     assert "[Resolve]" in out
     assert "DNS=127.0.0.1:5353" in out
     assert "Domains=~.test" in out
+
+
+def test_render_resolved_conf_domains_uses_space_separator_not_comma():
+    """systemd-resolved 的 Domains= 是空格分隔；逗号不是分隔符。"""
+    out = render_resolved_conf(port=5353, suffix=".test")
+    assert "Domains=~.test" in out
+    assert "," not in out
 
 
 def test_render_system_dnsmasq_conf_shape():
@@ -435,9 +442,25 @@ def test_macos_backend_key_is_resolver(tmp_path):
     assert comp._backend_key() == "resolver"
 
 
-def test_macos_resolved_backend_is_always_false(tmp_path):
-    """macOS 没有 systemd-resolved —— 即使用户显式写 resolved 也不能选它。"""
+def test_macos_explicit_resolved_backend_raises(tmp_path):
+    """macOS 没有 systemd-resolved —— 显式 resolved 必须报错，不能静默降级。"""
     comp, _platform = _component(tmp_path, backend="resolved", platform=_MacPlatform())
+    with pytest.raises(RuntimeError, match="macOS 不支持 resolved"):
+        comp.resolved_backend
+
+
+def test_macos_explicit_resolved_backend_check_reports_config_error(tmp_path):
+    """check 永不抛异常：配置与平台不符时如实报 not ok。"""
+    comp, _platform = _component(tmp_path, backend="resolved", platform=_MacPlatform())
+    status = comp.check()
+    assert status.ok is False
+    assert "macOS 不支持 resolved" in status.detail
+    assert "auto" in status.hint
+
+
+def test_macos_auto_resolved_backend_stays_silent(tmp_path):
+    """auto 在 macOS 上静默走 resolver —— 只有显式 resolved 才报错。"""
+    comp, _platform = _component(tmp_path, backend="auto", platform=_MacPlatform())
     assert comp.resolved_backend is False
 
 
@@ -502,6 +525,16 @@ def test_linux_plan_still_restarts_resolved(tmp_path):
     assert reload_action.command == ["systemctl", "restart", "systemd-resolved"]
 
 
+def test_plan_computes_expected_content_once(tmp_path):
+    """plan 的两个分支只该共享同一份 content，不能各算一遍。"""
+    comp, _platform = _component(tmp_path, backend="resolved")
+    calls = []
+    original = comp._expected_content
+    comp._expected_content = lambda resolved=None: calls.append(resolved) or original(resolved)
+    comp.plan()
+    assert len(calls) == 1
+
+
 # -- 整机作用域的披露（Finding 8） -----------------------------------------
 
 
@@ -541,6 +574,42 @@ def test_resolved_plan_description_marks_global_scope(tmp_path):
 
 def test_fallback_dns_constant_matches_rendered_conf(tmp_path):
     """披露文案里的 FallbackDNS 必须与真正写进配置的一致。"""
-    content = render_resolved_conf(port=5353, domains=["test"])
+    content = render_resolved_conf(port=5353, suffix="test")
     assert f"FallbackDNS={dns_module.FALLBACK_DNS}" in content
     assert dns_module.FALLBACK_DNS in dns_module.global_scope_disclosure(5353)
+
+
+def test_unreadable_route_with_platform_installed_is_in_place_for_check_and_plan(
+    tmp_path, monkeypatch
+):
+    """root:root 0600 + state 缺失：check 与 plan 必须给出同一结论。
+
+    平台能确认文件存在时，plan 不该再要 sudo 重写并重启整机解析器。
+    """
+    from tests.support import UnreadablePath
+
+    target = tmp_path / "etc" / "devproxy.conf"
+    target.parent.mkdir(parents=True)
+    target.write_text(render_resolved_conf(port=5353, suffix="test"), encoding="utf-8")
+    monkeypatch.setattr(dns_module, "RESOLVED_CONF", UnreadablePath(str(target)))
+
+    comp, platform = _component(tmp_path, backend="resolved")
+    platform.dns_backends.add("resolved")
+    assert comp.check().ok is True
+    assert comp.plan() == [], "doctor 说就绪时 setup 不能又重写并重启 resolved"
+
+
+def test_unreadable_route_without_platform_confirmation_is_not_in_place(
+    tmp_path, monkeypatch
+):
+    """平台也无法确认时不能凭空报就绪 —— 否则会漏掉真正的缺失。"""
+    from tests.support import UnreadablePath
+
+    target = tmp_path / "etc" / "devproxy.conf"
+    target.parent.mkdir(parents=True)
+    target.write_text(render_resolved_conf(port=5353, suffix="test"), encoding="utf-8")
+    monkeypatch.setattr(dns_module, "RESOLVED_CONF", UnreadablePath(str(target)))
+
+    comp, _platform = _component(tmp_path, backend="resolved")
+    assert comp.check().ok is False
+    assert comp.plan() != []

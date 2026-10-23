@@ -7,10 +7,26 @@ import pytest
 
 from pathlib import Path
 
+from devproxy.components import dnsmasq as dnsmasq_module
 from devproxy.components.dnsmasq import DnsmasqComponent, merge_dnsmasq_config
 from devproxy.core.config import Config
 from devproxy.core.paths import Paths
 from devproxy.platform.fake import FakePlatform
+from tests.support import UnreadablePath
+
+
+@pytest.fixture(autouse=True)
+def _isolated_dnsmasq_binary(tmp_path, monkeypatch):
+    """check 会校验可执行文件存在 —— 指向临时假文件，绝不依赖宿主机。
+
+    macOS 用例默认也能找到一个"已安装"的 dnsmasq；需要模拟未安装的用例
+    再自行把候选路径覆盖成不存在的路径。
+    """
+    binary = tmp_path / "fake-bin" / "dnsmasq"
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr(dnsmasq_module, "LINUX_DNSMASQ_BINARY", str(binary))
+    monkeypatch.setattr(dnsmasq_module, "MACOS_DNSMASQ_CANDIDATES", (str(binary),))
 
 
 def test_merge_adds_port_and_addresses_to_empty():
@@ -536,4 +552,145 @@ def test_macos_dnsmasq_binary_falls_back_to_which(tmp_path, monkeypatch):
     )
     comp, _platform, _conf = _component(tmp_path, platform=_MacPlatform())
     assert comp._dnsmasq_binary() == "/usr/local/bin/dnsmasq"
+
+
+# -- I1：配置变更后，已 active 的服务必须重启 ------------------------------
+
+
+class _TrackingPlatform(FakePlatform):
+    """记录 restart_service 调用 —— FakePlatform 默认只改 active 集合。"""
+
+    def __init__(self):
+        super().__init__()
+        self.restarts: list[str] = []
+
+    def restart_service(self, name):
+        self.restarts.append(name)
+        super().restart_service(name)
+
+
+def test_apply_restarts_active_service_after_config_change(tmp_path):
+    """enable --now 不会重启已 active 的单元 —— 新配置必须靠显式 restart 生效。"""
+    platform = _TrackingPlatform()
+    comp, _platform, conf_path = _component(tmp_path, platform=platform)
+    comp.apply(comp.plan())  # 首次安装：服务原本没在跑，无需重启
+    assert platform.restarts == []
+
+    conf_path.write_text("port=53\n", encoding="utf-8")
+    comp.apply(comp.plan())  # 服务已 active：写配置后必须重启
+    assert platform.restarts == ["dnsmasq"]
+
+
+# -- I2：check 的内容判据必须与 plan 一致 --------------------------------
+
+
+def test_check_reports_config_drift_when_service_running(tmp_path):
+    """服务在跑但配置被改过 —— doctor 不能报绿。"""
+    comp, _platform, conf_path = _component(tmp_path)
+    comp.apply(comp.plan())
+    conf_path.write_text("port=53\n", encoding="utf-8")
+
+    status = comp.check()
+    assert status.ok is False
+    assert "缺少/偏离" in status.detail
+    assert "setup" in status.hint
+
+
+def test_check_skips_content_validation_when_conf_unreadable(tmp_path):
+    """读不到配置时无法证伪，退回存在性判据（与 dns 组件一致）。"""
+    comp, platform, conf_path = _component(tmp_path, conf="port=53\n")
+    platform.active.add("dnsmasq")
+    comp.conf_path = UnreadablePath(str(conf_path))
+
+    status = comp.check()
+    assert status.ok is True
+    assert "不可读" in status.detail
+
+
+# -- I7：二进制缺失要在 check/plan 阶段以正确文案暴露 --------------------
+
+
+def test_macos_missing_binary_raises_instead_of_fake_path(tmp_path, monkeypatch):
+    """找不到时绝不返回凭空构造的 /opt/homebrew 路径。"""
+    monkeypatch.setattr(dnsmasq_module, "MACOS_DNSMASQ_CANDIDATES", ("/nope/dnsmasq",))
+    monkeypatch.setattr(dnsmasq_module.shutil, "which", lambda name: None)
+    comp, _platform, _conf = _component(tmp_path, platform=_MacPlatform())
+
+    with pytest.raises(RuntimeError, match="brew install dnsmasq"):
+        comp._dnsmasq_binary()
+
+
+def test_macos_check_reports_missing_binary_with_brew_hint(tmp_path, monkeypatch):
+    """没装 dnsmasq 时不能提示 launchctl —— 服务根本不存在。"""
+    monkeypatch.setattr(dnsmasq_module, "MACOS_DNSMASQ_CANDIDATES", ("/nope/dnsmasq",))
+    monkeypatch.setattr(dnsmasq_module.shutil, "which", lambda name: None)
+    comp, _platform, _conf = _component(tmp_path, platform=_MacPlatform())
+
+    status = comp.check()
+    assert status.ok is False
+    assert "brew install dnsmasq" in status.hint
+    assert "launchctl" not in status.hint
+
+
+def test_linux_check_reports_missing_binary_with_install_hint(tmp_path, monkeypatch):
+    monkeypatch.setattr(dnsmasq_module, "LINUX_DNSMASQ_BINARY", "/nope/dnsmasq")
+    comp, _platform, _conf = _component(tmp_path)
+
+    status = comp.check()
+    assert status.ok is False
+    assert "不存在" in status.detail
+    assert "安装 dnsmasq" in status.hint
+
+
+# -- M7：备份读失败要阻断写入；同一秒的备份不能互相覆盖 ------------------
+
+
+class _UnreadableBackupSource(UnreadablePath):
+    """read_bytes 也被拒 —— 模拟 plan 之后文件权限变化（TOCTOU）。"""
+
+    def read_bytes(self, *args, **kwargs):
+        raise PermissionError(13, "Permission denied", str(self))
+
+
+def test_apply_refuses_to_overwrite_when_backup_read_fails(tmp_path):
+    from devproxy.platform.base import Action
+
+    comp, _platform, conf_path = _component(tmp_path, conf="port=53\n")
+    comp.conf_path = _UnreadableBackupSource(str(conf_path))
+
+    with pytest.raises(RuntimeError, match="拒绝覆盖"):
+        comp.apply(
+            [
+                Action(
+                    description="写新配置",
+                    kind="write",
+                    path=comp.conf_path,
+                    content="port=5353\n",
+                )
+            ]
+        )
+    # 原文件必须原封不动
+    assert conf_path.read_text(encoding="utf-8") == "port=53\n"
+
+
+def test_backups_do_not_collide_within_same_second(tmp_path, monkeypatch):
+    from devproxy.platform.base import Action
+
+    monkeypatch.setattr(
+        dnsmasq_module.time, "strftime", lambda *args, **kwargs: "20260101T000000Z"
+    )
+    comp, _platform, conf_path = _component(tmp_path, conf="port=53\n")
+    first = merge_dnsmasq_config("port=53\n", port=5353, suffix="test")
+    comp.apply([Action(description="第一次", kind="write", path=conf_path, content=first)])
+
+    conf_path.write_text("port=5300\n", encoding="utf-8")
+    second = merge_dnsmasq_config("port=5300\n", port=5353, suffix="test")
+    comp.apply([Action(description="第二次", kind="write", path=conf_path, content=second)])
+
+    backups = sorted((tmp_path / "s" / "backups").glob("dnsmasq.conf.*.bak"))
+    assert len(backups) == 2, "同一秒内的第二次备份不能覆盖第一次"
+    assert {p.read_text(encoding="utf-8") for p in backups} == {
+        "port=53\n",
+        "port=5300\n",
+    }
 

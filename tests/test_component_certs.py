@@ -86,7 +86,29 @@ def test_check_never_raises(tmp_path):
     _write_ca(paths)
     status = comp.check()
     assert status.ok is False
-    assert status.detail
+    # "探测工具坏了"不等于"CA 未被信任"：文案必须区分，避免诱导用户重复提权
+    assert "无法判定" in status.detail
+    assert "平台炸了" in status.detail
+    assert "根证书未被信任" not in status.detail
+
+
+def test_verify_reports_unknown_trust_probe_not_as_untrusted(tmp_path):
+    """verify 同样不能把"判不了"说成"仍未被完全信任"。"""
+
+    class Broken(FakePlatform):
+        def ca_trusted(self, ca):
+            raise RuntimeError("钥匙串被锁")
+
+        def nss_trusted(self, ca):
+            return False
+
+    comp, platform, paths = _component(tmp_path, Broken())
+    _write_ca(paths)
+    status = comp.verify()
+    assert status.ok is False
+    assert "无法判定" in status.detail
+    assert "钥匙串被锁" in status.detail
+    assert "仍未被完全信任" not in status.detail
 
 
 def test_check_degrades_when_platform_lacks_nss_trusted(tmp_path):
@@ -565,6 +587,27 @@ def test_apply_repair_uses_platform_flag_helper(tmp_path, monkeypatch):
     )
 
 
+def test_check_fails_loud_when_stale_state_is_unknown(tmp_path):
+    """三态原样透传：判不了就不能报"没有陈旧条目"，也不能静默跳过清理。"""
+
+    class UnknownStale(FakePlatform):
+        def nss_stale_nickname(self, ca, nickname, nss_dir=None):
+            return None
+
+    platform = UnknownStale()
+    comp, _platform, paths = _component(tmp_path, platform)
+    ca = _write_ca(paths)
+    _trust_both(platform, ca)
+
+    status = comp.check()
+    assert status.ok is False
+    assert "无法判定" in status.detail
+    actions = comp.plan()
+    assert [a.command[0] for a in actions] == ["remove-stale-nss-ca"], (
+        "判不了时 plan 必须产出清理动作，让 apply 显式报错而不是静默跳过"
+    )
+
+
 def test_plan_offers_stale_cleanup_when_ca_trusted(tmp_path, monkeypatch):
     """CA 已信任但自有昵称下残留旧 CA → plan() 产出非特权的清理动作。
 
@@ -779,6 +822,49 @@ def test_remove_stale_action_uses_message_when_platform_cannot_probe(
     )
 
 
+def test_repair_flags_raises_when_platform_lacks_flag_helper(tmp_path, monkeypatch):
+    """平台给不出完整标志时就报错 —— 绝不退回 "C,," 抹掉 S/MIME/JAR 列。"""
+    _certutil_installed(monkeypatch)
+
+    class NoFlagHelper(_NssFlagPlatform):
+        nss_trust_flags = None
+
+    platform = NoFlagHelper()
+    platform.entries = [("Caddy Local Authority", ",,")]
+    comp, paths, _ = _injected(tmp_path, platform)
+    _write_ca(paths)
+
+    with pytest.raises(RuntimeError, match="nss_trust_flags"):
+        comp.apply(comp.plan())
+    mods = [c for c in platform.commands if c[:1] == ["certutil"] and "-M" in c]
+    assert mods == [], "标志算不出来时不能发 -M，更不能按 C,, 覆盖"
+
+
+def test_signature_probe_does_not_swallow_internal_type_error(tmp_path):
+    """平台实现内部抛出的 TypeError 不能被误读成"签名不匹配"。"""
+    platform = FakePlatform()
+    comp, paths, _ = _injected(tmp_path, platform)
+    ca = _write_ca(paths)
+
+    calls = []
+
+    def nss_entries(ca):
+        calls.append(ca)
+        raise TypeError("平台内部错误")
+
+    platform.nss_entries = nss_entries
+    assert comp._nss_entries(ca, nss_dir=tmp_path / "nssdb") == []
+    assert len(calls) == 1, "签名探测失败不能导致重复调用"
+
+
+def test_apply_unknown_action_is_a_clean_error(tmp_path):
+    comp, _platform, _paths = _component(tmp_path)
+    with pytest.raises(RuntimeError, match="未知动作"):
+        comp.apply(
+            [Action(description="未知步骤", kind="run", command=["bogus-action"])]
+        )
+
+
 def test_apply_drops_stale_own_entry_when_trusted_elsewhere(tmp_path, monkeypatch):
     """已信任但自有昵称下残留**旧 CA** → 定向删除那一条。"""
     _certutil_installed(monkeypatch)
@@ -831,6 +917,7 @@ def test_verify_checks_real_https_request(tmp_path, monkeypatch):
     ca = _write_ca(paths)
     comp.apply(comp.plan())
     _trust_both(platform, ca)
+    paths.sites_caddy.write_text("localhost { respond \"hi\" }\n", encoding="utf-8")
     assert comp.verify().ok is True
     assert "https://localhost" in platform.http_probes
 
@@ -840,11 +927,39 @@ def test_verify_not_ok_when_https_probe_fails(tmp_path):
     comp, paths, _ = _injected(tmp_path, platform)
     ca = _write_ca(paths)
     _trust_both(platform, ca)
+    paths.sites_caddy.write_text("localhost { respond \"hi\" }\n", encoding="utf-8")
     platform.http_result = False
     status = comp.verify()
     assert status.ok is False
     assert "https://localhost" in status.detail
     assert status.hint
+
+
+def test_verify_skips_https_probe_when_no_target(tmp_path):
+    """没有 localhost 站点也没有路由时，不该拿 localhost 硬探。"""
+    platform = FakePlatform()
+    comp, paths, _ = _injected(tmp_path, platform)
+    ca = _write_ca(paths)
+    _trust_both(platform, ca)
+    status = comp.verify()
+    assert status.ok is True
+    assert "暂无可探测站点" in status.detail
+    assert platform.http_probes == []
+
+
+def test_verify_does_not_treat_localhost_substring_as_site(tmp_path):
+    """`foo.localhost.test` 不是 localhost 站点 —— 不能被当成可探目标。"""
+    platform = FakePlatform()
+    comp, paths, _ = _injected(tmp_path, platform)
+    ca = _write_ca(paths)
+    _trust_both(platform, ca)
+    paths.sites_caddy.write_text(
+        "foo.localhost.test { respond \"hi\" }\n", encoding="utf-8"
+    )
+    status = comp.verify()
+    assert status.ok is True
+    assert "暂无可探测站点" in status.detail
+    assert platform.http_probes == []
 
 
 def test_verify_probes_first_registered_route(tmp_path):
@@ -859,8 +974,10 @@ def test_verify_probes_first_registered_route(tmp_path):
         json.dumps({"version": 1, "routes": [{"domain": "codeup.test"}]}),
         encoding="utf-8",
     )
+    # 即便机器上同时有 localhost 站点，也应优先探真实路由
+    paths.sites_caddy.write_text("localhost { respond \"hi\" }\n", encoding="utf-8")
     assert comp.verify().ok is True
-    assert "https://codeup.test" in platform.http_probes
+    assert platform.http_probes == ["https://codeup.test"]
 
 
 # -- CLI：trust / logs ------------------------------------------------------

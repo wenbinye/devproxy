@@ -7,10 +7,12 @@ macOS 只需要系统钥匙串（由 Plan 3 的 macOS 平台实现提供）。
 
 from __future__ import annotations
 
-import json
+import inspect
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
 
+from devproxy.components.base import probe_url
 from devproxy.core.config import Config
 from devproxy.core.paths import Paths
 from devproxy.platform.base import (
@@ -50,6 +52,40 @@ def _macos_needs_gui(message: str) -> bool:
     return any(marker in low for marker in _MACOS_GUI_DENIED)
 
 
+def _accepts_keyword(func, name: str) -> bool:
+    """函数是否显式接受关键字参数 `name`（或带 `**kwargs`）。
+
+    用签名判断，而不是 try/except TypeError：平台实现**内部**抛出的
+    TypeError 不能被误读成"签名不匹配"，否则会静默改查另一个库，
+    把真实缺陷掩盖掉。
+    """
+    try:
+        parameters = inspect.signature(func).parameters
+    except (TypeError, ValueError):
+        return False
+    if name in parameters:
+        return True
+    return any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
+
+
+@dataclass(frozen=True)
+class _TrustProbe:
+    """一次信任探测的结果。
+
+    `trusted is None` 是**判不了**，与确定未信任（False）完全不是一回事：
+    前者不能用来生成"未被信任"的事实断言，也不能静默跳过清理。
+    """
+
+    trusted: bool | None
+    error: str = ""
+
+    def __bool__(self) -> bool:
+        return self.trusted is True
+
+
 class CertComponent:
     name = "cert"
 
@@ -80,25 +116,32 @@ class CertComponent:
     # -- 平台判定（永不抛异常） ---------------------------------------------
 
     @staticmethod
-    def _trusted(checker, ca: Path) -> bool:
-        """check() 永不抛异常的前提：平台判定失败一律当作"没信任"。"""
-        try:
-            return bool(checker(ca))
-        except Exception:  # noqa: BLE001 —— 判定异常不能带崩 doctor
-            return False
+    def _trusted(checker, ca: Path) -> _TrustProbe:
+        """平台信任判定；异常一律转成"判不了"（None），而不是"未信任"。
 
-    def _system_trusted(self) -> bool:
+        check() 永不抛异常的前提，但不能把"探测工具坏了"谎报成
+        "CA 未被信任" —— 那会诱导用户做一次不必要的提权安装。
+        """
+        try:
+            result = checker(ca)
+        except Exception as e:  # noqa: BLE001 —— 判定异常不能带崩 doctor
+            return _TrustProbe(None, f"{type(e).__name__}: {e}")
+        if result is None:
+            return _TrustProbe(None, "平台返回 None")
+        return _TrustProbe(bool(result))
+
+    def _system_trusted(self) -> _TrustProbe:
         checker = getattr(self.platform, "ca_trusted", None)
         if checker is None:
-            return False
+            return _TrustProbe(False, "平台未提供 ca_trusted")
         return self._trusted(checker, self.ca_path)
 
-    def _nss_trusted(self, ca: Path | None = None) -> bool:
+    def _nss_trusted(self, ca: Path | None = None) -> _TrustProbe:
         # 平台协议可能有变（Plan 3 的 macOS 实现）；属性访问本身也要在
         # try 之外兜住的话，缺方法会让 check() 抛异常 —— doctor 就炸了。
         checker = getattr(self.platform, "nss_trusted", None)
         if checker is None:
-            return False
+            return _TrustProbe(False, "平台未提供 nss_trusted")
         return self._trusted(checker, ca or self.ca_path)
 
     def _nss_entries(
@@ -114,21 +157,18 @@ class CertComponent:
             return []
         target = ca or self.ca_path
         try:
-            if nss_dir is None:
-                raw = getter(target)
+            if nss_dir is not None and _accepts_keyword(getter, "nss_dir"):
+                raw = getter(target, nss_dir=nss_dir)
             else:
-                try:
-                    raw = getter(target, nss_dir=nss_dir)
-                except TypeError:
-                    # 平台的 nss_entries 不接受 nss_dir（旧实现 / 别的平台）：
-                    # 退回它自己的库 —— 一致性已在上游用 nss_db_path 把过关。
-                    raw = getter(target)
+                # 平台不接受 nss_dir（旧实现 / 别的平台）：用它自己的库 ——
+                # 一致性已在上游用 nss_db_path 把过关。
+                raw = getter(target)
         except Exception:  # noqa: BLE001 —— 取不到就当没有
             return []
         entries: list[tuple[str, str]] = []
-        for item in raw or []:
+        for nickname_flags in raw or []:
             try:
-                nickname, flags = item
+                nickname, flags = nickname_flags
             except (TypeError, ValueError):
                 continue
             entries.append((str(nickname), str(flags)))
@@ -144,33 +184,48 @@ class CertComponent:
         except Exception:  # noqa: BLE001 —— 探测失败就当平台不提供
             return None
 
-    def _nss_stale(self, ca: Path, nss_dir: Path) -> bool:
+    def _nss_stale(self, ca: Path, nss_dir: Path) -> bool | None:
         """工具自有昵称下是否残留着**别的** CA（陈旧条目）。
 
-        取不到这个能力就返回 False —— 宁可漏删也不能误删。
+        三态**原样透传**：True = 确定陈旧；False = 确定不陈旧；
+        None = 判不了（库被锁 / 不可读 / 平台实现抛错）。
+        把 None 压成 False 会让"无法确认"变成"没有陈旧条目"，
+        清理被静默跳过 —— 陈旧根会永久留在 NSS 库里。
         """
         checker = getattr(self.platform, "nss_stale_nickname", None)
         if checker is None:
+            # 平台没有这个能力（macOS 无 NSS 库）：不存在"陈旧条目"概念。
             return False
         try:
-            return bool(checker(ca, CA_NAME, nss_dir=nss_dir))
-        except TypeError:
-            try:
-                return bool(checker(ca, CA_NAME))
-            except Exception:  # noqa: BLE001
-                return False
-        except Exception:  # noqa: BLE001
-            return False
+            if _accepts_keyword(checker, "nss_dir"):
+                result = checker(ca, CA_NAME, nss_dir=nss_dir)
+            else:
+                result = checker(ca, CA_NAME)
+        except Exception:  # noqa: BLE001 —— 判定失败是"判不了"，不是"没有"
+            return None
+        if result is None:
+            return None
+        return bool(result)
 
     def _nss_flags_for_repair(self, flags: str) -> str:
-        """补 SSL 信任标志用的完整标志串（保留 S/MIME 与 JAR 两列）。"""
-        helper = getattr(self.platform, "nss_trust_flags", None)
-        if helper is None:
-            return "C,,"
+        """补 SSL 信任标志用的完整标志串（保留 S/MIME 与 JAR 两列）。
+
+        平台算不出来时**必须报错**：退回 `"C,,"` 恰好会把第 2/3 列的
+        S/MIME / JAR 信任静默抹掉。
+        """
+        flags_resolver = getattr(self.platform, "nss_trust_flags", None)
+        if flags_resolver is None:
+            raise RuntimeError(
+                "平台未提供 nss_trust_flags，无法在保留 S/MIME/JAR 信任列的"
+                "前提下补 SSL 标志"
+            )
         try:
-            return str(helper(flags))
-        except Exception:  # noqa: BLE001
-            return "C,,"
+            return str(flags_resolver(flags))
+        except Exception as e:  # noqa: BLE001 —— 转成显式失败，绝不按破坏性默认继续
+            raise RuntimeError(
+                "平台 nss_trust_flags 计算失败（拒绝抹掉 S/MIME/JAR 信任列）："
+                f"{type(e).__name__}: {e}"
+            ) from e
 
     def _nss_has_nickname(self, nss: Path, nickname: str) -> bool | None:
         """昵称下是否有条目；判不了返回 None（平台不支持这个探测也是 None）。
@@ -183,9 +238,9 @@ class CertComponent:
         if getter is None:
             return None
         try:
-            try:
+            if _accepts_keyword(getter, "nss_dir"):
                 result = getter(nickname, nss_dir=nss)
-            except TypeError:
+            else:
                 result = getter(nickname)
         except Exception:  # noqa: BLE001 —— 探测失败按"判不了"处理
             return None
@@ -193,8 +248,8 @@ class CertComponent:
             return None
         return bool(result)
 
-    def _stale_own_entry(self) -> bool:
-        """工具自有昵称下是否残留着**别的** CA。判定失败一律当作没有。"""
+    def _stale_own_entry(self) -> bool | None:
+        """工具自有昵称下是否残留着**别的** CA；判不了返回 None。"""
         if not self.ca_path.exists():
             return False
         return self._nss_stale(self.ca_path, self.nss_dir)
@@ -203,10 +258,11 @@ class CertComponent:
         """CA 是否已被系统信任库与 NSS 库**同时**信任。
 
         CA 还不存在时返回 False —— 没什么可信任的。
+        判不了（None）也按"未信任"返回：提示一次 trust 比静默更好。
         """
         if not self.ca_path.exists():
             return False
-        return self._system_trusted() and self._nss_trusted()
+        return bool(self._system_trusted() and self._nss_trusted())
 
     @property
     def _is_macos(self) -> bool:
@@ -215,6 +271,23 @@ class CertComponent:
     def _system_label(self) -> str:
         """系统信任点的名字（报错与提示里用）。"""
         return "系统钥匙串" if self._is_macos else "系统信任库"
+
+    def _trust_probe_hint(self) -> str:
+        """探测失败时该往哪里排查 —— 不是"去跑 devproxy trust"。"""
+        if self._is_macos:
+            return "检查系统钥匙串是否已解锁、security 是否可用；devproxy trust"
+        return "检查 certutil 是否可用、NSS 库是否被锁或不可读；devproxy trust"
+
+    def _unverifiable_labels(
+        self, system: _TrustProbe, nss: _TrustProbe
+    ) -> list[str]:
+        """哪些信任点"判不了"（附上探测错误原文）。"""
+        labels = []
+        if system.trusted is None:
+            labels.append(f"{self._system_label()}（{system.error}）")
+        if nss.trusted is None:
+            labels.append(f"NSS 库（{nss.error}）")
+        return labels
 
     # -- check ---------------------------------------------------------
 
@@ -225,11 +298,19 @@ class CertComponent:
             return Status(
                 ok=True, detail="尚无 CA 根证书（将在首条路由注册时由 Caddy 生成）"
             )
+        system = self._system_trusted()
+        nss = self._nss_trusted()
+        unknown = self._unverifiable_labels(system, nss)
         missing = []
-        if not self._system_trusted():
+        if system.trusted is False:
             missing.append(self._system_label())
-        if not self._nss_trusted():
+        if nss.trusted is False:
             missing.append("NSS 库")
+        if unknown:
+            detail = f"无法判定 CA 是否被信任（探测失败：{'；'.join(unknown)}）"
+            if missing:
+                detail += f"；确定未信任：{'、'.join(missing)}"
+            return Status(ok=False, detail=detail, hint=self._trust_probe_hint())
         if missing:
             return Status(
                 ok=False,
@@ -241,7 +322,15 @@ class CertComponent:
         # 陈旧根属于"卫生问题"而不是"未就绪"：HTTPS 一切正常，所以 ok 仍是 True；
         # 但也不能谎称完全没问题 —— 警示**前置**到 detail 开头（doctor 表格会截断
         # 长字符串的末尾），同时放进 hint，让"修复"列直接给出动作。
-        if self._stale_own_entry():
+        stale = self._stale_own_entry()
+        if stale is None:
+            # 判不了不能静默跳过清理，也不能谎报"没有陈旧条目"。
+            return Status(
+                ok=False,
+                detail="无法判定 NSS 库中是否存在陈旧 CA 根（库可能被锁或不可读）",
+                hint="检查 certutil/NSS 库是否可读；devproxy trust",
+            )
+        if stale:
             return Status(
                 ok=True,
                 detail="NSS 库中工具昵称下残留陈旧 CA 根；CA 根证书已信任（系统信任库 + NSS 库）",
@@ -260,7 +349,7 @@ class CertComponent:
             return []
         if self._is_macos:
             # macOS 没有 NSS 库：CA 只要进系统钥匙串（Safari/Chrome 都认它）。
-            if self._system_trusted():
+            if self._system_trusted().trusted is True:
                 return []
             return [
                 Action(
@@ -271,8 +360,9 @@ class CertComponent:
                 )
             ]
         actions: list[Action] = []
-        nss_trusted = self._nss_trusted()
-        if not nss_trusted:
+        nss_trusted = self._nss_trusted().trusted
+        if nss_trusted is not True:
+            # False 与"判不了"（None）都保守地装一次；装不装得上由 apply 复查。
             actions.append(
                 Action(
                     description="安装 CA 根证书到 NSS 库（Chrome/Chromium）",
@@ -282,24 +372,28 @@ class CertComponent:
                     privileged=False,
                 )
             )
-        elif self._stale_own_entry():
-            # CA 已信任、但工具昵称下残留旧 CA 根。这条必须由 plan() 产出 ——
-            # 此场景下原本一切都"已就绪"、apply() 根本不会被调用，
-            # 只写在安装路径里的清理代码永远执行不到。
-            actions.append(
-                Action(
-                    description="清理 NSS 库中工具昵称下的陈旧 CA 根证书",
-                    kind="run",
-                    command=[
-                        "remove-stale-nss-ca",
-                        str(self.ca_path),
-                        str(self.nss_dir),
-                    ],
-                    # 自有昵称归工具所有；NSS 库在用户家目录，不需要 root
-                    privileged=False,
+        else:
+            stale = self._stale_own_entry()
+            if stale is None or stale:
+                # CA 已信任、但工具昵称下残留旧 CA 根。这条必须由 plan() 产出 ——
+                # 此场景下原本一切都"已就绪"、apply() 根本不会被调用，
+                # 只写在安装路径里的清理代码永远执行不到。
+                # stale is None（判不了）时也产出：apply 会显式报错，
+                # 绝不静默跳过清理。
+                actions.append(
+                    Action(
+                        description="清理 NSS 库中工具昵称下的陈旧 CA 根证书",
+                        kind="run",
+                        command=[
+                            "remove-stale-nss-ca",
+                            str(self.ca_path),
+                            str(self.nss_dir),
+                        ],
+                        # 自有昵称归工具所有；NSS 库在用户家目录，不需要 root
+                        privileged=False,
+                    )
                 )
-            )
-        if not self._system_trusted():
+        if self._system_trusted().trusted is not True:
             actions.append(
                 Action(
                     description="安装 CA 根证书到系统信任库并 update-ca-certificates",
@@ -340,132 +434,161 @@ class CertComponent:
             raise RuntimeError(message)
 
     def _apply_one(self, action: Action) -> None:
-        if action.command[:1] == ["install-macos-ca"]:
-            # macOS：把 CA 加进系统钥匙串并标成信任根（-d 加到系统域，
-            # -r trustRoot 让它对所有应用生效，包括 Safari/Chrome）。
-            src = Path(action.command[1])
-            code, msg = self.platform.privilege().run(
-                [
-                    "security",
-                    "add-trusted-cert",
-                    "-d",
-                    "-r",
-                    "trustRoot",
-                    "-k",
-                    SYSTEM_KEYCHAIN,
-                    str(src),
-                ]
+        """按命令分派；四类动作各自独立，失败语义互不牵连。"""
+        handlers = {
+            "install-macos-ca": self._install_macos_ca,
+            "install-system-ca": self._install_system_ca,
+            "remove-stale-nss-ca": self._remove_stale_nss_ca,
+            "install-nss-ca": self._install_nss_ca,
+        }
+        if not action.command:
+            raise RuntimeError("未知动作: 空命令")
+        handler = handlers.get(action.command[0])
+        if handler is None:
+            raise RuntimeError(f"未知动作: {action.command}")
+        handler(action.command)
+
+    # -- 各动作实现 -----------------------------------------------------
+
+    def _install_macos_ca(self, command: list[str]) -> None:
+        """macOS：把 CA 加进系统钥匙串并标成信任根。
+
+        -d 加到系统域，-r trustRoot 让它对所有应用生效（含 Safari/Chrome）。
+        """
+        src = Path(command[1])
+        code, msg = self.platform.privilege().run(
+            [
+                "security",
+                "add-trusted-cert",
+                "-d",
+                "-r",
+                "trustRoot",
+                "-k",
+                SYSTEM_KEYCHAIN,
+                str(src),
+            ]
+        )
+        if code != 0:
+            if _macos_needs_gui(msg):
+                # 真机实测（macOS 26 + SSH）：证书其实**已经**进了系统钥匙串，
+                # 卡住的是 SecTrustSettingsSetTrustSettings —— 它要弹一个
+                # 系统授权框，而 SSH 会话没有图形上下文，于是直接拒绝。
+                # 这既不是权限不够（sudo 是成功的），也不是命令写错，
+                # 用户除了"去那台机器的图形界面点一下"别无他法。
+                # 分行写：Rich 会把超长的一整段折成难读的多行，
+                # 而"该运行什么命令"必须是完整、可复制的一行。
+                raise PermissionError(
+                    "macOS 不允许在非图形界面会话里修改系统信任设置"
+                    "（SSH 下弹不出授权框）。\n"
+                    "请在那台 Mac 的「终端」窗口里运行：devproxy trust\n"
+                    f"系统原文：{msg}"
+                )
+            raise RuntimeError(f"安装 CA 到系统钥匙串失败: {msg}")
+
+    def _install_system_ca(self, command: list[str]) -> None:
+        """Debian 系：复制进系统信任库目录并刷新信任链。"""
+        elevated = self.platform.privilege()
+        src, dest = Path(command[1]), Path(command[2])
+        code, msg = elevated.run(["install", "-d", str(dest.parent)])
+        if code != 0:
+            raise RuntimeError(f"创建信任库目录失败: {msg}")
+        elevated.copy(src, dest)
+        code, msg = elevated.run(["update-ca-certificates"])
+        if code != 0:
+            # 不检查返回码的话，CA 只是躺在暂存目录里，系统并不认它
+            raise RuntimeError(
+                f"update-ca-certificates 失败（CA 未进入系统信任库）: {msg}"
             )
-            if code != 0:
-                if _macos_needs_gui(msg):
-                    # 真机实测（macOS 26 + SSH）：证书其实**已经**进了系统钥匙串，
-                    # 卡住的是 SecTrustSettingsSetTrustSettings —— 它要弹一个
-                    # 系统授权框，而 SSH 会话没有图形上下文，于是直接拒绝。
-                    # 这既不是权限不够（sudo 是成功的），也不是命令写错，
-                    # 用户除了"去那台机器的图形界面点一下"别无他法。
-                    # 分行写：Rich 会把超长的一整段折成难读的多行，
-                    # 而"该运行什么命令"必须是完整、可复制的一行。
-                    raise PermissionError(
-                        "macOS 不允许在非图形界面会话里修改系统信任设置"
-                        "（SSH 下弹不出授权框）。\n"
-                        "请在那台 Mac 的「终端」窗口里运行：devproxy trust\n"
-                        f"系统原文：{msg}"
-                    )
-                raise RuntimeError(f"安装 CA 到系统钥匙串失败: {msg}")
-            return
-        if action.command[:1] == ["install-system-ca"]:
-            elevated = self.platform.privilege()
-            src, dest = Path(action.command[1]), Path(action.command[2])
-            code, msg = elevated.run(["install", "-d", str(dest.parent)])
-            if code != 0:
-                raise RuntimeError(f"创建信任库目录失败: {msg}")
-            elevated.copy(src, dest)
-            code, msg = elevated.run(["update-ca-certificates"])
-            if code != 0:
-                # 不检查返回码的话，CA 只是躺在暂存目录里，系统并不认它
-                raise RuntimeError(
-                    f"update-ca-certificates 失败（CA 未进入系统信任库）: {msg}"
-                )
-            return
-        if action.command[:1] == ["remove-stale-nss-ca"]:
-            src = Path(action.command[1])
-            nss = Path(action.command[2]).expanduser()
-            if shutil.which("certutil") is None:
-                raise RuntimeError(
-                    "缺少 certutil（Chrome 信任需 NSS 库）：sudo apt install libnss3-tools"
-                )
-            self._require_same_nss_db(nss)
+
+    def _remove_stale_nss_ca(self, command: list[str]) -> None:
+        """清理工具自有昵称下的陈旧 CA 条目。"""
+        src, nss = self._nss_command_targets(command)
+        self._require_certutil()
+        self._require_same_nss_db(nss)
+        self._drop_stale_own_entry(src, nss)
+
+    def _install_nss_ca(self, command: list[str]) -> None:
+        """把 CA 装进 NSS 库（Chrome/Chromium），按库里现状选择最小改动。"""
+        src, nss = self._nss_command_targets(command)
+        self._require_certutil()
+        self._require_same_nss_db(nss)
+        # 平台判定已信任 → 一个字节都不改，只做一次**定向**清理：
+        # 自有昵称下若残留旧 CA，那个根会被浏览器永久信任，旧私钥若
+        # 可恢复就是 HTTPS 中间人后门。那个昵称归工具所有，可以安全删。
+        if self._nss_trusted(src).trusted is True:
             self._drop_stale_own_entry(src, nss)
             return
-        if action.command[:1] == ["install-nss-ca"]:
-            src = Path(action.command[1])
-            nss = Path(action.command[2]).expanduser()
-            # 探测只能看二进制在不在：certutil -V 需要 -n，真实机器上永远非零
-            if shutil.which("certutil") is None:
-                raise RuntimeError(
-                    "缺少 certutil（Chrome 信任需 NSS 库）：sudo apt install libnss3-tools"
-                )
-            self._require_same_nss_db(nss)
-            # 平台判定已信任 → 一个字节都不改，只做一次**定向**清理：
-            # 自有昵称下若残留旧 CA，那个根会被浏览器永久信任，旧私钥若
-            # 可恢复就是 HTTPS 中间人后门。那个昵称归工具所有，可以安全删。
-            if self._nss_trusted(src):
-                self._drop_stale_own_entry(src, nss)
-                return
-            nss.mkdir(parents=True, exist_ok=True)
-            # 库还不存在时先建一个空库，否则 certutil -A 会失败
-            if not (nss / "cert9.db").exists():
-                code, msg = self.platform.run(
-                    ["certutil", "-N", "-d", f"sql:{nss}", "--empty-password"]
-                )
-                if code != 0:
-                    raise RuntimeError(f"创建 NSS 库失败: {msg}")
-
-            # 库里与这张 CA 内容相同的条目（可能挂在我们不认识的昵称下）。
-            # 判据是**内容**：NSS 按 (issuer, serial) 去重，换个昵称再装
-            # 是装不进去的。
-            entries = self._nss_entries(src, nss_dir=nss)
-            if any(self._flags_trusted(flags) for _n, flags in entries):
-                # 按内容查到的条目已经带 SSL 信任 → 同样什么都不改
-                # （平台没有 nss_trusted 的内容判定时，靠这一步兜住）。
-                self._drop_stale_own_entry(src, nss)
-                return
-            if entries:
-                # 证书已在库里但没有 SSL 信任 → 只补标志，**不要 -A**：
-                # 对已存在的证书，-A -t "C,," 会把这行改写成 "C,,"，
-                # 把 S/MIME / JAR 两列原有的信任静默抹掉。
-                # 顺手清掉自有昵称下的陈旧条目：补完标志这条 CA 就算信任了，
-                # 再没人会回头看那个旧根。
-                self._drop_stale_own_entry(src, nss)
-                self._repair_flags(src, nss, entries)
-                return
-            # 库里没有这张 CA：先清掉自有昵称下的陈旧条目，再安装。
-            self._drop_stale_own_entry(src, nss, unconditional=True)
-            code, msg = self.platform.run(
-                [
-                    "certutil",
-                    "-d",
-                    f"sql:{nss}",
-                    "-A",
-                    "-n",
-                    CA_NAME,
-                    "-t",
-                    "C,,",
-                    "-i",
-                    str(src),
-                ]
-            )
-            if code != 0:
-                raise RuntimeError(f"安装 NSS 证书失败: {msg}")
-            # 复查：**-A 返回 0 不代表真的装上了**（对已存在的证书它是静默的）。
-            if self._nss_trusted(src):
-                return
-            # 还是不行 → 库里有这张 CA 但缺 SSL 信任标志，补标志后再复查
-            self._repair_flags(
-                src, nss, self._nss_entries(src, nss_dir=nss), initial_output=msg
-            )
+        self._ensure_nss_db(nss)
+        # 库里与这张 CA 内容相同的条目（可能挂在我们不认识的昵称下）。
+        # 判据是**内容**：NSS 按 (issuer, serial) 去重，换个昵称再装
+        # 是装不进去的。
+        entries = self._nss_entries(src, nss_dir=nss)
+        if any(self._flags_trusted(flags) for _nickname, flags in entries):
+            # 按内容查到的条目已经带 SSL 信任 → 同样什么都不改
+            # （平台没有 nss_trusted 的内容判定时，靠这一步兜住）。
+            self._drop_stale_own_entry(src, nss)
             return
-        raise RuntimeError(f"未知动作: {action.command}")
+        if entries:
+            # 证书已在库里但没有 SSL 信任 → 只补标志，**不要 -A**：
+            # 对已存在的证书，-A -t "C,," 会把这行改写成 "C,,"，
+            # 把 S/MIME / JAR 两列原有的信任静默抹掉。
+            # 顺手清掉自有昵称下的陈旧条目：补完标志这条 CA 就算信任了，
+            # 再没人会回头看那个旧根。
+            self._drop_stale_own_entry(src, nss)
+            self._repair_flags(src, nss, entries)
+            return
+        self._install_nss_entry(src, nss)
+
+    def _ensure_nss_db(self, nss: Path) -> None:
+        """库还不存在时先建一个空库，否则 certutil -A 会失败。"""
+        nss.mkdir(parents=True, exist_ok=True)
+        if (nss / "cert9.db").exists():
+            return
+        code, msg = self.platform.run(
+            ["certutil", "-N", "-d", f"sql:{nss}", "--empty-password"]
+        )
+        if code != 0:
+            raise RuntimeError(f"创建 NSS 库失败: {msg}")
+
+    def _install_nss_entry(self, src: Path, nss: Path) -> None:
+        """库里没有这张 CA：先清掉自有昵称下的陈旧条目，再安装并复查。"""
+        self._drop_stale_own_entry(src, nss, unconditional=True)
+        code, msg = self.platform.run(
+            [
+                "certutil",
+                "-d",
+                f"sql:{nss}",
+                "-A",
+                "-n",
+                CA_NAME,
+                "-t",
+                "C,,",
+                "-i",
+                str(src),
+            ]
+        )
+        if code != 0:
+            raise RuntimeError(f"安装 NSS 证书失败: {msg}")
+        # 复查：**-A 返回 0 不代表真的装上了**（对已存在的证书它是静默的）。
+        if self._nss_trusted(src).trusted is True:
+            return
+        # 还是不行 → 库里有这张 CA 但缺 SSL 信任标志，补标志后再复查
+        self._repair_flags(
+            src, nss, self._nss_entries(src, nss_dir=nss), initial_output=msg
+        )
+
+    @staticmethod
+    def _nss_command_targets(command: list[str]) -> tuple[Path, Path]:
+        """NSS 动作命令里的 (CA 路径, 库路径)。"""
+        return Path(command[1]), Path(command[2]).expanduser()
+
+    @staticmethod
+    def _require_certutil() -> None:
+        # 探测只能看二进制在不在：certutil -V 需要 -n，真实机器上永远非零
+        if shutil.which("certutil") is None:
+            raise RuntimeError(
+                "缺少 certutil（Chrome 信任需 NSS 库）：sudo apt install libnss3-tools"
+            )
 
     # -- NSS 安装的辅助 -------------------------------------------------
 
@@ -507,8 +630,16 @@ class CertComponent:
         - 库**目录只读**时 `certutil -D` 返回 **0 却什么都没删**（实测）
           → 删除之后必须复验条目真的没了。
         """
-        if not unconditional and not self._nss_stale(ca, nss):
-            return
+        if not unconditional:
+            stale = self._nss_stale(ca, nss)
+            if stale is False:
+                return  # 确定没有陈旧条目 —— 幂等
+            if stale is None:
+                # 不能把"判不了"当成"没有"：那会让陈旧根永久留在库里。
+                raise RuntimeError(
+                    "无法判定 NSS 库中是否存在陈旧 CA 条目"
+                    "（库可能被锁或不可读），拒绝静默跳过清理"
+                )
         code, msg = self.platform.run(
             ["certutil", "-d", f"sql:{nss}", "-D", "-n", CA_NAME]
         )
@@ -527,7 +658,13 @@ class CertComponent:
                 )
             raise RuntimeError(f"删除 NSS 库中的陈旧 CA 条目失败: {msg}")
         # 返回 0 不代表真的删了：NSS 库目录只读时 certutil -D 静默无效（实测）。
-        if self._nss_stale(ca, nss):
+        after = self._nss_stale(ca, nss)
+        if after is None:
+            raise RuntimeError(
+                "无法确认 NSS 库中的陈旧 CA 条目是否已删除"
+                f"（库可能被锁或不可读）: {msg}"
+            )
+        if after is True:
             raise RuntimeError(
                 "删除 NSS 库中的陈旧 CA 条目未生效（certutil 返回成功但条目仍在，"
                 f"库目录可能不可写）: {msg}"
@@ -558,7 +695,7 @@ class CertComponent:
             last_output = msg
             if code != 0:
                 last_output = f"({code}) {msg}"
-            if self._nss_trusted(ca):
+            if self._nss_trusted(ca).trusted is True:
                 return
         # 复查仍否 —— 错误信息要带上**最后一次 -M** 的输出与库里的实际条目，
         # 只留 -A 的输出在成功返回 0 时是空的，等于什么都没说。
@@ -570,29 +707,38 @@ class CertComponent:
 
     # -- verify --------------------------------------------------------
 
-    def _probe_url(self) -> str:
-        """真实 HTTPS 探测的 URL：优先首条已注册路由，其次 localhost。
+    def _probe_url(self) -> str | None:
+        """真实 HTTPS 探测的 URL；没有可探目标时返回 None。
 
-        用 localhost 去验一个只有 codeup.test 的机器会因“无 localhost 站点”
-        而握手失败 —— 那验的是站点匹配，不是证书信任链。
+        判据与 Caddy 组件共用 `components.base.probe_url`：优先首条已注册
+        路由，其次**确有 localhost 站点时**才用 localhost。用 localhost 去
+        验一个只有 codeup.test 的机器会因"无 localhost 站点"而握手失败 ——
+        那验的是站点匹配，不是证书信任链。
         """
-        try:
-            data = json.loads(self.paths.routes_json.read_text(encoding="utf-8"))
-            for route in data.get("routes") or []:
-                domain = route.get("domain") if isinstance(route, dict) else None
-                if isinstance(domain, str) and domain:
-                    return f"https://{domain}"
-        except (OSError, ValueError, AttributeError):
-            pass
-        return "https://localhost"
+        return probe_url(self.paths.routes_json, self.paths.sites_caddy)
 
     def verify(self) -> Status:
         if not self.ca_path.exists():
             return Status(ok=True, detail="尚无 CA 根证书（跳过验证）")
-        if not (self._system_trusted() and self._nss_trusted()):
+        system = self._system_trusted()
+        nss = self._nss_trusted()
+        unknown = self._unverifiable_labels(system, nss)
+        if unknown:
+            return Status(
+                ok=False,
+                detail=f"无法判定 CA 是否被信任（探测失败：{'；'.join(unknown)}）",
+                hint=self._trust_probe_hint(),
+            )
+        if system.trusted is not True or nss.trusted is not True:
             return Status(ok=False, detail="CA 仍未被完全信任", hint="devproxy trust")
         # openssl 验证信任链只是第一步；再发一次真实 HTTPS 请求确认端到端可用。
         url = self._probe_url()
+        if url is None:
+            # 没有任何可探站点（迁移来的 CA、尚未注册路由）—— 这里验不了
+            # 信任链，保持 ok + 说明，而不是拿 localhost 去制造假失败。
+            return Status(
+                ok=True, detail="CA 已信任（暂无可探测站点，跳过 HTTPS 验证）"
+            )
         if not self.platform.http_ok(url):
             return Status(
                 ok=False,

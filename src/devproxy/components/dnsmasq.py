@@ -19,6 +19,10 @@ from devproxy.platform.base import Action, Platform, Status
 
 DNSMASQ_CONF = Path("~/.config/dnsmasq/dnsmasq.conf")
 
+# Linux 发行版把 dnsmasq 固定装在这里。单独成常量是为了让测试能指向
+# 临时文件 —— check 会校验它是否真的存在。
+LINUX_DNSMASQ_BINARY = "/usr/sbin/dnsmasq"
+
 # macOS 上系统不带 dnsmasq —— Homebrew 装在 /opt/homebrew/sbin（Apple Silicon）
 # 或 /usr/local/sbin（Intel）。launchd 不认 PATH，必须绝对路径。
 MACOS_DNSMASQ_CANDIDATES = (
@@ -59,10 +63,46 @@ def _is_global_server(line: str) -> bool:
     return True
 
 
-def merge_dnsmasq_config(existing: str, *, port: int, suffix: str) -> str:
-    """增量修改 dnsmasq 配置：确保 port、address、监听范围与上游存在，其余原样保留。
+def _ensure_port(out: list[str], port: int) -> None:
+    """只保留一条 `port=`，且值必须是本次端口；其余行原样保留。"""
+    kept: list[str] = []
+    seen_port = False
+    for line in out:
+        if line.strip().startswith("port="):
+            if not seen_port:
+                kept.append(f"port={port}")
+                seen_port = True
+            continue
+        kept.append(line)
+    if not seen_port:
+        kept.append(f"port={port}")
+    out[:] = kept
 
-    绝不重写整个文件 —— 用户可能有 .develop 等自己的域名条目。
+
+def _ensure_addresses(out: list[str], suffix: str) -> None:
+    """确保本工具域名的 IPv4/IPv6 `address=` 条目各存在一条。"""
+    suffix = suffix.lstrip(".")
+    present = {line.strip() for line in out}
+    for addr in (f"address=/.{suffix}/127.0.0.1", f"address=/.{suffix}/::1"):
+        if addr not in present:
+            out.append(addr)
+            present.add(addr)
+
+
+def _ensure_loopback(out: list[str]) -> None:
+    """确保只监听回环。
+
+    缺这两行时 dnsmasq 会绑 0.0.0.0:5353，成为局域网上的开放递归解析器
+    （DNS 放大攻击面）。用户已自行设置过就保留不改。
+    """
+    if not _option_present(out, "listen-address"):
+        out.append("listen-address=127.0.0.1")
+    if not _option_present(out, "bind-interfaces"):
+        out.append("bind-interfaces")
+
+
+def _ensure_upstream(out: list[str]) -> None:
+    """确保上游配置不会形成 resolved ↔ dnsmasq 解析环路。
 
     上游规则（依据 dnsmasq 手册）：
     - 手册明说 `server=` **不会**抑制读取 /etc/resolv.conf，只有 `--no-resolv`
@@ -76,42 +116,28 @@ def merge_dnsmasq_config(existing: str, *, port: int, suffix: str) -> str:
     - 用户显式写了 `resolv-file=` 时一律不动上游：那是自选的解析器文件，
       既不与 no-resolv 并存，也不该被公共 DNS 掺和。
     """
-    lines = existing.splitlines()
-    out: list[str] = []
-    seen_port = False
-    for line in lines:
-        stripped = line.strip()
-        if stripped.startswith("port="):
-            if not seen_port:
-                out.append(f"port={port}")
-                seen_port = True
-            continue
-        out.append(line)
-    if not seen_port:
-        out.append(f"port={port}")
-    suffix = suffix.lstrip(".")
-    present = {line.strip() for line in out}
-    for addr in (f"address=/.{suffix}/127.0.0.1", f"address=/.{suffix}/::1"):
-        if addr not in present:
-            out.append(addr)
-            present.add(addr)
-    # 只监听回环：缺这两行时 dnsmasq 会绑 0.0.0.0:5353，成为局域网上的
-    # 开放递归解析器（DNS 放大攻击面）。用户已自行设置过就保留不改。
-    if not _option_present(out, "listen-address"):
-        out.append("listen-address=127.0.0.1")
-        present.add("listen-address=127.0.0.1")
-    if not _option_present(out, "bind-interfaces"):
-        out.append("bind-interfaces")
-        present.add("bind-interfaces")
     has_resolv_file = _option_present(out, "resolv-file")
     if not has_resolv_file and not _option_present(out, "no-resolv"):
         out.append("no-resolv")
-        present.add("no-resolv")
     if not has_resolv_file and not any(_is_global_server(line) for line in out):
+        present = {line.strip() for line in out}
         for upstream in DEFAULT_UPSTREAMS:
             if upstream not in present:
                 out.append(upstream)
                 present.add(upstream)
+
+
+def merge_dnsmasq_config(existing: str, *, port: int, suffix: str) -> str:
+    """增量修改 dnsmasq 配置：确保 port、address、监听范围与上游存在，其余原样保留。
+
+    绝不重写整个文件 —— 用户可能有 .develop 等自己的域名条目。
+    各类归一化拆在各自的小函数里，这里只负责顺序编排。
+    """
+    out = existing.splitlines()
+    _ensure_port(out, port)
+    _ensure_addresses(out, suffix)
+    _ensure_loopback(out)
+    _ensure_upstream(out)
     return "\n".join(out) + "\n"
 
 
@@ -141,7 +167,35 @@ class DnsmasqComponent:
             return f"launchctl kickstart -k gui/{os.getuid()}/com.devproxy.dnsmasq"
         return "systemctl --user start dnsmasq"
 
+    def _binary_hint(self) -> str:
+        """安装 dnsmasq 的可操作提示（按平台给不同的包管理器）。"""
+        if self.platform.name == "mac":
+            return "macOS 请先执行 brew install dnsmasq"
+        return "请用发行版包管理器安装 dnsmasq（如 sudo apt install dnsmasq）"
+
+    def _binary_status(self) -> Status | None:
+        """可执行文件缺失时返回失败状态；正常时返回 None。
+
+        不校验的话，干净 macOS 上 plan 会把凭空构造的 Homebrew 路径写进
+        launchd plist，错误直到 bootstrap 才以完全无关的文案暴露。
+        """
+        try:
+            binary = self._dnsmasq_binary()
+        except RuntimeError as e:
+            return Status(ok=False, detail=str(e), hint=self._binary_hint())
+        if not Path(binary).exists():
+            return Status(
+                ok=False,
+                detail=f"dnsmasq 可执行文件不存在: {binary}",
+                hint=self._binary_hint(),
+            )
+        return None
+
     def check(self) -> Status:
+        # 先校验二进制：没装 dnsmasq 时，后面的"服务未运行"提示只会误导。
+        missing_binary = self._binary_status()
+        if missing_binary is not None:
+            return missing_binary
         if not self.platform.service_active("dnsmasq"):
             return Status(
                 ok=False,
@@ -153,6 +207,22 @@ class DnsmasqComponent:
                 ok=False,
                 detail=f"dnsmasq 配置不存在: {self.conf_path}",
                 hint="devproxy setup 会生成",
+            )
+        # 就绪判据必须与 plan 一致：文件存在但内容被改过时，
+        # doctor 不能对着一个解析不到 *.test 的机器报绿。
+        try:
+            existing = self.conf_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            # 读不到时无法证伪，退回存在性判据（与 dns 组件一致）。
+            return Status(ok=True, detail="dnsmasq 运行中（配置不可读，未校验内容）")
+        merged = merge_dnsmasq_config(
+            existing, port=self.platform.dns_port, suffix=self.config.domain_suffix
+        )
+        if existing != merged:
+            return Status(
+                ok=False,
+                detail="dnsmasq 配置缺少/偏离工具维护项",
+                hint="devproxy setup 会重写",
             )
         return Status(ok=True, detail="dnsmasq 运行中")
 
@@ -194,6 +264,7 @@ class DnsmasqComponent:
                 action.path.write_text(action.content, encoding="utf-8")
                 continue
             if action.command[:1] == ["install-service"]:
+                was_active = self.platform.service_active("dnsmasq")
                 self.platform.install_service(
                     "dnsmasq",
                     exec_start=self._exec_start(),
@@ -206,6 +277,10 @@ class DnsmasqComponent:
                     ),
                 )
                 self.platform.enable_service("dnsmasq")
+                if was_active:
+                    # enable --now 对已 active 的单元不会重启，新配置留在磁盘上
+                    # 不会生效。与 caddy 的 install 分支保持一致。
+                    self.platform.restart_service("dnsmasq")
                 continue
             raise RuntimeError(f"未知动作: {action.command}")
 
@@ -213,17 +288,26 @@ class DnsmasqComponent:
         """改写用户既有配置前先备份（Plan 2 Global Constraints）。
 
         内容没变时绝不落备份文件 —— 否则每次 setup 都会在状态目录里堆垃圾。
+        读取失败必须阻断写入：契约是"先备份再覆盖"，静默 return 会让调用方
+        以为无需备份，随后把原文件直接盖掉。
         """
         if path != self.conf_path or not path.exists():
             return
         try:
             original = path.read_bytes()
-        except OSError:
-            return
+        except OSError as e:
+            raise RuntimeError(
+                f"读取现有 dnsmasq 配置失败，拒绝覆盖: {path}: {e}"
+            ) from e
         if original == content.encode("utf-8"):
             return
         stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
         backup = self.paths.backup_dir / f"dnsmasq.conf.{stamp}.bak"
+        # 同一秒内连续 apply（脚本/CI）不能互相覆盖备份。
+        serial = 1
+        while backup.exists():
+            backup = self.paths.backup_dir / f"dnsmasq.conf.{stamp}.{serial}.bak"
+            serial += 1
         backup.parent.mkdir(parents=True, exist_ok=True)
         backup.write_bytes(original)
 
@@ -282,14 +366,16 @@ class DnsmasqComponent:
         Homebrew 装的那份（换了前缀的旧版本、别的包管理器装的）。
         """
         if self.platform.name != "mac":
-            return "/usr/sbin/dnsmasq"
+            return LINUX_DNSMASQ_BINARY
         for candidate in MACOS_DNSMASQ_CANDIDATES:
             if Path(candidate).exists():
                 return candidate
         found = shutil.which("dnsmasq")
         if found:
             return found
-        return MACOS_DNSMASQ_CANDIDATES[0]
+        # 绝不返回凭空构造的路径：那会被写进 launchd plist，
+        # 错误直到 bootstrap 才以无关文案暴露。
+        raise RuntimeError("未找到 dnsmasq 可执行文件；macOS 请先执行 brew install dnsmasq")
 
     def _exec_start(self) -> list[str]:
         """dnsmasq 的启动命令。
