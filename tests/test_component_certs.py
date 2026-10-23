@@ -436,6 +436,142 @@ def test_apply_skips_nss_install_when_already_trusted(tmp_path, monkeypatch):
     )
 
 
+# -- fix round 1：偏差点 ----------------------------------------------------
+
+
+def test_apply_fails_loud_when_component_nss_dir_differs(tmp_path, monkeypatch):
+    """组件写入的库与平台复查的库不一致 → 显式报错，不许静默查另一个库。
+
+    复查是"`certutil -A` 说谎"那张安全网；查错库等于安全网失效，
+    而且会静默地"安装成功"。
+    """
+    _certutil_installed(monkeypatch)
+
+    class WithDbPath(FakePlatform):
+        def nss_db_path(self):
+            return Path("/platform/nssdb")
+
+    platform = WithDbPath()
+    comp = CertComponent(
+        platform,
+        Paths(tmp_path / "config", tmp_path / "state", tmp_path / "data"),
+        Config(storage=str(tmp_path / "data")),
+        system_dest=tmp_path / "ca" / "devproxy-local.crt",
+        nss_dir=tmp_path / "nssdb",
+    )
+    comp.paths.ensure_files()
+    _write_ca(comp.paths)
+    with pytest.raises(RuntimeError) as ei:
+        comp.apply(
+            [
+                Action(
+                    description="安装 CA 根证书到 NSS 库",
+                    kind="run",
+                    command=["install-nss-ca", str(comp.ca_path), str(tmp_path / "nssdb")],
+                    privileged=False,
+                )
+            ]
+        )
+    message = str(ei.value)
+    assert "不一致" in message
+    assert "/platform/nssdb" in message and str(tmp_path / "nssdb") in message
+    assert platform.commands == [], "报错前不该往任何一个库写东西"
+
+
+def test_apply_skips_when_platform_db_path_matches(tmp_path, monkeypatch):
+    """两边一致（同一个库）时照常走，不误报。"""
+    _certutil_installed(monkeypatch)
+
+    class WithDbPath(FakePlatform):
+        def nss_db_path(self):
+            return tmp_path / "nssdb"
+
+    platform = WithDbPath()
+    comp, paths, _ = _injected(tmp_path, platform)
+    _write_ca(paths)
+    comp.apply(comp.plan())  # 不抛异常即可
+    assert any(c[:1] == ["certutil"] and "-A" in c for c in platform.commands)
+
+
+def test_apply_repair_error_keeps_last_modify_output(tmp_path, monkeypatch):
+    """补标志失败时，错误信息必须带上**最后一次 -M** 的输出。
+
+    `-A` 返回 0 时它的输出是空的，只留它会报成 "certutil: "，
+    等于什么都没说。
+    """
+    _certutil_installed(monkeypatch)
+
+    class ModifyFails(_NssFlagPlatform):
+        def run(self, argv):
+            self.commands.append(list(argv))
+            if argv[:1] == ["certutil"] and "-M" in argv:
+                return 255, "certutil: unable to modify trust"
+            return 0, ""
+
+        def nss_trusted(self, ca):
+            return False  # 永远修不好
+
+    platform = ModifyFails()
+    platform.entries = [("Caddy Local Authority", ",,")]
+    comp, paths, _ = _injected(tmp_path, platform)
+    _write_ca(paths)
+    with pytest.raises(RuntimeError) as ei:
+        comp.apply(comp.plan())
+    message = str(ei.value)
+    assert "unable to modify trust" in message, "-M 的真实输出不能被丢掉"
+    assert "Caddy Local Authority" in message, "错误信息要报出库里的实际条目"
+
+
+def test_apply_repair_uses_platform_flag_helper(tmp_path, monkeypatch):
+    """补标志时用平台给的三列标志（保留 S/MIME / JAR），不是硬编码 C,,。"""
+    _certutil_installed(monkeypatch)
+
+    class Flags(_NssFlagPlatform):
+        def nss_trust_flags(self, flags):
+            parts = flags.split(",")
+            return ",".join(["C", *parts[1:]])
+
+    platform = Flags()
+    platform.entries = [("Caddy Local Authority", ",C,")]
+    comp, paths, _ = _injected(tmp_path, platform)
+    _write_ca(paths)
+    comp.apply(comp.plan())
+    mods = [c for c in platform.commands if c[:1] == ["certutil"] and "-M" in c]
+    assert mods and mods[0][mods[0].index("-t") + 1] == "C,C,", (
+        "只补 SSL 列，S/MIME 的信任必须保留"
+    )
+
+
+def test_apply_drops_stale_own_entry_when_trusted_elsewhere(tmp_path, monkeypatch):
+    """已信任但自有昵称下残留**旧 CA** → 定向删除那一条。"""
+    _certutil_installed(monkeypatch)
+
+    class Stale(FakePlatform):
+        def nss_stale_nickname(self, ca, nickname, nss_dir=None):
+            return nickname == certs_module.CA_NAME
+
+    platform = Stale()
+    comp, paths, _ = _injected(tmp_path, platform)
+    ca = _write_ca(paths)
+    platform.nss.add(ca)  # 平台判定已信任（异昵称）
+    comp.apply(
+        [
+            Action(
+                description="安装 CA 根证书到 NSS 库",
+                kind="run",
+                command=["install-nss-ca", str(ca), str(tmp_path / "nssdb")],
+                privileged=False,
+            )
+        ]
+    )
+    deletes = [c for c in platform.commands if c[:1] == ["certutil"] and "-D" in c]
+    assert deletes, "陈旧的自有条目必须删掉"
+    assert certs_module.CA_NAME in deletes[0]
+    assert not [c for c in platform.commands if c[:1] == ["certutil"] and "-A" in c], (
+        "已信任时不该重装"
+    )
+
+
 def test_verify_ok_after_trust(tmp_path, monkeypatch):
     _certutil_installed(monkeypatch)
     platform = FakePlatform()

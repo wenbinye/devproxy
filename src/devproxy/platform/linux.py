@@ -33,19 +33,42 @@ TRUST_BUNDLE_FILES = (
 )
 TRUST_HASH_DIR = Path("/etc/ssl/certs")
 
-# NSS 信任标志（`certutil -L` 的 Trust Attributes 列）。
-# 首字符是 **SSL 用途** 的标志：
-#   "C" / "T" = 受信任的 CA，"P" = 受信任的对端，
-#   "G" / "U" = 有效但不受信任，"," / "." / 空 = 完全没有信任。
-# 本工具装的是根 CA，标志形如 "C,,"。
-NSS_TRUSTED_FLAGS = ("C", "T", "P")
+# NSS 信任标志（`certutil -L` 的 Trust Attributes 列）—— **只认 SSL 列的 "C"**。
+#
+# 标志是三列三条目：`SSL,S/MIME,JAR/XPI`，本工具关心第一列（SSL）。
+# 第一列（以及第二列）的字母语义：
+#   "C" = 受信任的 CA，可签发 **服务端** 证书（SSL 列）/ 邮件证书（S/MIME 列）
+#   "T" = 受信任的 CA，可签发 **客户端** 证书（SSL 列；Chromium 不拿它当锚点）
+#   "P" = 受信任的对端（叶子），**不是** CA 锚点
+#   "G" / "U" = 有效但不受信任，"," / "." / 空 = 完全没有信任
+#
+# 为什么只认第一列的 "C"：本工具的 CA 是给站点证书当 issuer 的根 CA，
+# Chrome 要的正是这个锚点。实测（NSS 3.120，用 `certutil -V -u V` 验一条
+# 由该 CA 签发的叶子链）：
+#   C,, / C,C, / C,C,C → valid
+#   T,, / P,, / ,,      → "issuer has been marked as not trusted by the user"
+# 而 Chromium 的 TrustStoreNSS 只引用 CERTDB_TRUSTED_CA（即 "C"），
+# CERTDB_TRUSTED_CLIENT_CA（"T"）根本没被引用，CERTDB_TRUSTED（"P"）只算
+# "受信任叶子"。把 T / P 当已信任是**假阳性**。
+NSS_TRUSTED_FLAGS = ("C",)
+NSS_TRUSTED_COLUMN = 0
 
 # `certutil -L` 的表格行：昵称列宽 55（超长会溢出，昵称与标志之间只剩一个空格），
 # 昵称**可以含空格** —— 所以只能从行尾切标志，绝不能按"第一个空格"切昵称。
 #
+# 标志有**三列**（`SSL,S/MIME,JAR/XPI`）：`C,,`、`C,C,`、`C,C,C`、`,C,`、`,,`
+# 都是合法形态。正则必须表达"两列逗号、三列内容"：
+# `C,C,C` 用 `,{2,}` 那种写法根本匹配不上（没有连续两个逗号），
+# 而真机上 `Caddy Local Authority` 恰恰就是 `C,C,C` —— 解析不出来就会把
+# "已信任"判成"未信任"，再被 `-A -t C,,` 把另外两列静默抹掉。
+#
+# 注意 `C,C,C` 行尾**没有**补空格（`C,,` 行尾有两个空格），先 rstrip 再匹配。
+#
 # 正则只是**候选**：每个候选昵称都要再用 `certutil -L -n <昵称> -a` 实际取一次，
 # 取不到就跳过 —— 解析有偏差时宁可漏判也不能误判。
-_NSS_ROW_RE = re.compile(r"^(?P<name>.*?)[ ]+(?P<flags>[A-Za-z]*,{2,}[A-Za-z]*)$")
+_NSS_ROW_RE = re.compile(
+    r"^(?P<name>.*?)[ ]+(?P<flags>[A-Za-z]*(?:,[A-Za-z]*){2})$"
+)
 
 
 def _pem_der_blocks(text: str) -> list[bytes]:
@@ -153,8 +176,25 @@ def _nss_rows(listing: str) -> list[tuple[str, str]]:
 
 
 def _nss_flags_trusted(flags: str) -> bool:
-    """这条目的 SSL 信任标志是否表示"受信任"。"""
-    return bool(flags) and flags[0] in NSS_TRUSTED_FLAGS
+    """这条目的 **SSL 列** 是否表示"受信任的 CA"。
+
+    只看第一列：第二列（S/MIME）的 "C" 只对邮件证书生效，
+    对 HTTPS 没用；首字符是 "," 时整列无信任。
+    """
+    return bool(flags) and flags[NSS_TRUSTED_COLUMN] in NSS_TRUSTED_FLAGS
+
+
+def _nss_repair_flags(flags: str) -> str:
+    """把 SSL 列补成 "C"，**保留另外两列**原有的信任。
+
+    `certutil -M -t "C,,"` 会把 S/MIME / JAR 两列一起清掉 —— 用户库里
+    若有 `,C,` 这种"只信任邮件用途"的条目，那样补标志就是**改写**了
+    用户不打算让我们碰的信任。`C,C,` 只动该动的那一列。
+    """
+    parts = flags.split(",")
+    if len(parts) != 3:
+        return "C,,"
+    return ",".join(["C", parts[1], parts[2]])
 
 
 def _run(argv: list[str]) -> tuple[int, str]:
@@ -540,17 +580,30 @@ class LinuxPlatform:
         )
         return code == 0
 
-    def nss_entries(self, ca: Path) -> list[tuple[str, str]]:
+    def nss_db_path(self) -> Path:
+        """本平台认定的 NSS 库路径（**非协议方法**）。
+
+        组件层要拿它跟自己的 `nss_dir` 对一下：写入的库与复查的库必须是
+        同一个 —— 否则"复查"这张安全网查的是另一个库，等于失效。
+        """
+        return self.user_home / ".pki" / "nssdb"
+
+    def nss_entries(
+        self, ca: Path, nss_dir: Path | None = None
+    ) -> list[tuple[str, str]]:
         """NSS 库里与这张 CA **内容相同**的条目：[(昵称, 信任标志), ...]。
 
         按**内容**找，不按昵称找 —— NSS 按 (issuer, serial) 去重：
         同一张证书换个昵称再 `certutil -A`，会**静默无操作**（返回 0，
         但条目并不新增）。所以"这张 CA 装了没有"只能靠指纹比对。
 
+        `nss_dir` 允许显式指定库路径（默认本平台的 nss_db_path）：
+        组件注入的库与平台默认库不一致时，复查必须查**写进去的那个**。
+
         这是**非协议方法**（组件层用 getattr 探测）：macOS 没有 NSS 库，
         不实现也不影响。
         """
-        nss = self.user_home / ".pki" / "nssdb"
+        nss = Path(nss_dir) if nss_dir is not None else self.nss_db_path()
         if not (nss / "cert9.db").exists():
             return []
         try:
@@ -563,23 +616,69 @@ class LinuxPlatform:
         if code != 0:
             return []
         rows = _nss_rows(listing)
-        # 快路径：工具自己的昵称先查（它的行号排在最前）。
-        rows.sort(key=lambda row: row[0] != CA_NICKNAME)
-        entries: list[tuple[str, str]] = []
-        for nickname, flags in rows:
-            # 表格解析只是候选 —— 每个候选都要实际取一次，取不到就跳过。
-            code, pem = _run(
-                ["certutil", "-L", "-d", f"sql:{nss}", "-n", nickname, "-a"]
-            )
-            if code != 0:
-                continue
+        fetched: dict[str, str | None] = {}
+
+        def pem_of(nickname: str) -> str | None:
+            """实际取一次这个昵称下的证书；取不到返回 None。
+
+            表格解析只是候选 —— 解析有偏差时宁可漏判也不能误判。
+            """
+            if nickname not in fetched:
+                code, pem = _run(
+                    ["certutil", "-L", "-d", f"sql:{nss}", "-n", nickname, "-a"]
+                )
+                fetched[nickname] = pem if code == 0 else None
+            return fetched[nickname]
+
+        def matches(nickname: str) -> bool:
+            pem = pem_of(nickname)
+            if pem is None:
+                return False
             try:
-                stored = _pem_fingerprints(pem)
+                return bool(expected & _pem_fingerprints(pem))
             except Exception:  # noqa: BLE001 —— 单个条目读坏了不影响其余
-                continue
-            if expected & stored:
-                entries.append((nickname, flags))
-        return entries
+                return False
+
+        # 快路径：自有昵称命中且已带信任标志 → 一次额外调用就够，不必全量枚举。
+        for nickname, flags in rows:
+            if nickname == CA_NICKNAME and _nss_flags_trusted(flags) and matches(nickname):
+                return [(nickname, flags)]
+        return [
+            (nickname, flags) for nickname, flags in rows if matches(nickname)
+        ]
+
+    def nss_stale_nickname(
+        self, ca: Path, nickname: str, nss_dir: Path | None = None
+    ) -> bool:
+        """`nickname` 下有条目，且它的内容**不是**这张 CA（陈旧条目）。
+
+        用途：工具自有昵称（`devproxy Local CA`）下若残留着**旧 CA**，
+        浏览器会永久信任那个旧根 —— 若旧私钥还能拿到（备份、旧 storage），
+        就等于给 HTTPS 中间人留了门。那个昵称归工具所有，可以安全删除。
+
+        判不了（读不到、不是 PEM）一律返回 False：宁可漏删也不能误删。
+        """
+        nss = Path(nss_dir) if nss_dir is not None else self.nss_db_path()
+        if not (nss / "cert9.db").exists():
+            return False
+        code, pem = _run(["certutil", "-L", "-d", f"sql:{nss}", "-n", nickname, "-a"])
+        if code != 0:
+            return False  # 这个昵称下压根没有条目
+        try:
+            stored = _pem_fingerprints(pem)
+            expected = _pem_fingerprints(ca.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError):
+            return False
+        if not stored or not expected:
+            return False
+        return not (stored & expected)
+
+    def nss_trust_flags(self, flags: str) -> str:
+        """补 SSL 信任标志时用的完整三列标志字符串（**非协议方法**）。
+
+        平台才知道标志串的列语义；组件只负责把结果喂给 `certutil -M`。
+        """
+        return _nss_repair_flags(flags)
 
     def nss_trusted(self, ca: Path) -> bool:
         """这张 CA 是否在 NSS 库里**且带 SSL 信任标志**。只读、非特权。

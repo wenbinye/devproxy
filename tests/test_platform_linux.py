@@ -741,6 +741,140 @@ def test_linux_nss_rows_parses_nickname_with_spaces_and_long_names():
     ) in rows
 
 
+# -- fix round 1：只认 SSL 列的 "C" + 三列标志 -------------------------------
+
+
+@pytest.mark.parametrize(
+    "flags, expected",
+    [
+        ("C,,", True),
+        ("C,C,", True),
+        ("C,C,C", True),
+        ("T,,", False),
+        ("P,,", False),
+        (",C,", False),
+        (",,", False),
+        ("", False),
+    ],
+)
+def test_linux_nss_flags_trusted_only_accepts_ssl_column_c(flags, expected):
+    """只有 SSL 列的 "C" 是 HTTPS 的 CA 锚点。
+
+    "T" 是签发**客户端**证书的 CA、"P" 是受信任的**对端**（叶子），
+    两者都不是根 CA 锚点；",C," 的 SSL 列是空的。把 T / P 算成已信任
+    是假阳性 —— Chrome 根本不会拿它们当锚点。
+    """
+    assert linux_mod._nss_flags_trusted(flags) is expected
+
+
+@pytest.mark.parametrize("flags", ["C,,", "C,C,", "C,C,C", ",C,", ",,"])
+def test_linux_nss_rows_parses_every_three_column_form(flags):
+    """标志是**三列**：`C,,` / `C,C,` / `C,C,C` / `,C,` / `,,` 都要能解析。
+
+    旧正则要求"至少两个连续逗号"，`C,C,C` 直接解析不出来 ——
+    而真机上 `Caddy Local Authority` 就是这个形态。
+    （`certutil -t ",,,"` 会被归一成 `,,` 入库，列表里不存在四列的形态。）
+    """
+    rows = linux_mod._nss_rows(_nss_listing(("Caddy Local Authority", flags)))
+    assert rows == [("Caddy Local Authority", flags)]
+
+
+def test_linux_nss_rows_parses_row_without_trailing_padding():
+    """`C,C,C` 行尾没有补空格（`C,,` 有两个）—— 必须先 rstrip 再匹配。"""
+    listing = "Caddy Local Authority                                        C,C,C"
+    assert linux_mod._nss_rows(listing) == [("Caddy Local Authority", "C,C,C")]
+
+
+def test_linux_nss_rows_ignores_header_lines():
+    """两行表头不能被当成条目（它们没有三列逗号形态）。"""
+    listing = (
+        "\n"
+        "Certificate Nickname                                         Trust Attributes\n"
+        "                                                             SSL,S/MIME,JAR/XPI\n"
+        "\n"
+        "devproxy Local CA                                            C,,\n"
+    )
+    assert linux_mod._nss_rows(listing) == [("devproxy Local CA", "C,,")]
+
+
+def test_linux_nss_trust_flags_repairs_only_ssl_column():
+    """补标志时保留另外两列：`,C,` → `C,C,`，不是 `C,,`。"""
+    assert linux_mod._nss_repair_flags("C,,") == "C,,"
+    assert linux_mod._nss_repair_flags(",,", ) == "C,,"
+    assert linux_mod._nss_repair_flags(",C,") == "C,C,"
+    assert linux_mod._nss_repair_flags(",C,C") == "C,C,C"
+    # 形态不认识时退回标准的三列形态
+    assert linux_mod._nss_repair_flags("") == "C,,"
+    assert linux_mod._nss_repair_flags("C") == "C,,"
+
+
+def test_linux_nss_db_path_points_at_user_home(tmp_path):
+    """平台要能报出自己认定的库路径（组件靠它跟写入路径对齐）。"""
+    p = LinuxPlatform(user_home=tmp_path)
+    assert p.nss_db_path() == tmp_path / ".pki" / "nssdb"
+
+
+def test_linux_nss_entries_accepts_explicit_nss_dir(tmp_path, monkeypatch):
+    """显式给库路径时查的就是那个库（复查必须查写进去的那个）。"""
+    home = tmp_path / "home"
+    other = tmp_path / "other"
+    (other / "").mkdir(parents=True, exist_ok=True)
+    (other / "cert9.db").write_text("", encoding="utf-8")
+    ca = tmp_path / "root.crt"
+    ca.write_text(PEM_OLD, encoding="utf-8")
+    p = LinuxPlatform(user_home=home)
+
+    seen = []
+
+    def fake_run(argv):
+        seen.append(list(argv))
+        if "-a" in argv:
+            return 0, PEM_OLD
+        return 0, _nss_listing(("devproxy Local CA", "C,,"))
+
+    monkeypatch.setattr(linux_mod, "_run", fake_run)
+    assert p.nss_entries(ca, nss_dir=other) == [("devproxy Local CA", "C,,")]
+    assert all(f"sql:{other}" in c for c in seen if "-d" in c), (
+        "所有 certutil 调用都必须指向显式给的库"
+    )
+
+
+def test_linux_nss_stale_nickname_true_for_other_cert(tmp_path, monkeypatch):
+    """自有昵称下是**别的**证书 → 陈旧，该删。"""
+    p = _nss_platform(tmp_path)
+    ca = tmp_path / "root.crt"
+    ca.write_text(PEM_NEW, encoding="utf-8")
+    monkeypatch.setattr(linux_mod, "_run", lambda argv: (0, PEM_OLD))
+    assert p.nss_stale_nickname(ca, "devproxy Local CA") is True
+
+
+def test_linux_nss_stale_nickname_false_for_same_cert(tmp_path, monkeypatch):
+    """自有昵称下就是当前证书 → 不陈旧，不能删。"""
+    p = _nss_platform(tmp_path)
+    ca = tmp_path / "root.crt"
+    ca.write_text(PEM_OLD, encoding="utf-8")
+    monkeypatch.setattr(linux_mod, "_run", lambda argv: (0, PEM_OLD))
+    assert p.nss_stale_nickname(ca, "devproxy Local CA") is False
+
+
+def test_linux_nss_stale_nickname_false_when_absent(tmp_path, monkeypatch):
+    """昵称下没有条目 → 不是陈旧（没有可删的东西）。"""
+    p = _nss_platform(tmp_path)
+    ca = tmp_path / "root.crt"
+    ca.write_text(PEM_OLD, encoding="utf-8")
+    monkeypatch.setattr(linux_mod, "_run", lambda argv: (255, "could not find cert"))
+    assert p.nss_stale_nickname(ca, "devproxy Local CA") is False
+
+
+def test_linux_nss_stale_nickname_false_when_unparsable(tmp_path, monkeypatch):
+    """取回来的不是 PEM（判不了）→ 宁可漏删也不能误删。"""
+    p = _nss_platform(tmp_path)
+    ca = tmp_path / "root.crt"
+    ca.write_text(PEM_OLD, encoding="utf-8")
+    monkeypatch.setattr(linux_mod, "_run", lambda argv: (0, "not a pem"))
+    assert p.nss_stale_nickname(ca, "devproxy Local CA") is False
+
+
 def test_fake_platform_nss_trusted_tracks_its_own_set(tmp_path):
     p = FakePlatform()
     ca = tmp_path / "root.crt"

@@ -53,10 +53,11 @@ def _new_db(path: Path) -> Path:
     return path
 
 
-def _make_ca(tmp_path: Path) -> Path:
+def _make_ca(tmp_path: Path, cn: str = "devproxy fixwave test CA") -> Path:
     """造一张自签 CA（内容可比对，不用假 PEM）。"""
     _need_openssl()
-    ca = tmp_path / "root.crt"
+    stem = cn.replace(" ", "-")
+    ca = tmp_path / f"{stem}.crt"
     subprocess.run(
         [
             "openssl",
@@ -67,14 +68,14 @@ def _make_ca(tmp_path: Path) -> Path:
             "-pkeyopt",
             "ec_paramgen_curve:prime256v1",
             "-keyout",
-            str(tmp_path / "key.pem"),
+            str(tmp_path / f"{stem}.key"),
             "-out",
             str(ca),
             "-days",
             "3650",
             "-nodes",
             "-subj",
-            "/CN=devproxy fixwave test CA",
+            f"/CN={cn}",
         ],
         capture_output=True,
         text=True,
@@ -295,3 +296,208 @@ def test_apply_installs_into_empty_database(tmp_path):
     comp.apply([_install_action(comp.ca_path, db)])
     assert _rows(db) == [("devproxy Local CA", "C,,")]
     assert comp.check().ok is True
+
+
+# -- fix round 1：只认 SSL 列的 "C"，以及三列标志 ------------------------------
+
+
+def _trusted(ca: Path, home: Path, db: Path) -> tuple[bool, list]:
+    platform = LinuxPlatform(user_home=home)
+    return platform.nss_trusted(ca), platform.nss_entries(ca)
+
+
+def test_nss_trusted_false_for_trusted_peer_flag(tmp_path):
+    """`P,,` 是"受信任的对端"，**不是 CA 锚点** —— 不能算已信任。
+
+    评测实测（真 NSS）：把 CA 以 `P,,` 入库后，用它签发的叶子在
+    `certutil -V -u V` 下报 "issuer has been marked as not trusted"。
+    """
+    ca = _make_ca(tmp_path)
+    home = tmp_path / "home"
+    db = _new_db(home / ".pki" / "nssdb")
+    _certutil(db, "-A", "-n", "Caddy Local Authority", "-t", "P,,", "-i", str(ca))
+
+    trusted, entries = _trusted(ca, home, db)
+    assert trusted is False
+    assert entries == [("Caddy Local Authority", "P,,")]
+
+
+def test_nss_trusted_false_for_client_ca_flag(tmp_path):
+    """`T,,` 是"可签发客户端证书的 CA"，**不是**服务端锚点 —— 不算已信任。"""
+    ca = _make_ca(tmp_path)
+    home = tmp_path / "home"
+    db = _new_db(home / ".pki" / "nssdb")
+    _certutil(db, "-A", "-n", "Caddy Local Authority", "-t", "T,,", "-i", str(ca))
+
+    trusted, entries = _trusted(ca, home, db)
+    assert trusted is False
+    assert entries == [("Caddy Local Authority", "T,,")]
+
+
+def test_nss_trusted_false_when_only_smime_column_trusted(tmp_path):
+    """`,C,` 只信任 S/MIME 用途 —— SSL 列是空的，HTTPS 不认。"""
+    ca = _make_ca(tmp_path)
+    home = tmp_path / "home"
+    db = _new_db(home / ".pki" / "nssdb")
+    _certutil(db, "-A", "-n", "Caddy Local Authority", "-t", ",C,", "-i", str(ca))
+
+    platform = LinuxPlatform(user_home=home)
+    # 先确认 certutil 真的把 ",C," 存进去了（不是被 NSS 改写）
+    assert _rows(db) == [("Caddy Local Authority", ",C,")]
+    assert platform.nss_trusted(ca) is False
+    assert platform.nss_entries(ca) == [("Caddy Local Authority", ",C,")]
+
+
+def test_nss_trusted_true_for_three_column_flags(tmp_path):
+    """`C,C,C`（三列全信任）必须判为已信任。
+
+    真机上 `Caddy Local Authority` 就是这个形态。旧的"至少两个连续逗号"
+    正则解析不了它 → 判成未信任 → 计划里多一步安装 → `-A -t C,,`
+    把这行改写成 `C,,`，另外两列的信任被静默抹掉。
+    """
+    ca = _make_ca(tmp_path)
+    home = tmp_path / "home"
+    db = _new_db(home / ".pki" / "nssdb")
+    _certutil(db, "-A", "-n", "Caddy Local Authority", "-t", "C,C,C", "-i", str(ca))
+    assert _rows(db) == [("Caddy Local Authority", "C,C,C")]
+
+    trusted, entries = _trusted(ca, home, db)
+    assert trusted is True
+    assert entries == [("Caddy Local Authority", "C,C,C")]
+
+
+def test_plan_is_empty_for_three_column_flags(tmp_path):
+    """`C,C,C` 已信任 → plan() 必须为空（B-5）。"""
+    ca = _make_ca(tmp_path)
+    home = tmp_path / "home"
+    db = _new_db(home / ".pki" / "nssdb")
+    _certutil(db, "-A", "-n", "Caddy Local Authority", "-t", "C,C,C", "-i", str(ca))
+
+    comp, _platform, _paths, _cfg = _component(tmp_path, home, db)
+    comp.ca_path.parent.mkdir(parents=True, exist_ok=True)
+    comp.ca_path.write_text(ca.read_text(encoding="utf-8"), encoding="utf-8")
+
+    assert comp.check().ok is True
+    assert comp.plan() == []
+
+
+def test_apply_keeps_three_column_flags(tmp_path):
+    """apply 之后条目必须仍是 `C,C,C` —— 不许被 `-A -t C,,` 抹成 `C,,`。"""
+    ca = _make_ca(tmp_path)
+    home = tmp_path / "home"
+    db = _new_db(home / ".pki" / "nssdb")
+    _certutil(db, "-A", "-n", "Caddy Local Authority", "-t", "C,C,C", "-i", str(ca))
+
+    comp, _platform, _paths, _cfg = _component(tmp_path, home, db)
+    comp.ca_path.parent.mkdir(parents=True, exist_ok=True)
+    comp.ca_path.write_text(ca.read_text(encoding="utf-8"), encoding="utf-8")
+
+    comp.apply([_install_action(comp.ca_path, db)])
+
+    assert _rows(db) == [("Caddy Local Authority", "C,C,C")], (
+        "用户条目的另外两列信任不能被抹掉"
+    )
+
+
+def test_apply_repairs_only_ssl_column(tmp_path):
+    """修 `,C,` 时只补 SSL 列 → `C,C,`，S/MIME 的信任必须保留。"""
+    ca = _make_ca(tmp_path)
+    home = tmp_path / "home"
+    db = _new_db(home / ".pki" / "nssdb")
+    _certutil(db, "-A", "-n", "Caddy Local Authority", "-t", ",C,", "-i", str(ca))
+
+    comp, _platform, _paths, _cfg = _component(tmp_path, home, db)
+    comp.ca_path.parent.mkdir(parents=True, exist_ok=True)
+    comp.ca_path.write_text(ca.read_text(encoding="utf-8"), encoding="utf-8")
+
+    assert comp.check().ok is False
+    comp.apply([_install_action(comp.ca_path, db)])
+    assert comp.check().ok is True
+    assert _rows(db) == [("Caddy Local Authority", "C,C,")], (
+        "补 SSL 列不能顺手把 S/MIME 的信任清掉"
+    )
+
+
+# -- fix round 1：自有昵称下的陈旧条目 --------------------------------------
+
+
+def test_apply_removes_stale_entry_under_own_nickname(tmp_path):
+    """自有昵称下残留旧 CA、当前 CA 在异昵称被信任 → 删掉旧根。
+
+    浏览器会永久信任那个旧根；旧私钥若可恢复就是 HTTPS 中间人后门。
+    """
+    old_ca = _make_ca(tmp_path, "old devproxy CA")
+    ca = _make_ca(tmp_path, "current devproxy CA")
+    home = tmp_path / "home"
+    db = _new_db(home / ".pki" / "nssdb")
+    _certutil(db, "-A", "-n", "devproxy Local CA", "-t", "C,,", "-i", str(old_ca))
+    _certutil(db, "-A", "-n", "Caddy Local Authority", "-t", "C,,", "-i", str(ca))
+
+    comp, _platform, _paths, _cfg = _component(tmp_path, home, db)
+    comp.ca_path.parent.mkdir(parents=True, exist_ok=True)
+    comp.ca_path.write_text(ca.read_text(encoding="utf-8"), encoding="utf-8")
+
+    assert comp.check().ok is True
+    assert comp.plan() == []
+
+    comp.apply([_install_action(comp.ca_path, db)])
+
+    assert _rows(db) == [("Caddy Local Authority", "C,,",)], (
+        "自有昵称下的陈旧 CA 必须删掉，用户那条不能动"
+    )
+
+
+def test_apply_removes_stale_entry_while_repairing_flags(tmp_path):
+    """补信任标志那条路径也要清陈旧条目 —— 修好之后没人会回头看那个旧根。"""
+    old_ca = _make_ca(tmp_path, "old devproxy CA")
+    ca = _make_ca(tmp_path, "current devproxy CA")
+    home = tmp_path / "home"
+    db = _new_db(home / ".pki" / "nssdb")
+    _certutil(db, "-A", "-n", "devproxy Local CA", "-t", "C,,", "-i", str(old_ca))
+    _certutil(db, "-A", "-n", "Caddy Local Authority", "-t", ",,", "-i", str(ca))
+
+    comp, _platform, _paths, _cfg = _component(tmp_path, home, db)
+    comp.ca_path.parent.mkdir(parents=True, exist_ok=True)
+    comp.ca_path.write_text(ca.read_text(encoding="utf-8"), encoding="utf-8")
+
+    comp.apply([_install_action(comp.ca_path, db)])
+
+    assert _rows(db) == [("Caddy Local Authority", "C,,")]
+
+
+def test_apply_keeps_own_entry_when_it_is_the_current_ca(tmp_path):
+    """自有昵称下就是**当前** CA（已信任）→ 什么都不删。"""
+    ca = _make_ca(tmp_path)
+    home = tmp_path / "home"
+    db = _new_db(home / ".pki" / "nssdb")
+    _certutil(db, "-A", "-n", "devproxy Local CA", "-t", "C,,", "-i", str(ca))
+
+    comp, _platform, _paths, _cfg = _component(tmp_path, home, db)
+    comp.ca_path.parent.mkdir(parents=True, exist_ok=True)
+    comp.ca_path.write_text(ca.read_text(encoding="utf-8"), encoding="utf-8")
+
+    comp.apply([_install_action(comp.ca_path, db)])
+    assert _rows(db) == [("devproxy Local CA", "C,,")]
+
+
+# -- fix round 1：复查的库必须与写库一致 ------------------------------------
+
+
+def test_apply_fails_loud_when_platform_db_differs(tmp_path):
+    """组件写入的库与平台复查的库不一致 → 显式报错，绝不静默查另一个库。"""
+    ca = _make_ca(tmp_path)
+    home = tmp_path / "home"
+    platform_db = _new_db(home / ".pki" / "nssdb")
+    other_db = _new_db(tmp_path / "injected" / "nssdb")
+
+    comp, _platform, _paths, _cfg = _component(tmp_path, home, platform_db)
+    comp.nss_dir = other_db  # 故意让两边不一致
+    comp.ca_path.parent.mkdir(parents=True, exist_ok=True)
+    comp.ca_path.write_text(ca.read_text(encoding="utf-8"), encoding="utf-8")
+
+    with pytest.raises(RuntimeError) as ei:
+        comp.apply([_install_action(comp.ca_path, other_db)])
+    message = str(ei.value)
+    assert "不一致" in message
+    assert str(other_db) in message and str(platform_db) in message
+    assert _rows(other_db) == [], "报错前不得往任何一个库写东西"

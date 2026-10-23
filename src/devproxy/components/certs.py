@@ -72,7 +72,9 @@ class CertComponent:
             return False
         return self._trusted(checker, ca or self.ca_path)
 
-    def _nss_entries(self, ca: Path | None = None) -> list[tuple[str, str]]:
+    def _nss_entries(
+        self, ca: Path | None = None, nss_dir: Path | None = None
+    ) -> list[tuple[str, str]]:
         """库里与这张 CA 内容匹配的条目：[(昵称, 信任标志), ...]。
 
         `nss_entries` 是**非协议方法**（macOS 没有 NSS 库）——
@@ -81,8 +83,17 @@ class CertComponent:
         getter = getattr(self.platform, "nss_entries", None)
         if getter is None:
             return []
+        target = ca or self.ca_path
         try:
-            raw = getter(ca or self.ca_path)
+            if nss_dir is None:
+                raw = getter(target)
+            else:
+                try:
+                    raw = getter(target, nss_dir=nss_dir)
+                except TypeError:
+                    # 平台的 nss_entries 不接受 nss_dir（旧实现 / 别的平台）：
+                    # 退回它自己的库 —— 一致性已在上游用 nss_db_path 把过关。
+                    raw = getter(target)
         except Exception:  # noqa: BLE001 —— 取不到就当没有
             return []
         entries: list[tuple[str, str]] = []
@@ -93,6 +104,44 @@ class CertComponent:
                 continue
             entries.append((str(nickname), str(flags)))
         return entries
+
+    def _nss_db_path(self) -> Path | None:
+        """平台认定的 NSS 库路径（非协议方法）；没有这个方法返回 None。"""
+        getter = getattr(self.platform, "nss_db_path", None)
+        if getter is None:
+            return None
+        try:
+            return Path(getter()).expanduser()
+        except Exception:  # noqa: BLE001 —— 探测失败就当平台不提供
+            return None
+
+    def _nss_stale(self, ca: Path, nss_dir: Path) -> bool:
+        """工具自有昵称下是否残留着**别的** CA（陈旧条目）。
+
+        取不到这个能力就返回 False —— 宁可漏删也不能误删。
+        """
+        checker = getattr(self.platform, "nss_stale_nickname", None)
+        if checker is None:
+            return False
+        try:
+            return bool(checker(ca, CA_NAME, nss_dir=nss_dir))
+        except TypeError:
+            try:
+                return bool(checker(ca, CA_NAME))
+            except Exception:  # noqa: BLE001
+                return False
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _nss_flags_for_repair(self, flags: str) -> str:
+        """补 SSL 信任标志用的完整标志串（保留 S/MIME 与 JAR 两列）。"""
+        helper = getattr(self.platform, "nss_trust_flags", None)
+        if helper is None:
+            return "C,,"
+        try:
+            return str(helper(flags))
+        except Exception:  # noqa: BLE001
+            return "C,,"
 
     def fully_trusted(self) -> bool:
         """CA 是否已被系统信任库与 NSS 库**同时**信任。
@@ -249,9 +298,12 @@ class CertComponent:
                 raise RuntimeError(
                     "缺少 certutil（Chrome 信任需 NSS 库）：sudo apt install libnss3-tools"
                 )
-            # 库里已经有这张 CA 且带 SSL 信任标志 → 什么都不做。
-            # 尤其不能去动用户自己那条（比如老 devp 装的 "Caddy Local Authority"）。
+            self._require_same_nss_db(nss)
+            # 平台判定已信任 → 一个字节都不改，只做一次**定向**清理：
+            # 自有昵称下若残留旧 CA，那个根会被浏览器永久信任，旧私钥若
+            # 可恢复就是 HTTPS 中间人后门。那个昵称归工具所有，可以安全删。
             if self._nss_trusted(src):
+                self._drop_stale_own_entry(src, nss)
                 return
             nss.mkdir(parents=True, exist_ok=True)
             # 库还不存在时先建一个空库，否则 certutil -A 会失败
@@ -261,8 +313,27 @@ class CertComponent:
                 )
                 if code != 0:
                     raise RuntimeError(f"创建 NSS 库失败: {msg}")
-            # 先删同名再装，保证幂等（删不存在的条目会失败，忽略即可）
-            self.platform.run(["certutil", "-d", f"sql:{nss}", "-D", "-n", CA_NAME])
+
+            # 库里与这张 CA 内容相同的条目（可能挂在我们不认识的昵称下）。
+            # 判据是**内容**：NSS 按 (issuer, serial) 去重，换个昵称再装
+            # 是装不进去的。
+            entries = self._nss_entries(src, nss_dir=nss)
+            if any(self._flags_trusted(flags) for _n, flags in entries):
+                # 按内容查到的条目已经带 SSL 信任 → 同样什么都不改
+                # （平台没有 nss_trusted 的内容判定时，靠这一步兜住）。
+                self._drop_stale_own_entry(src, nss)
+                return
+            if entries:
+                # 证书已在库里但没有 SSL 信任 → 只补标志，**不要 -A**：
+                # 对已存在的证书，-A -t "C,," 会把这行改写成 "C,,"，
+                # 把 S/MIME / JAR 两列原有的信任静默抹掉。
+                # 顺手清掉自有昵称下的陈旧条目：补完标志这条 CA 就算信任了，
+                # 再没人会回头看那个旧根。
+                self._drop_stale_own_entry(src, nss)
+                self._repair_flags(src, nss, entries)
+                return
+            # 库里没有这张 CA：先清掉自有昵称下的陈旧条目，再安装。
+            self._drop_stale_own_entry(src, nss, unconditional=True)
             code, msg = self.platform.run(
                 [
                     "certutil",
@@ -279,23 +350,85 @@ class CertComponent:
             )
             if code != 0:
                 raise RuntimeError(f"安装 NSS 证书失败: {msg}")
-            # 复查：**-A 返回 0 不代表真的装上了**。
-            # NSS 按 (issuer, serial) 去重 —— 同一张证书换个昵称入库时，
-            # certutil -A 会静默无操作（返回 0，条目并不新增）。
+            # 复查：**-A 返回 0 不代表真的装上了**（对已存在的证书它是静默的）。
             if self._nss_trusted(src):
                 return
-            # 库里有这张 CA，但缺 SSL 信任标志 → 给那条补上标志，再复查
-            for nickname, _flags in self._nss_entries(src):
-                self.platform.run(
-                    ["certutil", "-M", "-d", f"sql:{nss}", "-n", nickname, "-t", "C,,"]
-                )
-            if self._nss_trusted(src):
-                return
-            raise RuntimeError(
-                "安装 NSS 证书失败：NSS 库里找不到这张 CA 的 SSL 信任标志"
-                f"（certutil: {msg}）"
+            # 还是不行 → 库里有这张 CA 但缺 SSL 信任标志，补标志后再复查
+            self._repair_flags(
+                src, nss, self._nss_entries(src, nss_dir=nss), initial_output=msg
             )
+            return
         raise RuntimeError(f"未知动作: {action.command}")
+
+    # -- NSS 安装的辅助 -------------------------------------------------
+
+    def _require_same_nss_db(self, nss: Path) -> None:
+        """写入的库与平台复查的库必须是同一个。
+
+        复查正是用来兜住 `certutil -A` 说谎的安全网；查错库 = 安全网失效
+        （而且会静默地"安装成功"）。两者不一致时**显式报错**，绝不静默。
+        """
+        platform_db = self._nss_db_path()
+        if platform_db is None:
+            return  # 平台不提供这个能力（macOS / 旧实现）：无从校验
+        if platform_db.resolve() != nss.resolve():
+            raise RuntimeError(
+                f"NSS 库路径不一致：组件写入 {nss}，平台复查 {platform_db}"
+                "（复查会查错库，拒绝继续）"
+            )
+
+    @staticmethod
+    def _flags_trusted(flags: str) -> bool:
+        """标志串的 SSL 列是否受信任（"C" 开头）。"""
+        return bool(flags) and flags[0] == "C"
+
+    def _drop_stale_own_entry(
+        self, ca: Path, nss: Path, *, unconditional: bool = False
+    ) -> None:
+        """删掉工具自有昵称下的**陈旧** CA 条目。
+
+        `unconditional=True` 用在"库里没有当前 CA"的安装路径上：
+        这时自有昵称下即便有条目也只可能是**别的** CA。
+        删除失败（条目不存在）忽略 —— 幂等。
+        """
+        if not unconditional and not self._nss_stale(ca, nss):
+            return
+        self.platform.run(["certutil", "-d", f"sql:{nss}", "-D", "-n", CA_NAME])
+
+    def _repair_flags(
+        self,
+        ca: Path,
+        nss: Path,
+        entries: list[tuple[str, str]],
+        initial_output: str = "",
+    ) -> None:
+        """给库里那些条目补 SSL 信任标志（保留 S/MIME / JAR 两列）。"""
+        last_output = initial_output
+        for nickname, flags in entries:
+            code, msg = self.platform.run(
+                [
+                    "certutil",
+                    "-M",
+                    "-d",
+                    f"sql:{nss}",
+                    "-n",
+                    nickname,
+                    "-t",
+                    self._nss_flags_for_repair(flags),
+                ]
+            )
+            last_output = msg
+            if code != 0:
+                last_output = f"({code}) {msg}"
+            if self._nss_trusted(ca):
+                return
+        # 复查仍否 —— 错误信息要带上**最后一次 -M** 的输出与库里的实际条目，
+        # 只留 -A 的输出在成功返回 0 时是空的，等于什么都没说。
+        detail = last_output or "certutil 无输出"
+        raise RuntimeError(
+            "安装 NSS 证书失败：NSS 库里找不到这张 CA 的 SSL 信任标志"
+            f"（库中条目: {entries or '无'}；certutil: {detail}）"
+        )
 
     # -- verify --------------------------------------------------------
 
