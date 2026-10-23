@@ -60,6 +60,8 @@
 非交互环境（CI、脚本）里跑 `setup` / `trust`，如果需要提权，必须显式加 `--yes`，
 否则工具会以退出码 4 拒绝执行（不会默默跳过，也不会默默提权）。
 
+**想撤回？** 见下面的[「卸载」](#卸载)：`devproxy uninstall --dry-run` 可以先看它会做什么。
+
 ---
 
 ## 安装
@@ -138,6 +140,7 @@ Caddy 的内部 CA **在第一次加载 `tls internal` 站点时**才生成 —�
 | `devproxy trust` | 单独安装 CA 根证书（系统信任库 + NSS 库 / 系统钥匙串） |
 | `devproxy config` | 显示当前生效配置与渲染出的路由片段 |
 | `devproxy selftest` | 隔离 Caddy 实例端到端自检 |
+| `devproxy uninstall` | 卸载：停服务、移除单元、DNS 路由与（可选）CA。默认保守保留你的配置、个人站点、Caddy 存储与备份 |
 
 常用选项：
 
@@ -148,6 +151,9 @@ Caddy 的内部 CA **在第一次加载 `tls internal` 站点时**才生成 —�
 | `--no-trust` | `setup` | 跳过证书信任 |
 | `--yes` | `setup` / `trust` | 非交互模式，不询问（需要提权的场景必须加） |
 | `--rollback <目录>` | `setup` | 从指定备份目录回滚 |
+| `--dry-run` | `uninstall` | 只打印将要执行的步骤，不做任何变更、不需要 sudo |
+| `--purge` | `uninstall` | 额外删除 Caddy 存储、备份目录与下载的 caddy 二进制 |
+| `--remove-ca` | `uninstall` | 强制卸载 CA（包括本工具接管前就存在的 CA） |
 | `--port N` | `up` | 显式指定端口（默认自动分配）；被占用时直接失败 |
 | `--port N` | `expose` | **必填**：上游已在监听的端口 |
 | `--ready-timeout S` | `up` | 就绪等待秒数（默认取 `config.toml` 的 `ready_timeout`） |
@@ -437,6 +443,52 @@ devproxy setup --rollback ~/.local/state/devproxy/backups/2026-10-22T12-00-00Z
 
 非交互环境里做迁移必须加 `--yes`，否则以退出码 4 拒绝（迁移会改写你的单元与配置，
 不能不问一声就动手）。
+
+---
+
+## 卸载
+
+```bash
+devproxy uninstall --dry-run   # 先看它会做什么，不做任何变更、不需要 sudo
+devproxy uninstall             # 交互确认后执行
+devproxy uninstall --yes       # 非交互（CI / 脚本）必须加，否则退 4
+```
+
+**默认会做**（按这个顺序）：
+
+1. 收掉由本工具启动、还挂着的子进程（按 `routes.json` 里的 pid + 启动时刻校验，不会误杀）
+2. 停止并移除 `caddy`、`dnsmasq` 两个服务单元
+3. 删除工具写入的 DNS 路由文件，并让解析器重新加载
+4. 卸载 CA —— 但受下面两条规则约束
+5. 删除工具生成的状态文件（`Caddyfile`、`routes.*`、`dns-route.json`、`caddy-storage.json`、`caddy-env.json`、`logs/`）
+
+**默认保留**（不删）：
+
+| 保留 | 原因 |
+|---|---|
+| `sites.caddy` | 你的个人站点 |
+| `config.toml` | 你的配置 |
+| `~/.local/share/caddy` | CA 与全部证书 —— 你自己另起的 caddy 可能也在用 |
+| `~/.local/bin/caddy` | 可能是你自己装的 |
+| `~/.config/dnsmasq/dnsmasq.conf` | 是**增量合并**的，原本就有。有改动前的备份就从最新备份还原，没有就原样保留并提示 |
+| `backups/` | 回滚的唯一依据 |
+| `loginctl enable-linger` | 整机级设置，你别的 user 服务可能依赖它 |
+
+**CA 的两条规则**：
+
+- **按指纹精确匹配**来删，不按昵称 —— 同一台机器上同名不同内容的根证书不会被误删；
+- **迁移来的 CA 默认不卸载**：如果存在 `caddy-storage.json` 留档，说明这个 CA 在本工具接管**之前**就存在、
+  你的站点在用。此时跳过并提示；确实要卸就显式加 `--remove-ca`。
+
+**`--purge` 才会额外删除**：`~/.local/share/caddy`、`backups/`、`config.caddy_bin_path`。
+注意最后一项默认是 `~/.local/bin/caddy` —— 如果你自己装过 caddy，`--purge` 会把它一起删掉。
+
+**迁移过的机器**：卸载不会自动还原遗留环境。原始 `caddy.service` 与 `Caddyfile` 在
+`backups/<时间戳>/` 里，工具会在结尾把路径打出来；要回到迁移前的状态用
+`devproxy setup --rollback <目录>`。备份默认保留，所以「先卸载、再回滚」也能恢复；
+但 `--purge` 会把备份一起删掉，之后就来不及了。
+
+`uninstall` 是幂等的：已经卸干净之后再跑一次会说「没有可卸载的东西」并成功退出。
 
 ---
 
