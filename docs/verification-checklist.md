@@ -292,6 +292,55 @@
 
 ---
 
+## E. macOS 真机实测结果（2026-10-23）
+
+机器：`my-mac`（WenbindeMBP，macOS 26.1 / 25B78，Intel x86_64）。
+安装方式：`python3 -m venv` + `pip install -e`（那台机器没有 uv），全部落在 `~/devproxy-test/`。
+
+### E1. 已验证
+
+| 项 | 结果 |
+|---|---|
+| 全量测试套件 | **662 passed**（修完下面三处之后；修复前 656 passed / 2 failed） |
+| `devproxy config` | ✅ 路径与配置渲染正常 |
+| `devproxy doctor` | ✅ 表格渲染、退出码语义正常 |
+| `devproxy selftest` | ✅ **11/11 全过** —— 真实 Caddy 2.11.7 在 macOS 上：隔离实例启动、trust store 安装被禁用（caddy 日志佐证）、注册→reload→命中上游、未注册域名拿不到证书、http→https 跳转、注销→不再有路由 |
+| Caddy 下载（mac/amd64） | ✅ 平台键 `('mac','amd64')`，53 MB，**sha256 校验通过** |
+| brew 的 dnsmasq 位置 | ✅ 找到 `/usr/local/sbin/dnsmasq`（→ Cellar 2.91） |
+| 提权失败路径 | ✅ 密码模式 + 无 TTY 时抛 `PermissionError`，信息同时含 `sudo -v` 与 `sudo -n true` 两条输出 |
+| 非交互 + 有特权动作 | ✅ 退出码 **4**，且**不执行任何变更** |
+| 提权清单准确性 | ✅ 修复后正确列出 2 项（caddy LaunchDaemon + `/etc/resolver`） |
+
+### E2. 本轮在 macOS 上发现并修掉的三处缺陷
+
+1. **测试辅助 `_process_running` 在 macOS 上恒返回 False**（`tests/test_runner.py`）
+   —— `FileNotFoundError` 是 `OSError` 子类，被单列的 `except` 抢先吞掉，`os.kill` 回退永远走不到。
+   后果不只是 2 条用例变红：`wait_until(lambda: not _process_running(...))` 会立刻成立，
+   **变成永远为真的空断言**，清理逻辑回归时也发现不了。
+   修法：macOS 改用 `ps -o stat=`（僵尸进程 `kill(pid,0)` 仍返回成功）。
+
+2. **caddy 的 install-service 动作在 macOS 上没标 `privileged`**（`components/caddy.py`）
+   —— macOS 的 caddy 是 `/Library/LaunchDaemons` 下的 root 守护进程，Linux 的是用户 unit。
+   漏标导致 sudo 清单少报一项（真机实测报 1 项、实际 2 项），且只剩这一步时会
+   **绕过非交互护栏**、中途弹密码框。已加一对互为镜像的断言（mac 必须 True / linux 必须 False）。
+
+3. **`DnsComponent.check()` 只看文件存在性，与 `plan()` 的内容判据不一致**（`components/dns.py`）
+   —— 该机 `/etc/resolver/test` 是 **2022 年别的工具留下的** `nameserver 127.0.0.1`，
+   **没有 `port 5300`**，查询会被送到 `:53`（mDNSResponder）而不是工具的 dnsmasq。
+   `doctor` 却报 `dns ✔ 就绪`。改为内容优先、读不到才退回平台存在性判据。
+   与 Linux 侧此前记录的 V2 属同一类："只认存在性 / 只认自己的产物"。
+
+### E3. 仍未验证（需要 root，须由机器主人交互执行）
+
+以下都发生在 `devproxy setup` 的提权阶段，SSH 非交互无法完成（那台机器 sudo 需要密码）：
+
+- A1/A2/A3/A4：LaunchDaemon plist 的落地与 `launchctl` 的真实行为
+- A5：`/etc/resolver/<后缀>` 的实际写入与 `port` 指令是否被 mDNSResponder 采纳
+- A6/A7：CA 进系统钥匙串与 `security verify-cert` 的真实结果
+- A8：root 的 LaunchDaemon 能否绑 80/443 —— **该机 :80 被 nginx 占用**，需先停 nginx 或改 `http_port`
+- A9/A10/A13：`dscacheutil` / curl / `tail -f` 的真实行为
+- A15/A16/A18/A21：plist 权限、提权会话缓存、devproxy 能否读回自己装的 plist、root 属主文件
+
 ## 附：不在本清单内的自动化覆盖
 
 以下内容已有自动化测试覆盖，**不需要**在真机上重复验证：
