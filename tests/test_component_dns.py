@@ -18,6 +18,39 @@ from devproxy.config import Config
 from devproxy.paths import Paths
 from devproxy.platform.fake import FakePlatform
 
+# 夹具生效之前先记下生产值 —— 守卫用例靠它断言"测试隔离没有把生产路径也改掉"。
+_REAL_RESOLVED_CONF = dns_module.RESOLVED_CONF
+_REAL_SYSTEM_DNSMASQ_CONF = dns_module.SYSTEM_DNSMASQ_CONF
+_REAL_RESOLVER_DIR = dns_module.RESOLVER_DIR
+
+
+@pytest.fixture(autouse=True)
+def isolated_dns_paths(tmp_path, monkeypatch):
+    """把三处解析器文件的绝对路径整体重定向到临时目录。
+
+    `plan()` 的就绪判据是**直接读**目标文件的内容，而这些路径都在 /etc 下 ——
+    conftest 的 `isolated_home` 夹具管不到它们（它只重定向 HOME/XDG_*）。
+    不隔离的话，一台**真跑过 `devproxy setup`** 的机器上，真实文件内容恰好
+    与渲染结果一致，`plan()` 返回空，所有断言"有动作"的用例集体变红，
+    而代码本身没有任何问题。这不是被测代码的缺陷，是测试没把宿主状态隔离掉。
+
+    单个用例仍可再用 monkeypatch 覆盖成自己的路径（后设置的生效）。
+    """
+    monkeypatch.setattr(dns_module, "RESOLVED_CONF", tmp_path / "etc" / "devproxy.conf")
+    monkeypatch.setattr(
+        dns_module, "SYSTEM_DNSMASQ_CONF", tmp_path / "etc" / "dnsmasq.conf"
+    )
+    monkeypatch.setattr(dns_module, "RESOLVER_DIR", tmp_path / "etc" / "resolver")
+
+
+def test_production_paths_point_at_real_system_locations():
+    """隔离只作用于测试：生产上三个路径必须仍是 /etc 下那三处。"""
+    from pathlib import Path
+
+    assert _REAL_RESOLVED_CONF == Path("/etc/systemd/resolved.conf.d/devproxy.conf")
+    assert _REAL_SYSTEM_DNSMASQ_CONF == Path("/etc/dnsmasq.d/devproxy.conf")
+    assert _REAL_RESOLVER_DIR == Path("/etc/resolver")
+
 
 def test_render_resolved_conf_shape():
     out = render_resolved_conf(port=5353, domains=["test"])
