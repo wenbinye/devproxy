@@ -66,26 +66,49 @@
 
 ## 安装
 
-**当前项目尚未发布到 PyPI**，只能从源码安装：
+**当前项目尚未发布到 PyPI**，从源码仓库安装。最省事的一条 —— `uv` 会自己建隔离环境、
+装好入口：
 
 ```bash
-git clone <仓库地址>
-cd <仓库地址>
-uv tool install -e .
+uv tool install 'git+ssh://git@codeup.aliyun.com/msy/tools/devproxy.git'
 ```
 
-或者用 pipx：
+需要能通过 SSH 访问该仓库（密钥已登记）。想钉住分支 / 标签 / 提交：
 
 ```bash
-pipx install .
+uv tool install 'git+ssh://git@codeup.aliyun.com/msy/tools/devproxy.git@main'
+uv tool install 'git+ssh://git@codeup.aliyun.com/msy/tools/devproxy.git@<commit>'
+```
+
+不写 `@…` 时取仓库的默认分支（当前是 `main`）。升级到远端最新：
+
+```bash
+uv tool upgrade devproxy
+```
+
+没装 `uv` 的话：macOS `brew install uv`，Linux 用官方安装脚本。
+
+不想用 uv，也可以用 pipx（同样的 git 地址）：
+
+```bash
+pipx install 'git+ssh://git@codeup.aliyun.com/msy/tools/devproxy.git'
+```
+
+**本地开发**用可编辑安装 —— 改源码即生效，不必每次重装：
+
+```bash
+git clone git@codeup.aliyun.com:msy/tools/devproxy.git
+cd devproxy
+uv tool install -e .
 ```
 
 发布到 PyPI 之后，`uv tool install devproxy` 才可用 —— 在那之前这条命令会失败
 （PyPI 上没有这个包，且这个名字将来可能与别的包冲突）。
 
-依赖：Python ≥ 3.11，运行时依赖只有 `typer` 与 `rich`。
+依赖：Python ≥ 3.11（uv 会自动挑一个合适的解释器），运行时依赖只有 `typer` 与 `rich`。
 
-安装后 `devproxy --help` 应能列出全部子命令。
+安装后 `devproxy --help` 应能列出全部子命令。命令落在 `~/.local/bin/devproxy`；
+如果 `command -v devproxy` 找不到，跑一次 `uv tool update-shell`，或把 `~/.local/bin` 加进 `PATH`。
 
 ---
 
