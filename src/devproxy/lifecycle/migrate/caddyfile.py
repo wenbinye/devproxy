@@ -4,15 +4,57 @@
 """
 from __future__ import annotations
 
+import re
+import shlex
 from pathlib import Path
 
-TEST_BLOCK_MARKERS = ("*.test", "http://*.test", "http://*.local.test")
+def _strip_inline_comment(line: str) -> str:
+    """去掉引号感知的行内注释（Caddyfile 里引号内的 # 是普通字符）。"""
+    quote: str | None = None
+    escaped = False
+    for i, ch in enumerate(line):
+        if quote is not None:
+            if quote == '"' and escaped:
+                escaped = False
+            elif quote == '"' and ch == "\\":
+                escaped = True
+            elif ch == quote:
+                quote = None
+            continue
+        if ch in "\"'`":
+            quote = ch
+        elif ch == "#":
+            return line[:i]
+    return line
+
+def _brace_delta(line: str) -> int:
+    """一行代码对块深度的影响（注释与引号里的花括号不算）。"""
+    code = _strip_inline_comment(line)
+    delta = 0
+    quote: str | None = None
+    escaped = False
+    for ch in code:
+        if quote is not None:
+            if quote == '"' and escaped:
+                escaped = False
+            elif quote == '"' and ch == "\\":
+                escaped = True
+            elif ch == quote:
+                quote = None
+            continue
+        if ch in "\"'`":
+            quote = ch
+        elif ch == "{":
+            delta += 1
+        elif ch == "}":
+            delta -= 1
+    return delta
 
 def _block_head(block: str) -> str:
-    """块的首个有效行（跳过注释与空行）。"""
+    """块的首个有效行（跳过注释与空行，去掉行内注释）。"""
     for line in block.splitlines():
-        s = line.strip()
-        if not s or s.startswith("#"):
+        s = _strip_inline_comment(line).strip()
+        if not s:
             continue
         return s
     return ""
@@ -28,7 +70,8 @@ def _split_blocks(text: str) -> tuple[list[str], list[str]]:
     """按大括号深度切分顶层块。返回 (全局块列表, 站点块列表)。
 
     站点块前面的注释归入该块 —— 用户 Caddyfile 里每个站点都带一段说明，
-    拆开丢掉等于丢掉用户的文档。注释里的花括号不参与深度计算。
+    拆开丢掉等于丢掉用户的文档。注释（含行内注释）与引号里的花括号
+    不参与深度计算，否则 `example.test { # 站点 } 说明` 会被当场切碎。
     """
     global_blocks: list[str] = []
     site_blocks: list[str] = []
@@ -36,9 +79,7 @@ def _split_blocks(text: str) -> tuple[list[str], list[str]]:
     depth = 0
     for line in text.splitlines():
         current.append(line)
-        stripped = line.strip()
-        if not stripped.startswith("#"):
-            depth += line.count("{") - line.count("}")
+        depth += _brace_delta(line)
         if depth <= 0 and current:
             block = "\n".join(current).rstrip() + "\n"
             current = []
@@ -52,6 +93,45 @@ def _split_blocks(text: str) -> tuple[list[str], list[str]]:
         site_blocks.append("\n".join(current).rstrip() + "\n")
     return global_blocks, site_blocks
 
+def _address_tokens(address_line: str) -> list[str]:
+    """把 `foo.test, *.test` 这样的地址行拆成单个地址 token。"""
+    return [t for t in re.split(r"[,\s]+", address_line.strip()) if t]
+
+def _host_of(token: str) -> str:
+    """地址 token 里的主机名：去 scheme、去路径、去端口、统一小写。"""
+    host = token.strip()
+    if "://" in host:
+        host = host.split("://", 1)[1]
+    host = host.split("/", 1)[0]
+    if host.startswith("["):  # IPv6 字面量
+        end = host.find("]")
+        if end != -1:
+            return host[: end + 1].lower()
+    if ":" in host:
+        host = host.split(":", 1)[0]
+    return host.lower()
+
+def _is_wildcard_host(host: str, suffix: str) -> bool:
+    """host 是否为本工具后缀下的通配站点。
+
+    必须做**带点边界的精确后缀匹配**：`*.testing` 不属于 `test`，
+    `*.test` 与 `*.local.test` 才属于。整串 startswith 会把前者误杀，
+    又会漏掉 `https://*.test` 这类带 scheme 的写法。
+    """
+    suffix = (suffix or "test").lower()
+    if not host.startswith("*."):
+        return False
+    return host == f"*.{suffix}" or host.endswith(f".{suffix}")
+
+def _block_is_wildcard(block: str, suffix: str) -> bool:
+    address = _block_address(block)
+    if not address:
+        return False
+    return any(
+        _is_wildcard_host(_host_of(token), suffix)
+        for token in _address_tokens(address)
+    )
+
 def split_caddyfile_blocks(
     text: str, suffix: str = "test"
 ) -> tuple[list[str], list[str]]:
@@ -60,18 +140,10 @@ def split_caddyfile_blocks(
     只做块级切分，不解析 Caddyfile 语法 —— 站点块原样保留。
     """
     _, sites = _split_blocks(text)
-    markers = TEST_BLOCK_MARKERS
-    if suffix and suffix != "test":
-        markers = (
-            f"*.{suffix}",
-            f"http://*.{suffix}",
-            f"http://*.local.{suffix}",
-        )
     personal: list[str] = []
     dropped: list[str] = []
     for block in sites:
-        address = _block_address(block)
-        if address and any(address.startswith(m) for m in markers):
+        if _block_is_wildcard(block, suffix):
             dropped.append(block)
         else:
             personal.append(block)
@@ -102,20 +174,27 @@ def legacy_storage_path(text: str) -> Path | None:
     例：`storage file_system /home/u/.local/share/caddy`。
     迁移时必须沿用它 —— storage 换了位置，Caddy 会重新生成 CA，
     浏览器里的信任与已有站点的 tls internal 证书全部失效。
+
+    行内注释（`storage file_system /data # old ca`）与引号路径都要按
+    词法解析：前者曾被当成路径的一部分，后者曾被剥掉引号。
     """
     global_blocks, _ = _split_blocks(text)
     for block in global_blocks:
         for line in block.splitlines():
-            s = line.strip()
-            if not s or s.startswith("#") or not s.startswith("storage"):
+            s = _strip_inline_comment(line).strip()
+            if not s:
                 continue
-            parts = s.split(None, 2)
-            if len(parts) >= 3 and parts[1] == "file_system":
-                return Path(parts[2].strip().strip('"')).expanduser()
+            try:
+                parts = shlex.split(s)
+            except ValueError:
+                continue
+            if len(parts) >= 3 and parts[0] == "storage" and parts[1] == "file_system":
+                if parts[2]:
+                    return Path(parts[2]).expanduser()
     return None
 
 def _has_content(text: str) -> bool:
     """文本里有没有实质内容（注释与空行不算）。"""
     return any(
-        line.strip() and not line.strip().startswith("#") for line in text.splitlines()
+        _strip_inline_comment(line).strip() for line in text.splitlines()
     )

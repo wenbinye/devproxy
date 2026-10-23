@@ -1,8 +1,6 @@
 """备份与回滚：迁移前的快照，以及失败/手动回滚。"""
 from __future__ import annotations
 
-import json
-import os
 import shutil
 from pathlib import Path
 
@@ -67,9 +65,25 @@ def _create_backup(
         ) from e
 
 def _restore_after_failure(
-    platform: Platform, backup: Backup, exc: Exception
+    platform: Platform,
+    backup: Backup,
+    exc: BaseException,
+    *,
+    notes: list[str] | None = None,
 ) -> None:
-    """改写失败 → 按备份还原，绝不把机器留在半迁移状态。"""
+    """改写失败/被中断 → 按备份还原，绝不把机器留在半迁移状态。
+
+    `BaseException` 是刻意的：Ctrl-C（KeyboardInterrupt）不算 Exception，
+    只接 Exception 会让用户在“写了 sites.caddy、还没换单元”的半迁移状态
+    里退出，且看不到备份位置。中断同样按失败流程还原，并转成带备份
+    路径的 MigrationError（CLI 会把它打印成一行可读错误）。
+
+    `notes` 是失败前已收集的提示，随 MigrationError 一起交给调用方打印。
+    """
+    if isinstance(exc, KeyboardInterrupt):
+        reason = "迁移被中断（KeyboardInterrupt）"
+    else:
+        reason = f"迁移失败：{exc}"
     hint = (
         f"备份目录：{backup.directory}"
         f"（可手动还原：devproxy setup --rollback {backup.directory}）"
@@ -79,13 +93,13 @@ def _restore_after_failure(
         backup.restore()
     except BackupRestoreError as restore_exc:
         raise MigrationError(
-            f"迁移失败且还原不完整：{exc}；还原失败：{restore_exc}；{hint}"
+            f"{reason}，且还原不完整：{restore_exc}；{hint}", notes=notes
         ) from exc
     except OSError as restore_exc:
         raise MigrationError(
-            f"迁移失败且还原失败：{exc}；还原失败：{restore_exc}；{hint}"
+            f"{reason}，且还原失败：{restore_exc}；{hint}", notes=notes
         ) from exc
-    raise MigrationError(f"迁移失败，已按备份还原：{exc}；{hint}") from exc
+    raise MigrationError(f"{reason}，已按备份还原；{hint}", notes=notes) from exc
 
 def rollback(backup: Backup, *, platform: Platform | None = None) -> list[Path]:
     """按备份还原。返回被还原（或被删除）的原始路径。

@@ -3,7 +3,7 @@
 铁律：测试里绝不碰真实系统 —— 所有路径都指向 tmp_path，平台一律用 FakePlatform。
 """
 
-import json
+import warnings
 from pathlib import Path
 
 import pytest
@@ -13,15 +13,22 @@ from devproxy.core.config import Config
 from devproxy.lifecycle.migrate import (
     LegacyState,
     MigrationError,
+    MigrationRequest,
     default_dns_route,
     detect_legacy,
     legacy_storage_path,
+    load_legacy_storage,
     migrate,
     resolve_storage,
+    resolve_storage_details,
     rollback,
+    run_migration,
     split_caddyfile,
+    split_caddyfile_blocks,
     unit_config_path,
     unit_env,
+    unit_environment_files,
+    wildcard_addresses,
 )
 from devproxy.core.paths import Paths
 from devproxy.platform.fake import FakePlatform
@@ -165,6 +172,77 @@ def test_split_ignores_braces_inside_comments():
     assert dropped == []
 
 
+def test_split_ignores_braces_inside_inline_comments():
+    """`example.test { # 站点 } 说明` 不能把块当场截断。"""
+    legacy = (
+        "example.test { # 站点 } 说明\n"
+        "\treverse_proxy 1.2.3.4:80\n"
+        "}\n"
+    )
+    personal, dropped = split_caddyfile_blocks(legacy)
+    assert dropped == []
+    assert len(personal) == 1
+    assert "reverse_proxy" in personal[0]
+    assert len(personal[0].splitlines()) == 3, "块必须完整，不能被切成两段"
+
+
+def test_split_ignores_braces_inside_quotes():
+    legacy = 'example.test {\n\trespond "a { b" 200\n}\n'
+    personal, dropped = split_caddyfile_blocks(legacy)
+    assert dropped == []
+    assert len(personal) == 1
+    assert '"a { b"' in personal[0]
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        "*.test {\n\trespond 404\n}\n",
+        "http://*.test {\n\trespond 404\n}\n",
+        "https://*.test {\n\trespond 404\n}\n",
+        "*.local.test {\n\trespond 404\n}\n",
+        "https://*.local.test {\n\trespond 404\n}\n",
+        "*.test:8443 {\n\trespond 404\n}\n",
+        "foo.test, *.test {\n\trespond 404\n}\n",
+        "*.test { # 通配 } 块\n\trespond 404\n}\n",
+    ],
+)
+def test_wildcard_blocks_are_dropped_in_all_forms(block):
+    personal, dropped = split_caddyfile_blocks(block)
+    assert dropped == [block]
+    assert personal == []
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        "*.testing {\n\trespond hi\n}\n",
+        "*.local.testing {\n\trespond hi\n}\n",
+        "foo.test {\n\trespond hi\n}\n",
+        "http://foo.test {\n\trespond hi\n}\n",
+        "https://localhost {\n\trespond hi\n}\n",
+    ],
+)
+def test_non_wildcard_or_other_suffix_blocks_are_kept(block):
+    personal, dropped = split_caddyfile_blocks(block)
+    assert dropped == []
+    assert personal == [block]
+
+
+def test_wildcard_detection_follows_custom_suffix():
+    personal, dropped = split_caddyfile_blocks("*.dev {\n}\n", suffix="dev")
+    assert dropped and not personal
+    personal, dropped = split_caddyfile_blocks("*.test {\n}\n", suffix="dev")
+    assert personal and not dropped
+
+
+def test_wildcard_addresses_reports_scheme_form():
+    """doctor 必须能看见 https://*.test —— 漏报会让 TLS 握手整体失败。"""
+    assert wildcard_addresses("https://*.test {\n\trespond 404\n}\n") == [
+        "https://*.test"
+    ]
+
+
 # -- 单元解析 -----------------------------------------------------------------
 
 
@@ -178,6 +256,40 @@ def test_unit_config_path_none_when_absent():
     assert unit_config_path("[Service]\nExecStart=/usr/bin/foo\n", Path("/home/u")) is None
 
 
+def test_unit_config_path_accepts_equals_form():
+    """Caddy/pflag 接受 --config=path —— 这也是一种合法单元写法。"""
+    unit = "[Service]\nExecStart=/usr/bin/caddy run --config=/etc/caddy/Caddyfile\n"
+    assert unit_config_path(unit, Path("/home/u")) == Path("/etc/caddy/Caddyfile")
+
+
+def test_unit_config_path_handles_quoted_binary_and_path_with_spaces():
+    unit = '[Service]\nExecStart="/usr/bin/caddy" run --config "/opt/my caddy/Caddyfile"\n'
+    assert unit_config_path(unit, Path("/home/u")) == Path("/opt/my caddy/Caddyfile")
+
+
+def test_unit_config_path_expands_home_in_equals_form():
+    unit = "[Service]\nExecStart=/usr/bin/caddy run --config=%h/old/Caddyfile\n"
+    assert unit_config_path(unit, Path("/home/u")) == Path("/home/u/old/Caddyfile")
+
+
+def test_unit_config_path_ignores_systemd_dash_prefix():
+    unit = "[Service]\nExecStart=-/usr/bin/caddy run --config /old/Caddyfile\n"
+    assert unit_config_path(unit, Path("/home/u")) == Path("/old/Caddyfile")
+
+
+def test_detect_legacy_accepts_equals_form(tmp_path):
+    paths = _paths(tmp_path)
+    platform = FakePlatform()
+    unit_path = tmp_path / "caddy.service"
+    unit_path.write_text(
+        "[Service]\nExecStart=/bin/caddy run --config=/old/Caddyfile\n"
+    )
+    state = detect_legacy(platform, paths, unit_dir=tmp_path, home=tmp_path)
+    assert state is not None, "--config=<path> 不能被当成没有遗留环境"
+    assert state.config_path == Path("/old/Caddyfile")
+    assert state.error is None
+
+
 def test_unit_env_extracted():
     unit = "[Service]\nEnvironment=MINIKUBE_IP=192.168.49.2\nEnvironment=FOO=bar\n"
     assert unit_env(unit) == {"MINIKUBE_IP": "192.168.49.2", "FOO": "bar"}
@@ -186,6 +298,41 @@ def test_unit_env_extracted():
 def test_unit_env_ignores_comments():
     unit = "# Environment=NOT_SET=1\n[Service]\nEnvironment=REAL=1\n"
     assert unit_env(unit) == {"REAL": "1"}
+
+
+def test_unit_env_handles_quoted_values_with_spaces():
+    """systemd 的 Environment= 是 shell 风格分词 —— 带空格的值不能被拆坏。"""
+    unit = '[Service]\nEnvironment="GREETING=hello world" "MINIKUBE_IP=1.2.3.4"\n'
+    assert unit_env(unit) == {"GREETING": "hello world", "MINIKUBE_IP": "1.2.3.4"}
+
+
+def test_unit_env_handles_multiple_assignments_per_line():
+    unit = "[Service]\nEnvironment=FOO=bar BAZ=qux\n"
+    assert unit_env(unit) == {"FOO": "bar", "BAZ": "qux"}
+
+
+def test_unit_environment_files_detected():
+    unit = (
+        "[Service]\n"
+        "EnvironmentFile=/etc/default/caddy\n"
+        "EnvironmentFile=-/etc/caddy/env\n"
+    )
+    assert unit_environment_files(unit) == ["/etc/default/caddy", "/etc/caddy/env"]
+
+
+def test_detect_legacy_refuses_environment_file(tmp_path):
+    """EnvironmentFile 的内容无法安全重写 —— 必须拒绝自动迁移并点名。"""
+    paths = _paths(tmp_path)
+    platform = FakePlatform()
+    (tmp_path / "caddy.service").write_text(
+        "[Service]\n"
+        "EnvironmentFile=/etc/default/caddy\n"
+        "ExecStart=/bin/caddy run --config /old/Caddyfile\n"
+    )
+    state = detect_legacy(platform, paths, unit_dir=tmp_path, home=tmp_path)
+    assert state is not None
+    assert state.error and "EnvironmentFile" in state.error
+    assert "/etc/default/caddy" in state.error
 
 
 # -- 遗留检测 -----------------------------------------------------------------
@@ -224,11 +371,19 @@ def test_detect_legacy_none_when_unit_already_managed(tmp_path):
     assert detect_legacy(platform, paths, unit_dir=tmp_path, home=tmp_path) is None
 
 
-def test_detect_legacy_none_when_unit_has_no_config(tmp_path):
+def test_detect_legacy_returns_unconfirmed_state_when_config_unparseable(tmp_path):
+    """单元存在但解析不出 --config：不能当成“干净机器”。
+
+    返回 None 会让 setup 直接重写用户的单元 —— 没有备份，手工配置全丢。
+    必须返回带 error 的状态，让迁移拒绝动手。
+    """
     paths = _paths(tmp_path)
     platform = FakePlatform()
     (tmp_path / "caddy.service").write_text("[Service]\nExecStart=/usr/bin/foo\n")
-    assert detect_legacy(platform, paths, unit_dir=tmp_path, home=tmp_path) is None
+    state = detect_legacy(platform, paths, unit_dir=tmp_path, home=tmp_path)
+    assert state is not None
+    assert state.config_path is None
+    assert state.error and "--config" in state.error
 
 
 def test_detect_legacy_reads_unreadable_unit_through_elevation(tmp_path):
@@ -492,6 +647,77 @@ def test_migrate_restores_backup_when_rewrite_fails(tmp_path, monkeypatch):
     assert state.unit_path.read_text(encoding="utf-8") == original_unit
 
 
+def test_migrate_restores_backup_on_keyboard_interrupt(tmp_path, monkeypatch):
+    """Ctrl-C 也是失败路径：必须还原，且报错里带上备份位置。
+
+    KeyboardInterrupt 是 BaseException —— 只接 Exception 会把机器留在
+    “写了 sites.caddy、还没换单元”的半迁移状态，用户还不知道备份在哪。
+    """
+    paths = _paths(tmp_path)
+    paths.ensure_files()
+    platform = FakePlatform()
+    state = _legacy_state(
+        tmp_path,
+        caddyfile_text="localhost {\n}\n\n*.test {\n\trespond 404\n}\n",
+    )
+    original_unit = state.unit_path.read_text(encoding="utf-8")
+
+    def interrupt(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(platform, "install_service", interrupt)
+    notes: list[str] = []
+    with pytest.raises(MigrationError) as ei:
+        _migrate(platform, paths, Config(), state, tmp_path, notes=notes)
+    message = str(ei.value)
+    assert "中断" in message
+    assert "devproxy setup --rollback" in message
+    assert state.unit_path.read_text(encoding="utf-8") == original_unit
+    assert paths.sites_caddy.read_text(encoding="utf-8").strip() == ""
+    assert any("丢弃" in n for n in notes), "失败前的提示也必须交给调用方"
+
+
+def test_migrate_refuses_unconfirmed_legacy_state(tmp_path):
+    """无法确认的遗留单元：拒绝迁移，一个文件都不动、也不建备份目录。"""
+    paths = _paths(tmp_path)
+    platform = FakePlatform()
+    unit_path = tmp_path / "caddy.service"
+    unit_path.write_text("ORIGINAL\n", encoding="utf-8")
+    state = LegacyState(
+        unit_path=unit_path, config_path=None, error="无法确认遗留 caddy 单元"
+    )
+    with pytest.raises(MigrationError) as ei:
+        _migrate(platform, paths, Config(), state, tmp_path)
+    assert "无法确认" in str(ei.value)
+    assert unit_path.read_text(encoding="utf-8") == "ORIGINAL\n"
+    assert platform.services == {}
+    assert not paths.backup_dir.exists()
+
+
+def test_run_migration_returns_notes_in_outcome(tmp_path):
+    """notes 是返回值的一部分，不再靠调用方传可变列表。"""
+    paths = _paths(tmp_path)
+    paths.ensure_files()
+    platform = FakePlatform()
+    state = _legacy_state(
+        tmp_path,
+        caddyfile_text="localhost {\n}\n\n*.test {\n\trespond 404\n}\n",
+    )
+    outcome = run_migration(
+        MigrationRequest(
+            platform=platform,
+            paths=paths,
+            config=Config(),
+            state=state,
+            dnsmasq_conf=tmp_path / "dnsmasq.conf",
+            dns_route=tmp_path / "resolved.conf",
+        )
+    )
+    assert outcome.backup.entries
+    assert any("丢弃" in n for n in outcome.notes)
+    assert outcome.notes is not None
+
+
 # -- 回滚 ---------------------------------------------------------------------
 
 
@@ -713,6 +939,23 @@ def test_legacy_storage_path_none_without_global_block():
     assert legacy_storage_path("localhost {\n}\n") is None
 
 
+def test_legacy_storage_path_strips_inline_comment():
+    """`storage file_system /data # old ca` 的路径是 /data，不是带注释的整串。"""
+    assert legacy_storage_path("{\n\tstorage file_system /data # old ca\n}\n") == Path(
+        "/data"
+    )
+
+
+def test_legacy_storage_path_keeps_quoted_path_with_spaces():
+    text = '{\n\tstorage file_system "/home/u/my caddy" # 旧 CA\n}\n'
+    assert legacy_storage_path(text) == Path("/home/u/my caddy")
+
+
+def test_legacy_storage_path_keeps_hash_inside_quotes():
+    text = '{\n\tstorage file_system "/home/u/my # caddy"\n}\n'
+    assert legacy_storage_path(text) == Path("/home/u/my # caddy")
+
+
 def test_migrate_keeps_legacy_storage_so_ca_stays(tmp_path):
     """遗留 storage 与配置不同时必须沿用遗留的 —— 换了 CA 浏览器就不信任了。"""
     paths = _paths(tmp_path)
@@ -746,7 +989,6 @@ def test_migrate_keeps_legacy_storage_so_ca_stays(tmp_path):
 
 
 def test_resolve_storage_keeps_config_when_same(tmp_path):
-    paths = _paths(tmp_path)
     state = _legacy_state(
         tmp_path,
         caddyfile_text="{\n\tstorage file_system /same\n}\n\nlocalhost {\n}\n",
@@ -852,3 +1094,121 @@ def test_migrate_creates_import_targets_before_validation(tmp_path, monkeypatch)
         dns_route=tmp_path / "resolved.conf",
     )
     assert seen.get("missing") == [], "校验时 import 目标必须已经存在"
+
+
+# -- storage 一次性解析 -------------------------------------------------------
+
+
+def test_resolve_storage_details_returns_legacy_path(tmp_path):
+    """一次解析同时给出路径与提示 —— 调用方不必再读一遍遗留 Caddyfile。"""
+    state = _legacy_state(
+        tmp_path,
+        caddyfile_text="{\n\tstorage file_system /legacy\n}\n\nlocalhost {\n}\n",
+    )
+    config, legacy, note = resolve_storage_details(Config(storage="/config"), state)
+    assert legacy == Path("/legacy")
+    assert config.storage_path == Path("/legacy")
+    assert note and "/legacy" in note
+
+
+def test_resolve_storage_details_returns_path_when_already_same(tmp_path):
+    state = _legacy_state(
+        tmp_path,
+        caddyfile_text="{\n\tstorage file_system /same\n}\n\nlocalhost {\n}\n",
+    )
+    config, legacy, note = resolve_storage_details(Config(storage="/same"), state)
+    assert legacy == Path("/same")
+    assert config.storage_path == Path("/same")
+    assert note is None
+
+
+# -- 留档：原子写入与损坏告警 -------------------------------------------------
+
+
+def test_load_extra_env_warns_instead_of_silently_dropping_corrupt_archive(tmp_path):
+    from devproxy.core.caddy_env import load_extra_env
+
+    paths = _paths(tmp_path)
+    paths.ensure_files()
+    paths.caddy_env.write_text("{ 截断", encoding="utf-8")
+    with pytest.warns(UserWarning, match="环境变量留档"):
+        assert load_extra_env(paths) == {}
+
+
+def test_load_extra_env_missing_file_is_silent(tmp_path):
+    from devproxy.core.caddy_env import load_extra_env
+
+    paths = _paths(tmp_path)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert load_extra_env(paths) == {}
+
+
+def test_load_extra_env_roundtrip(tmp_path):
+    from devproxy.core.caddy_env import load_extra_env, save_extra_env
+
+    paths = _paths(tmp_path)
+    save_extra_env(paths, {"MINIKUBE_IP": "1.2.3.4"})
+    assert load_extra_env(paths) == {"MINIKUBE_IP": "1.2.3.4"}
+
+
+def test_load_legacy_storage_warns_on_corrupt_archive(tmp_path):
+    paths = _paths(tmp_path)
+    paths.ensure_files()
+    paths.caddy_storage.write_text("{ 截断", encoding="utf-8")
+    with pytest.warns(UserWarning, match="storage 留档"):
+        assert load_legacy_storage(paths) is None
+
+
+def test_save_extra_env_is_atomic_when_replace_fails(tmp_path, monkeypatch):
+    """写入失败时目标文件保持旧内容，且不留下临时文件。"""
+    import devproxy.core.paths as paths_mod
+    from devproxy.core.caddy_env import save_extra_env
+
+    paths = _paths(tmp_path)
+    save_extra_env(paths, {"A": "1"})
+    before = paths.caddy_env.read_text(encoding="utf-8")
+
+    def boom(src, dst):
+        raise OSError("磁盘已满")
+
+    monkeypatch.setattr(paths_mod.os, "replace", boom)
+    with pytest.raises(OSError):
+        save_extra_env(paths, {"A": "2"})
+    assert paths.caddy_env.read_text(encoding="utf-8") == before
+    leftovers = [
+        p.name for p in paths.caddy_env.parent.iterdir() if p.name.startswith(".")
+    ]
+    assert leftovers == [], f"临时文件必须清理：{leftovers}"
+
+
+def test_save_legacy_storage_is_atomic_when_replace_fails(tmp_path, monkeypatch):
+    import devproxy.core.paths as paths_mod
+    from devproxy.lifecycle.migrate import save_legacy_storage
+
+    paths = _paths(tmp_path)
+    paths.ensure_files()
+    save_legacy_storage(paths, Path("/old"))
+    before = paths.caddy_storage.read_text(encoding="utf-8")
+
+    def boom(src, dst):
+        raise OSError("磁盘已满")
+
+    monkeypatch.setattr(paths_mod.os, "replace", boom)
+    with pytest.raises(OSError):
+        save_legacy_storage(paths, Path("/new"))
+    assert paths.caddy_storage.read_text(encoding="utf-8") == before
+
+
+# -- 注解必须能解析（get_type_hints 不应抛 NameError）--------------------------
+
+
+def test_public_type_hints_resolve():
+    from typing import get_type_hints
+
+    from devproxy.lifecycle.migrate.legacy import resolve_storage
+
+    assert get_type_hints(resolve_storage)
+    assert get_type_hints(resolve_storage_details)
+    assert get_type_hints(migrate)
+    assert get_type_hints(run_migration)

@@ -37,6 +37,22 @@ class BackupEntry:
     sha256: str = ""
 
 
+def _verify_backup_copy(entry: BackupEntry, src: Path) -> None:
+    """还原前校验备份副本 —— 声明了 sha256 就必须兑现。
+
+    副本被截断/改写（磁盘问题、用户误改、非原子复制遗留）时，直接写回
+    等于用损坏内容覆盖现役文件。旧清单可能没有 sha256，跳过校验。
+    """
+    if not entry.sha256:
+        return
+    actual = _sha256(src)
+    if actual != entry.sha256:
+        raise ValueError(
+            f"备份副本 sha256 不匹配，拒绝还原：{src}"
+            f"（期望 {entry.sha256}，实际 {actual}）"
+        )
+
+
 class BackupRestoreError(RuntimeError):
     """还原过程中有条目失败时抛出。
 
@@ -91,6 +107,9 @@ class Backup:
         抛出 `BackupRestoreError`，其 `.restored` 保留已成功还原的原始路径，
         `.failures` 保留失败条目（原始路径, 异常）。调用方必须捕获该异常，
         否则已还原清单会丢失。
+
+        还原前会校验备份副本的 sha256：副本损坏时拒绝写回（记为该条目
+        失败），绝不把损坏内容覆盖到现役文件上。
         """
         restored: list[Path] = []
         failures: list[tuple[Path, Exception]] = []
@@ -99,6 +118,7 @@ class Backup:
             try:
                 src = self.directory / e.backup
                 if e.existed:
+                    _verify_backup_copy(e, src)
                     e.original.parent.mkdir(parents=True, exist_ok=True)
                     if restore is None:
                         shutil.copy2(src, e.original)
@@ -109,7 +129,7 @@ class Backup:
                         e.original.unlink(missing_ok=True)
                     else:
                         restore(None, e.original)
-            except OSError as exc:
+            except (OSError, ValueError) as exc:
                 failures.append((e.original, exc))
                 continue
             restored.append(e.original)

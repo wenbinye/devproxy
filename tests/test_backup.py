@@ -1,6 +1,5 @@
 import hashlib
 import json
-from pathlib import Path
 
 import pytest
 
@@ -217,3 +216,52 @@ def test_failed_copy_leaves_no_orphan_backup_directory(tmp_path, monkeypatch):
         BackupManager(tmp_path / "backups").create([a, b])
     base = tmp_path / "backups"
     assert not base.exists() or not any(base.iterdir()), "失败的备份不得留下孤儿目录"
+
+
+# --- 还原前必须校验备份副本的 sha256 ---
+
+
+def test_restore_refuses_corrupted_backup_copy(tmp_path):
+    """备份副本损坏时绝不能写回现役文件。"""
+    src = tmp_path / "f"
+    src.write_text("original")
+    b = BackupManager(tmp_path / "backups").create([src])
+    src.write_text("modified")
+    copy = b.directory / b.entries[0].backup
+    copy.write_text("corrupted")
+
+    with pytest.raises(BackupRestoreError) as exc:
+        b.restore()
+    assert [p for p, _ in exc.value.failures] == [src]
+    assert "sha256" in str(exc.value.failures[0][1])
+    assert src.read_text() == "modified", "损坏的备份不得覆盖现役文件"
+
+
+def test_restore_continues_after_corrupted_entry(tmp_path):
+    """一个条目的副本损坏不应中断其余条目的还原。"""
+    good = tmp_path / "good"
+    good.write_text("good-original")
+    bad = tmp_path / "bad"
+    bad.write_text("bad-original")
+    b = BackupManager(tmp_path / "backups").create([good, bad])
+    good.write_text("good-modified")
+    bad.write_text("bad-modified")
+    (b.directory / b.entries[1].backup).write_text("corrupted")
+
+    with pytest.raises(BackupRestoreError) as exc:
+        b.restore()
+    assert exc.value.restored == [good]
+    assert [p for p, _ in exc.value.failures] == [bad]
+    assert good.read_text() == "good-original"
+    assert bad.read_text() == "bad-modified"
+
+
+def test_restore_skips_verification_when_manifest_has_no_sha(tmp_path):
+    """旧清单没有 sha256 时不能因此拒绝还原。"""
+    src = tmp_path / "f"
+    src.write_text("original")
+    b = BackupManager(tmp_path / "backups").create([src])
+    b.entries[0].sha256 = ""
+    src.write_text("modified")
+    b.restore()
+    assert src.read_text() == "original"

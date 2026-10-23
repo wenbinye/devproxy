@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -74,6 +75,35 @@ class Paths:
         self.ensure()
         for f in (self.sites_caddy, self.routes_caddy):
             f.touch(exist_ok=True)
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    """同目录临时文件 + os.replace 原子落盘。
+
+    留档（caddy-env.json / caddy-storage.json）被读到一半的后果很重：
+    截断的 JSON 会被当成"没有留档"，storage 回退会让 Caddy 重建 CA。
+    直接 write_text 在进程被杀/磁盘写满时会留下截断文件，这里保证
+    目标文件要么是旧内容、要么是完整的新内容。
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        mode = path.stat().st_mode & 0o777
+    except FileNotFoundError:
+        mode = 0o644
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
+    )
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def default_state_dir(home: Path | None = None) -> Path:

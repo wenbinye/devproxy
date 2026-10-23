@@ -735,7 +735,8 @@ def test_corrupt_storage_archive_is_precondition_error(env):
     paths = default_paths()
     paths.caddy_storage.parent.mkdir(parents=True, exist_ok=True)
     paths.caddy_storage.write_text("{ 截断", encoding="utf-8")
-    res = CliRunner().invoke(app, ["config"])
+    with pytest.warns(UserWarning, match="storage 留档不可读"):
+        res = CliRunner().invoke(app, ["config"])
     assert res.exit_code == 3, res.output
     assert "留档损坏" in res.output
     assert "Traceback" not in res.output
