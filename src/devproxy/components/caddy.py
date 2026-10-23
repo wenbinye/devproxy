@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Callable
 
 from devproxy.core.config import Config
-from devproxy.lifecycle.migrate import load_extra_env
+from devproxy.core.caddy_env import load_extra_env
 from devproxy.core.paths import Paths
 from devproxy.platform.base import Action, Platform, Status, unit_exec_argv
 
