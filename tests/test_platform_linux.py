@@ -703,20 +703,57 @@ def test_linux_nss_entries_reports_nickname_and_flags(tmp_path, monkeypatch):
 def test_linux_nss_entries_ignores_nickname_that_cannot_be_fetched(
     tmp_path, monkeypatch
 ):
-    """表格解析出来的昵称取不到证书时必须跳过 —— 宁可漏判也不能误判。"""
+    """表格解析出来的昵称取不到证书时必须跳过 —— 宁可漏判也不能误判。
+
+    必须真的走到**枚举**分支：让自有昵称的内容也对不上（快路径不命中），
+    否则这条用例只是把快路径又测了一遍，声称的"跳过坏候选"根本没执行。
+    """
     p = _nss_platform(tmp_path)
     ca = tmp_path / "root.crt"
     ca.write_text(PEM_OLD, encoding="utf-8")
 
     def fake_run(argv):
         if "-a" in argv:
-            if "取不到" in argv[argv.index("-n") + 1]:
+            nickname = argv[argv.index("-n") + 1]
+            if "取不到" in nickname:
                 return 255, "certutil: could not find cert"
+            if nickname == "devproxy Local CA":
+                return 0, PEM_NEW  # 内容不同 → 快路径不命中，走枚举
             return 0, PEM_OLD
-        return 0, _nss_listing(("取不到的那条", "C,,"), ("devproxy Local CA", "C,,"))
+        return 0, _nss_listing(
+            ("取不到的那条", "C,,"),
+            ("devproxy Local CA", "C,,"),
+            ("用户那条", "C,,"),
+        )
+
+    monkeypatch.setattr(linux_mod, "_run", fake_run)
+    entries = p.nss_entries(ca)
+    assert entries == [("用户那条", "C,,")]
+    assert "取不到的那条" not in [n for n, _ in entries]
+
+
+def test_linux_nss_entries_fast_path_stops_after_own_nickname(tmp_path, monkeypatch):
+    """自有昵称命中且可信 → 只查它一条，不为其余条目各跑一次 -L -n -a。"""
+    p = _nss_platform(tmp_path)
+    ca = tmp_path / "root.crt"
+    ca.write_text(PEM_OLD, encoding="utf-8")
+    calls = []
+
+    def fake_run(argv):
+        calls.append(list(argv))
+        if "-a" in argv:
+            return 0, PEM_OLD
+        return 0, _nss_listing(
+            ("别人的条目一", "C,,"),
+            ("devproxy Local CA", "C,,"),
+            ("别人的条目二", "C,,"),
+            ("别人的条目三", "C,,"),
+        )
 
     monkeypatch.setattr(linux_mod, "_run", fake_run)
     assert p.nss_entries(ca) == [("devproxy Local CA", "C,,")]
+    # 一次列表 + 一次取自有昵称的 PEM = 2 次调用（全量枚举会是 5 次）
+    assert len(calls) == 2, calls
 
 
 def test_linux_nss_entries_empty_without_db(tmp_path, monkeypatch):
@@ -864,6 +901,25 @@ def test_linux_nss_stale_nickname_false_when_absent(tmp_path, monkeypatch):
     ca.write_text(PEM_OLD, encoding="utf-8")
     monkeypatch.setattr(linux_mod, "_run", lambda argv: (255, "could not find cert"))
     assert p.nss_stale_nickname(ca, "devproxy Local CA") is False
+
+
+def test_linux_nss_has_nickname_true_and_false(tmp_path, monkeypatch):
+    """`-L -n <昵称>` 能跑通 = 条目存在；失败 = 不存在。"""
+    p = _nss_platform(tmp_path)
+    monkeypatch.setattr(linux_mod, "_run", lambda argv: (0, "Certificate: …"))
+    assert p.nss_has_nickname("devproxy Local CA") is True
+    monkeypatch.setattr(
+        linux_mod, "_run", lambda argv: (255, "could not find certificate")
+    )
+    assert p.nss_has_nickname("devproxy Local CA") is False
+
+
+def test_linux_nss_has_nickname_false_without_db(tmp_path, monkeypatch):
+    p = LinuxPlatform(user_home=tmp_path)
+    monkeypatch.setattr(
+        linux_mod, "_run", lambda argv: pytest.fail("没有 NSS 库就不该跑 certutil")
+    )
+    assert p.nss_has_nickname("devproxy Local CA") is False
 
 
 def test_linux_nss_stale_nickname_false_when_unparsable(tmp_path, monkeypatch):

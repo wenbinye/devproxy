@@ -26,6 +26,16 @@ from devproxy.platform.base import (
 CA_NAME = CA_NICKNAME
 
 
+def _nss_missing_output(text: str) -> bool:
+    """`certutil` 的输出是否在说"这个条目不存在"。
+
+    平台没有 `nss_has_nickname` 可用时的兜底判据（真机实测文案：
+    `certutil: could not find certificate named "x": …`）。
+    """
+    lowered = text.lower()
+    return "could not find" in lowered or "not found" in lowered
+
+
 class CertComponent:
     name = "cert"
 
@@ -143,6 +153,25 @@ class CertComponent:
         except Exception:  # noqa: BLE001
             return "C,,"
 
+    def _nss_has_nickname(self, nss: Path, nickname: str) -> bool | None:
+        """昵称下是否有条目；平台不支持这个探测时返回 None（判不了）。"""
+        getter = getattr(self.platform, "nss_has_nickname", None)
+        if getter is None:
+            return None
+        try:
+            try:
+                return bool(getter(nickname, nss_dir=nss))
+            except TypeError:
+                return bool(getter(nickname))
+        except Exception:  # noqa: BLE001 —— 探测失败按"判不了"处理
+            return None
+
+    def _stale_own_entry(self) -> bool:
+        """工具自有昵称下是否残留着**别的** CA。判定失败一律当作没有。"""
+        if not self.ca_path.exists():
+            return False
+        return self._nss_stale(self.ca_path, self.nss_dir)
+
     def fully_trusted(self) -> bool:
         """CA 是否已被系统信任库与 NSS 库**同时**信任。
 
@@ -182,7 +211,12 @@ class CertComponent:
             )
         if self._is_macos:
             return Status(ok=True, detail="CA 根证书已信任（系统钥匙串）")
-        return Status(ok=True, detail="CA 根证书已信任（系统信任库 + NSS 库）")
+        # 陈旧根属于"卫生问题"而不是"未就绪"：HTTPS 一切正常，所以 ok 仍是 True；
+        # 但也不能谎称完全没问题 —— detail 里点名，plan() 会产出清理动作。
+        detail = "CA 根证书已信任（系统信任库 + NSS 库）"
+        if self._stale_own_entry():
+            detail += "；NSS 库中工具昵称下残留陈旧 CA 根（devproxy trust 可清理）"
+        return Status(ok=True, detail=detail)
 
     # -- plan ----------------------------------------------------------
 
@@ -206,13 +240,31 @@ class CertComponent:
                 )
             ]
         actions: list[Action] = []
-        if not self._nss_trusted():
+        nss_trusted = self._nss_trusted()
+        if not nss_trusted:
             actions.append(
                 Action(
                     description="安装 CA 根证书到 NSS 库（Chrome/Chromium）",
                     kind="run",
                     command=["install-nss-ca", str(self.ca_path), str(self.nss_dir)],
                     # NSS 库在当前用户家目录，不需要 root
+                    privileged=False,
+                )
+            )
+        elif self._stale_own_entry():
+            # CA 已信任、但工具昵称下残留旧 CA 根。这条必须由 plan() 产出 ——
+            # 此场景下原本一切都"已就绪"、apply() 根本不会被调用，
+            # 只写在安装路径里的清理代码永远执行不到。
+            actions.append(
+                Action(
+                    description="清理 NSS 库中工具昵称下的陈旧 CA 根证书",
+                    kind="run",
+                    command=[
+                        "remove-stale-nss-ca",
+                        str(self.ca_path),
+                        str(self.nss_dir),
+                    ],
+                    # 自有昵称归工具所有；NSS 库在用户家目录，不需要 root
                     privileged=False,
                 )
             )
@@ -289,6 +341,16 @@ class CertComponent:
                 raise RuntimeError(
                     f"update-ca-certificates 失败（CA 未进入系统信任库）: {msg}"
                 )
+            return
+        if action.command[:1] == ["remove-stale-nss-ca"]:
+            src = Path(action.command[1])
+            nss = Path(action.command[2]).expanduser()
+            if shutil.which("certutil") is None:
+                raise RuntimeError(
+                    "缺少 certutil（Chrome 信任需 NSS 库）：sudo apt install libnss3-tools"
+                )
+            self._require_same_nss_db(nss)
+            self._drop_stale_own_entry(src, nss)
             return
         if action.command[:1] == ["install-nss-ca"]:
             src = Path(action.command[1])
@@ -389,11 +451,26 @@ class CertComponent:
 
         `unconditional=True` 用在"库里没有当前 CA"的安装路径上：
         这时自有昵称下即便有条目也只可能是**别的** CA。
-        删除失败（条目不存在）忽略 —— 幂等。
+
+        `certutil -D` 的返回码**必须**检查：陈旧根会被浏览器永久信任，
+        删除失败若被当成成功，旧根就留在库里而工具报"已就绪"。
+        只有"条目确实不存在"（并发下已被别处删掉 / 本来就没有）才算幂等成功。
         """
         if not unconditional and not self._nss_stale(ca, nss):
             return
-        self.platform.run(["certutil", "-d", f"sql:{nss}", "-D", "-n", CA_NAME])
+        code, msg = self.platform.run(
+            ["certutil", "-d", f"sql:{nss}", "-D", "-n", CA_NAME]
+        )
+        if code == 0:
+            return
+        present = self._nss_has_nickname(nss, CA_NAME)
+        if present is False:
+            # 条目确实不存在 —— 目标状态已达成，幂等
+            return
+        if present is None and _nss_missing_output(msg):
+            # 平台不提供探测能力，只能看 certutil 的输出
+            return
+        raise RuntimeError(f"删除 NSS 库中的陈旧 CA 条目失败: {msg}")
 
     def _repair_flags(
         self,

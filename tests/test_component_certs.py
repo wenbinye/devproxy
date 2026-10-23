@@ -542,6 +542,157 @@ def test_apply_repair_uses_platform_flag_helper(tmp_path, monkeypatch):
     )
 
 
+def test_plan_offers_stale_cleanup_when_ca_trusted(tmp_path, monkeypatch):
+    """CA 已信任但自有昵称下残留旧 CA → plan() 产出非特权的清理动作。
+
+    这个场景下 apply() 只有在 plan() 非空时才会被调用 ——
+    清理动作必须由 plan() 自己产出，否则生产上永远执行不到。
+    """
+    _certutil_installed(monkeypatch)
+
+    class Stale(FakePlatform):
+        def nss_stale_nickname(self, ca, nickname, nss_dir=None):
+            return True
+
+    platform = Stale()
+    comp, _platform, paths = _component(tmp_path, platform)
+    ca = _write_ca(paths)
+    _trust_both(platform, ca)
+
+    status = comp.check()
+    assert status.ok is True
+    assert "陈旧" in status.detail
+
+    actions = comp.plan()
+    assert [a.command[0] for a in actions] == ["remove-stale-nss-ca"]
+    assert actions[0].privileged is False
+    assert str(ca) in actions[0].command
+
+
+def test_remove_stale_action_runs_certutil_delete(tmp_path, monkeypatch):
+    _certutil_installed(monkeypatch)
+
+    class Stale(FakePlatform):
+        def nss_stale_nickname(self, ca, nickname, nss_dir=None):
+            return True
+
+    platform = Stale()
+    comp, paths, _ = _injected(tmp_path, platform)
+    ca = _write_ca(paths)
+    comp.apply(
+        [
+            Action(
+                description="清理 NSS 库中工具昵称下的陈旧 CA 根证书",
+                kind="run",
+                command=["remove-stale-nss-ca", str(ca), str(tmp_path / "nssdb")],
+                privileged=False,
+            )
+        ]
+    )
+    deletes = [c for c in platform.commands if c[:1] == ["certutil"] and "-D" in c]
+    assert deletes and certs_module.CA_NAME in deletes[0]
+
+
+def test_remove_stale_action_raises_when_delete_fails(tmp_path, monkeypatch):
+    """`certutil -D` 失败且条目仍在 → 必须报错，不能静默吞掉。
+
+    旧根会被浏览器永久信任；吞掉失败就等于工具报"已就绪"而旧根还留着。
+    """
+    _certutil_installed(monkeypatch)
+
+    class DeleteFails(FakePlatform):
+        def run(self, argv):
+            self.commands.append(list(argv))
+            if argv[:1] == ["certutil"] and "-D" in argv:
+                return 255, "certutil: unable to delete (database locked)"
+            return 0, ""
+
+        def nss_stale_nickname(self, ca, nickname, nss_dir=None):
+            return True
+
+        def nss_has_nickname(self, nickname, nss_dir=None):
+            return True  # 条目确实还在
+
+    platform = DeleteFails()
+    comp, paths, _ = _injected(tmp_path, platform)
+    ca = _write_ca(paths)
+    with pytest.raises(RuntimeError) as ei:
+        comp.apply(
+            [
+                Action(
+                    description="清理 NSS 库中工具昵称下的陈旧 CA 根证书",
+                    kind="run",
+                    command=["remove-stale-nss-ca", str(ca), str(tmp_path / "nssdb")],
+                    privileged=False,
+                )
+            ]
+        )
+    assert "database locked" in str(ei.value)
+
+
+def test_remove_stale_action_tolerates_missing_entry(tmp_path, monkeypatch):
+    """并发下条目已不存在 → 目标状态已达成，幂等成功。"""
+    _certutil_installed(monkeypatch)
+
+    class AlreadyGone(FakePlatform):
+        def run(self, argv):
+            self.commands.append(list(argv))
+            if argv[:1] == ["certutil"] and "-D" in argv:
+                return 255, 'certutil: could not find certificate named "x"'
+            return 0, ""
+
+        def nss_stale_nickname(self, ca, nickname, nss_dir=None):
+            return True
+
+        def nss_has_nickname(self, nickname, nss_dir=None):
+            return False
+
+    platform = AlreadyGone()
+    comp, paths, _ = _injected(tmp_path, platform)
+    ca = _write_ca(paths)
+    comp.apply(
+        [
+            Action(
+                description="清理 NSS 库中工具昵称下的陈旧 CA 根证书",
+                kind="run",
+                command=["remove-stale-nss-ca", str(ca), str(tmp_path / "nssdb")],
+                privileged=False,
+            )
+        ]
+    )  # 不抛异常
+
+
+def test_remove_stale_action_uses_message_when_platform_cannot_probe(
+    tmp_path, monkeypatch
+):
+    """平台不提供 nss_has_nickname 时按 certutil 的输出判断"不存在"。"""
+    _certutil_installed(monkeypatch)
+
+    class NoProbe(FakePlatform):
+        def run(self, argv):
+            self.commands.append(list(argv))
+            if argv[:1] == ["certutil"] and "-D" in argv:
+                return 255, 'certutil: could not find certificate named "x"'
+            return 0, ""
+
+        def nss_stale_nickname(self, ca, nickname, nss_dir=None):
+            return True
+
+    platform = NoProbe()
+    comp, paths, _ = _injected(tmp_path, platform)
+    ca = _write_ca(paths)
+    comp.apply(
+        [
+            Action(
+                description="清理 NSS 库中工具昵称下的陈旧 CA 根证书",
+                kind="run",
+                command=["remove-stale-nss-ca", str(ca), str(tmp_path / "nssdb")],
+                privileged=False,
+            )
+        ]
+    )
+
+
 def test_apply_drops_stale_own_entry_when_trusted_elsewhere(tmp_path, monkeypatch):
     """已信任但自有昵称下残留**旧 CA** → 定向删除那一条。"""
     _certutil_installed(monkeypatch)

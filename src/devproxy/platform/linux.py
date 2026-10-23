@@ -157,8 +157,10 @@ def ca_in_trust_store(ca: Path) -> bool:
 def _nss_rows(listing: str) -> list[tuple[str, str]]:
     """解析 `certutil -L` 的表格 → [(昵称, 信任标志)]。
 
-    表头两行与空行会被自然过滤掉：表头里没有"连续两个逗号"，
-    匹配不上标志的形状。
+    表头两行与空行会被自然过滤掉：标志的形状是"三列、两列逗号"，
+    表头里的 `Certificate Nickname … Trust Attributes` 没有逗号，
+    `SSL,S/MIME,JAR/XPI` 虽然有两列逗号、但列内容含 `/`，都不满足
+    `[A-Za-z]*(?:,[A-Za-z]*){2}`，匹配不上。
     """
     rows: list[tuple[str, str]] = []
     for raw in listing.splitlines():
@@ -597,6 +599,11 @@ class LinuxPlatform:
         同一张证书换个昵称再 `certutil -A`，会**静默无操作**（返回 0，
         但条目并不新增）。所以"这张 CA 装了没有"只能靠指纹比对。
 
+        注意快路径：自有昵称那条命中且可信时**直接返回它一条**，
+        不保证列出库里全部匹配项 —— 调用方只应把它当作"有没有被信任"的
+        判据；要枚举全部匹配条目（例如为了补信任标志）时，前提本来就是
+        "自有昵称不命中"，那时返回的是全量。
+
         `nss_dir` 允许显式指定库路径（默认本平台的 nss_db_path）：
         组件注入的库与平台默认库不一致时，复查必须查**写进去的那个**。
 
@@ -672,6 +679,18 @@ class LinuxPlatform:
         if not stored or not expected:
             return False
         return not (stored & expected)
+
+    def nss_has_nickname(self, nickname: str, nss_dir: Path | None = None) -> bool:
+        """`nickname` 下是否有条目（不看内容）。**非协议方法**。
+
+        用来区分 `certutil -D` 的两种失败：条目已经不存在（幂等，可以忽略）
+        还是删除真的失败了（库被锁 / 权限 / 其他，必须报出来）。
+        """
+        nss = Path(nss_dir) if nss_dir is not None else self.nss_db_path()
+        if not (nss / "cert9.db").exists():
+            return False
+        code, _ = _run(["certutil", "-L", "-d", f"sql:{nss}", "-n", nickname])
+        return code == 0
 
     def nss_trust_flags(self, flags: str) -> str:
         """补 SSL 信任标志时用的完整三列标志字符串（**非协议方法**）。

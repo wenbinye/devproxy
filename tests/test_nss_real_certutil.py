@@ -421,10 +421,12 @@ def test_apply_repairs_only_ssl_column(tmp_path):
 # -- fix round 1：自有昵称下的陈旧条目 --------------------------------------
 
 
-def test_apply_removes_stale_entry_under_own_nickname(tmp_path):
-    """自有昵称下残留旧 CA、当前 CA 在异昵称被信任 → 删掉旧根。
+def test_plan_offers_stale_cleanup_when_ca_trusted_elsewhere(tmp_path):
+    """自有昵称下残留旧 CA、当前 CA 在异昵称已信任 → plan() 必须产出清理动作。
 
-    浏览器会永久信任那个旧根；旧私钥若可恢复就是 HTTPS 中间人后门。
+    这个场景下**没有安装动作**：如果清理只写在安装路径里，
+    `apply()` 根本不会被调用（CLI 与 setup 在 plan 为空时直接跳过），
+    那段代码在生产上永远执行不到。
     """
     old_ca = _make_ca(tmp_path, "old devproxy CA")
     ca = _make_ca(tmp_path, "current devproxy CA")
@@ -437,14 +439,22 @@ def test_apply_removes_stale_entry_under_own_nickname(tmp_path):
     comp.ca_path.parent.mkdir(parents=True, exist_ok=True)
     comp.ca_path.write_text(ca.read_text(encoding="utf-8"), encoding="utf-8")
 
-    assert comp.check().ok is True
-    assert comp.plan() == []
+    status = comp.check()
+    assert status.ok is True, "CA 确实已信任 —— 陈旧根是卫生问题，不是未就绪"
+    assert "陈旧" in status.detail, "detail 不能谎称完全没问题"
 
-    comp.apply([_install_action(comp.ca_path, db)])
+    actions = comp.plan()
+    assert [a.command[0] for a in actions] == ["remove-stale-nss-ca"], (
+        "已信任时不该再计划安装动作，但必须计划清理动作"
+    )
+    assert actions[0].privileged is False
+
+    comp.apply(actions)
 
     assert _rows(db) == [("Caddy Local Authority", "C,,",)], (
         "自有昵称下的陈旧 CA 必须删掉，用户那条不能动"
     )
+    assert comp.plan() == [], "清理之后应当彻底无事可做"
 
 
 def test_apply_removes_stale_entry_while_repairing_flags(tmp_path):
