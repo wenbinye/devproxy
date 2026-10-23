@@ -36,6 +36,20 @@ def _nss_missing_output(text: str) -> bool:
     return "could not find" in lowered or "not found" in lowered
 
 
+# macOS 在"非图形界面会话"里拒绝修改系统信任设置时的系统原文。
+# 不同版本措辞略有出入，按子串族匹配（真机 macOS 26 命中的是第一条）。
+_MACOS_GUI_DENIED = (
+    "no user interaction was possible",
+    "user interaction is not allowed",
+    "errauthorizationinteractionnotallowed",
+)
+
+
+def _macos_needs_gui(message: str) -> bool:
+    low = (message or "").lower()
+    return any(marker in low for marker in _MACOS_GUI_DENIED)
+
+
 class CertComponent:
     name = "cert"
 
@@ -343,6 +357,20 @@ class CertComponent:
                 ]
             )
             if code != 0:
+                if _macos_needs_gui(msg):
+                    # 真机实测（macOS 26 + SSH）：证书其实**已经**进了系统钥匙串，
+                    # 卡住的是 SecTrustSettingsSetTrustSettings —— 它要弹一个
+                    # 系统授权框，而 SSH 会话没有图形上下文，于是直接拒绝。
+                    # 这既不是权限不够（sudo 是成功的），也不是命令写错，
+                    # 用户除了"去那台机器的图形界面点一下"别无他法。
+                    # 分行写：Rich 会把超长的一整段折成难读的多行，
+                    # 而"该运行什么命令"必须是完整、可复制的一行。
+                    raise PermissionError(
+                        "macOS 不允许在非图形界面会话里修改系统信任设置"
+                        "（SSH 下弹不出授权框）。\n"
+                        "请在那台 Mac 的「终端」窗口里运行：devproxy trust\n"
+                        f"系统原文：{msg}"
+                    )
                 raise RuntimeError(f"安装 CA 到系统钥匙串失败: {msg}")
             return
         if action.command[:1] == ["install-system-ca"]:

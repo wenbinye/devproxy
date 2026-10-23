@@ -1142,3 +1142,73 @@ def test_linux_plan_still_has_two_steps(tmp_path):
     actions = comp.plan()
     assert len(actions) == 2
     assert {a.command[0] for a in actions} == {"install-nss-ca", "install-system-ca"}
+
+
+class _DeniedKeychainPlatform(_MacPlatform):
+    """提权会话能建立，但 `security add-trusted-cert` 被系统拒绝。
+
+    真机（macOS 26，SSH 会话）实测的原文：
+    `SecTrustSettingsSetTrustSettings: The authorization was denied since no
+    user interaction was possible.`
+    """
+
+    def privilege(self):
+        platform = self
+
+        class _Denied:
+            def run(self, argv):
+                platform.commands.append(list(argv))
+                return 1, (
+                    "SecTrustSettingsSetTrustSettings: The authorization was "
+                    "denied since no user interaction was possible."
+                )
+
+            def write(self, path, content):  # pragma: no cover - 本用例不走
+                raise AssertionError("不应走到这里")
+
+            def read(self, path):  # pragma: no cover
+                raise AssertionError("不应走到这里")
+
+            def copy(self, src, dest):  # pragma: no cover
+                raise AssertionError("不应走到这里")
+
+        return _Denied()
+
+
+def test_macos_ca_denied_without_gui_raises_permission_error(tmp_path):
+    """SSH 会话里 macOS 拒绝修改系统信任设置 —— 必须是可操作的中文提示。
+
+    原先这里抛的是 RuntimeError（信息只有系统原文），CLI 映射成退出码 1，
+    用户既不知道原因也不知道该去哪做。这类失败的本质是"需要人去那台
+    Mac 的图形界面点一下"，所以应当抛 PermissionError（CLI 据此退 4），
+    并在信息里直接给出该在哪运行什么。
+    """
+    comp, _platform, paths = _component(tmp_path, platform=_DeniedKeychainPlatform())
+    _write_ca(paths)
+    actions = comp.plan()
+    assert actions and actions[0].command[0] == "install-macos-ca"
+
+    with pytest.raises(PermissionError) as cm:
+        comp.apply(actions)
+    message = str(cm.value)
+    assert "图形界面" in message or "终端" in message, "必须说清该在哪做"
+    assert "devproxy trust" in message, "必须给出可执行的具体命令"
+    assert "no user interaction" in message, "系统原文要保留，便于查证"
+
+
+def test_cli_trust_exits_4_when_macos_denies_without_gui(tmp_path, monkeypatch):
+    """CLI 层：这类失败必须是退出码 4（需要人工交互），不是 1。
+
+    退出码 4 是给脚本/CI 看的信号："不是你命令写错了，是需要有人在
+    那台机器的图形界面里点一下"。给 1 会被当成程序故障。
+    """
+    platform = _DeniedKeychainPlatform()
+    paths, _cfg = _patch_cli(monkeypatch, tmp_path, platform)
+    _write_ca(paths)
+
+    result = CliRunner().invoke(app, ["trust", "--yes"])
+    assert result.exit_code == 4, result.stdout
+    # 提示走 err_console（stderr）—— 成功信息才走 stdout
+    shown = (result.stdout or "") + (result.stderr or "")
+    assert "终端" in shown or "图形界面" in shown
+    assert "devproxy trust" in shown
