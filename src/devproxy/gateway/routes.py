@@ -44,6 +44,10 @@ class Route:
     # 复用，down 时用它确认要杀的还是当初那个进程。None = 无法核实
     proc_start: str | None = None
     created_at: str = ""
+    # 声明来源：项目级配置文件（devproxy.toml）的**绝对路径**。
+    # None = 手工 `devproxy up` / `devproxy expose` 出来的路由 ——
+    # `devproxy sync --prune` 永远不碰它们（用户自己起的进程不该被文件清掉）。
+    source: str | None = None
 
     def to_dict(self) -> dict:
         d = {
@@ -61,6 +65,8 @@ class Route:
             d["proc_start"] = self.proc_start
         if self.created_at:
             d["created_at"] = self.created_at
+        if self.source is not None:
+            d["source"] = self.source
         return d
 
     @classmethod
@@ -75,6 +81,7 @@ class Route:
             pid=int(d["pid"]) if d.get("pid") is not None else None,
             proc_start=d.get("proc_start"),
             created_at=d.get("created_at", ""),
+            source=d.get("source"),
         )
 
 

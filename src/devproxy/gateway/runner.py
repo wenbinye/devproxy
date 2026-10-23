@@ -56,6 +56,13 @@ class UpRequest:
     port: int | None = None
     ready_timeout: int | None = None
     on_ready: Callable[[str, int], None] | None = None
+    # 子进程的工作目录。None = 继承 devproxy 进程的当前目录（老行为）。
+    # 项目级配置（devproxy.toml）在项目根目录，命令通常要在**那里**跑 ——
+    # 用户在子目录里执行 sync 时，应用的 cwd 仍必须是项目根目录。
+    cwd: Path | None = None
+    # 声明来源（devproxy.toml 的绝对路径）。落到路由表里，
+    # `devproxy sync --prune` 据此判断「这条路由是不是本文件声明的」。
+    source: str | None = None
 
 
 class _ChildHandle:
@@ -368,7 +375,7 @@ class UpRunner:
         参数签名暂时保留（cli/up.py 直接按位置/关键字调用），内部统一
         收敛成 UpRequest，后续新增选项不必再扩散到编排逻辑里。
         """
-        return self._execute(
+        return self.run_request(
             UpRequest(
                 name=name,
                 cmd=list(cmd),
@@ -377,6 +384,15 @@ class UpRunner:
                 on_ready=on_ready,
             )
         )
+
+    def run_request(self, req: UpRequest) -> int:
+        """按 UpRequest 执行一次 up —— 编排的唯一入口。
+
+        `run()` 只是把位置参数收敛成 UpRequest 后的薄封装；需要 cwd /
+        source 这类附加信息的调用方（devproxy sync 的后台工作进程）
+        直接构造 UpRequest 调这里。
+        """
+        return self._execute(req)
 
     def _execute(self, req: UpRequest) -> int:
         self._validate_request(req)
@@ -396,10 +412,10 @@ class UpRunner:
         registered = False
         watcher: threading.Thread | None = None
         try:
-            proc = self._spawn(req.cmd, port, child)
+            proc = self._spawn(req, port, child)
             self._wait_ready(proc, port, self._timeout(req))
 
-            route = self._make_route(req.name, port, req.cmd, child)
+            route = self._make_route(req, port, child)
             # 先置位再注册：信号可能在 mutate（validate+reload，秒级窗口）内部
             # 落下并抛 SystemExit，此时 finally 仍要尝试注销，不能留下指向死
             # 端口的路由；条件删除保证不会误删同名的新路由。
@@ -476,14 +492,18 @@ class UpRunner:
             raise UpError(f"端口 {explicit} 已被占用")
         return explicit
 
-    def _spawn(self, cmd: list[str], port: int, child: _ChildHandle) -> subprocess.Popen:
+    def _spawn(self, req: UpRequest, port: int, child: _ChildHandle) -> subprocess.Popen:
         env = dict(os.environ, PORT=str(port))
         try:
-            proc = subprocess.Popen(cmd, env=env, start_new_session=True)
+            # cwd=None 时与从前完全一致（继承当前工作目录）；
+            # 给了 cwd 就把子进程放进那个目录（项目根目录）。
+            proc = subprocess.Popen(
+                req.cmd, env=env, cwd=req.cwd, start_new_session=True
+            )
         except OSError as e:
             # 覆盖 FileNotFoundError / PermissionError / Exec format error：
             # 都映射成 UpError，CLI 才会给出格式化错误而不是裸 traceback。
-            raise UpError(f"无法启动命令 {cmd[0]!r}: {e}") from e
+            raise UpError(f"无法启动命令 {req.cmd[0]!r}: {e}") from e
         child.proc = proc
         child.pgid = proc.pid  # start_new_session=True → 子进程是进程组 leader
         child.start = proc_start_time(proc.pid)
@@ -505,21 +525,22 @@ class UpRunner:
         )
 
     def _make_route(
-        self, name: str, port: int, cmd: list[str], child: _ChildHandle
+        self, req: UpRequest, port: int, child: _ChildHandle
     ) -> Route:
         proc = child.proc
         if proc is None:  # pragma: no cover - _spawn 成功后才调用
             raise UpError("内部错误：子进程尚未启动")
         return Route(
-            name=name,
-            domain=domain_for(name, self.config.domain_suffix),
+            name=req.name,
+            domain=domain_for(req.name, self.config.domain_suffix),
             port=port,
             mode="up",
             upstream=f"127.0.0.1:{port}",
-            command=list(cmd),
+            command=list(req.cmd),
             pid=proc.pid,
             proc_start=child.start,
             created_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            source=req.source,
         )
 
     def _deregister(self, route: Route) -> None:
