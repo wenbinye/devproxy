@@ -35,6 +35,14 @@ service_unit_path / tail_service_log / ca_trusted / dns_route_installed         
 enable_linger / linger_enabled / resolved_active / dns_query / http_ok / nss_trusted  ← Plan 3 计划里没有
 ```
 
+> **口径更正（2026-10-23，真机首跑时发现）**：本处原写"17 个方法"，**实际是 18 个** ——
+> 上面的清单漏了 `privilege`（提权会话）与 `privilege_read`（特权只读）两个，
+> 它们在 `base.py` 的 `Platform` 协议里，但没被列进这段枚举。
+> 下面的 Ruling 要求的"全部 17 个"因此**实际是全部 18 个**；
+> 当年 `macos.py` 确实把 18 个都实现了（含 `privilege` / `privilege_read`），
+> 所以**这条 Ruling 的执行结果没有偏差**，只是当时的计数口径写错了。
+> 同批 fix wave 的实现者也独立发现了这一点（`base.py` 未被改动）。
+
 **Ruling:** Plan 3 Task 16 的 `macos.py` 必须实现**全部 17 个**方法，缺一个都会让组件在 macOS 上崩：
 - `enable_linger()` → macOS 无 systemd-linger，返回 `(0, "不适用")`
 - `linger_enabled()` → 返回 True（从而不会计划任何 linger 动作）
