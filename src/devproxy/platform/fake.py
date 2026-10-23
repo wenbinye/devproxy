@@ -10,6 +10,7 @@ copy 一律经过 `FakePlatform._sandbox_target()`，把 /etc、/usr/local/share
 from __future__ import annotations
 
 import os
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -57,6 +58,17 @@ class FakeElevated:
 
     def run(self, argv: list[str]) -> tuple[int, str]:
         self.platform.commands.append(list(argv))
+        if argv[:1] == ["rm"]:
+            # 模拟 `rm -f/-rf -- <path>`：卸载流程靠它删除 /etc 下的
+            # DNS drop-in 与系统信任库文件，假平台不模拟就永远删不掉。
+            for raw in argv[1:]:
+                if raw.startswith("-"):
+                    continue
+                target = self.platform._sandbox_target(Path(raw))
+                if target.is_dir() and not target.is_symlink():
+                    shutil.rmtree(target)
+                else:
+                    target.unlink(missing_ok=True)
         return 0, ""
 
     def write(self, path: Path, content: str) -> None:
@@ -263,6 +275,13 @@ class FakePlatform:
 
     def restart_service(self, name: str) -> None:
         self.active.add(name)
+
+    def remove_service(self, name: str) -> None:
+        """幂等地移除服务与单元文件，并像真实平台一样记录命令。"""
+        self.commands.append(["remove-service", name])
+        self.services.pop(name, None)
+        self.active.discard(name)
+        self.service_unit_path(name).unlink(missing_ok=True)
 
     def tail_service_log(self, name: str) -> None:
         pass

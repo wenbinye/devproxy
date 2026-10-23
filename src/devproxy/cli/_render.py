@@ -180,3 +180,52 @@ def _print_notes(notes: list[str]) -> None:
     """把迁移过程中的提示逐条打出来。"""
     for note in notes:
         console.print(f"  · {note}")
+
+
+def render_uninstall_plan(plan, *, dry_run: bool) -> None:
+    """打印卸载清单。dry-run 时明确标注"只是预览"。"""
+    if dry_run:
+        console.print("[bold]将要执行以下卸载步骤（预览，不会执行任何变更）：[/bold]")
+    else:
+        console.print("[bold]将要执行以下卸载步骤：[/bold]")
+    if plan.actions:
+        for index, action in enumerate(plan.actions, 1):
+            sudo = "（需要 sudo）" if action.privileged else ""
+            console.print(f"  {index}. {escape(action.description)}{sudo}")
+    else:
+        console.print("  （没有可执行的步骤）")
+    for note in plan.notes:
+        console.print(f"  [yellow]⚠ {escape(note)}[/yellow]")
+
+
+def print_uninstall_results(results) -> bool:
+    """逐条打印 ✔/✗；返回是否全部成功。"""
+    ok = True
+    for result in results:
+        mark = "✔" if result.ok else "✗"
+        line = f"{mark} {escape(result.description)}"
+        if result.detail:
+            line += f"：{escape(result.detail)}"
+        console.print(line)
+        if not result.ok:
+            ok = False
+    return ok
+
+
+def print_uninstall_kept(plan, *, dry_run: bool = False) -> None:
+    """打印"默认不动"的清单与迁移回滚提示。"""
+    if plan.kept:
+        heading = (
+            "以下内容将保留（不会删除）："
+            if dry_run
+            else "以下内容已保留（未删除）："
+        )
+        console.print(heading)
+        for item in plan.kept:
+            console.print(f"  · {escape(item)}")
+    if plan.migration_backup is not None:
+        path = escape(str(plan.migration_backup))
+        console.print(
+            f"原始 caddy.service 与 Caddyfile 在 {path}，"
+            f"可用 devproxy setup --rollback {path} 还原"
+        )

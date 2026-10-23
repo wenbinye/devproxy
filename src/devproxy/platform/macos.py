@@ -484,6 +484,25 @@ class MacOSPlatform:
         if code != 0:
             raise RuntimeError(f"launchctl kickstart {name} 失败: {msg}")
 
+    def remove_service(self, name: str) -> None:
+        """bootout 并删除 plist；服务没装过时静默成功（幂等）。
+
+        system scope（caddy）的 plist 在 /Library/LaunchDaemons，删除必须
+        走提权会话；user scope 在用户自己家目录，直接删。
+        """
+        _assert_may_mutate()
+        target = f"{self._domain(name)}/com.devproxy.{name}"
+        path = self.service_unit_path(name)
+        if self._is_system_scope(name):
+            # bootout 对不存在的服务返回非零 —— 幂等，不看返回码
+            self.privilege().run(["launchctl", "bootout", target])
+            code, msg = self.privilege().run(["rm", "-f", str(path)])
+            if code != 0:
+                raise RuntimeError(f"删除 {name} 的 LaunchDaemon 失败: {msg}")
+            return
+        _run(["launchctl", "bootout", target])
+        path.unlink(missing_ok=True)
+
     def tail_service_log(self, name: str) -> None:
         """流式跟随服务日志：继承终端 stdio（不捕获），Ctrl-C 自然传播。"""
         subprocess.run(["tail", "-f", str(self.log_path(name))])

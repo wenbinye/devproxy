@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
 import plistlib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -27,6 +30,53 @@ def nss_db_dir(home: Path | None = None) -> Path:
     """
     base = Path(home) if home is not None else Path.home()
     return base / ".pki" / "nssdb"
+
+
+def _pem_der_blocks(text: str) -> list[bytes]:
+    """从 PEM 文本里取出全部证书的 DER 字节。
+
+    只做 base64 解码，不做 X.509 解析 —— CA 信任/卸载的判据都是
+    "同一份字节"，解析证书结构反而会引入额外的失败点。
+    """
+    blocks: list[bytes] = []
+    buf: list[str] = []
+    inside = False
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.startswith("-----BEGIN CERTIFICATE"):
+            inside = True
+            buf = []
+            continue
+        if line.startswith("-----END CERTIFICATE"):
+            inside = False
+            try:
+                blocks.append(base64.b64decode("".join(buf), validate=False))
+            except (binascii.Error, ValueError):
+                pass
+            buf = []
+            continue
+        if inside:
+            buf.append(line)
+    return blocks
+
+
+def cert_fingerprint(der: bytes) -> str:
+    """证书指纹：DER 的 sha256（与 `openssl x509 -fingerprint -sha256` 同义）。"""
+    return hashlib.sha256(der).hexdigest().upper()
+
+
+def pem_fingerprints(text: str) -> set[str]:
+    """PEM 文本里全部证书的 SHA-256 指纹集合。"""
+    return {cert_fingerprint(der) for der in _pem_der_blocks(text)}
+
+
+def file_fingerprints(path: Path) -> set[str] | None:
+    """读文件并返回其中证书的指纹集合；读不了 / 不是 PEM 返回 None。"""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    return pem_fingerprints(text)
 
 
 # macOS 的对应物：CA 进系统钥匙串（Safari/Chrome 都认它），
@@ -94,7 +144,8 @@ class Action:
     """一条待执行动作。"""
 
     description: str
-    kind: str = "run"  # "run" | "write"
+    # run：执行 command；write：写 path/content；delete：删除 path
+    kind: str = "run"  # "run" | "write" | "delete"
     command: list[str] = field(default_factory=list)
     path: Path | None = None
     content: str = ""
@@ -150,6 +201,12 @@ class Platform(Protocol):
     def enable_service(self, name: str) -> None: ...
 
     def restart_service(self, name: str) -> None: ...
+
+    def remove_service(self, name: str) -> None:
+        """停止并移除服务单元（systemd unit / launchd plist）。
+
+        必须幂等：服务与单元都不存在时静默成功，不抛异常。
+        """
 
     def service_unit_path(self, name: str) -> Path: ...
 

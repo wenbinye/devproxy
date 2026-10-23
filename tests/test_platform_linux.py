@@ -1251,6 +1251,8 @@ def test_linux_platform_refuses_mutation_under_test(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="禁止"):
         p.restart_service("caddy")
     with pytest.raises(RuntimeError, match="禁止"):
+        p.remove_service("caddy")
+    with pytest.raises(RuntimeError, match="禁止"):
         p.enable_linger()
     with pytest.raises(RuntimeError, match="禁止"):
         p.privilege()

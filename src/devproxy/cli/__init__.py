@@ -36,6 +36,7 @@ from devproxy.cli import (  # noqa: E402,F401
     doctor,
     trust,
     logs,
+    uninstall,
 )
 
 

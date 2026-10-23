@@ -43,7 +43,10 @@ from devproxy.cli._render import fail_for_apply_errors
 from devproxy.cli._render import print_apply_results
 from devproxy.cli._render import print_noop_unhealthy
 from devproxy.cli._render import print_scope_notes
+from devproxy.cli._render import print_uninstall_kept
+from devproxy.cli._render import print_uninstall_results
 from devproxy.cli._render import render_plan
+from devproxy.cli._render import render_uninstall_plan
 from devproxy.cli._runtime import EXIT_DECLINED
 from devproxy.cli._runtime import EXIT_FAIL
 from devproxy.cli._runtime import EXIT_OK
@@ -68,3 +71,8 @@ from devproxy.gateway.runner import kill_pid_group  # noqa: F401
 from devproxy.lifecycle.migrate import default_dns_route  # noqa: F401
 from devproxy.lifecycle.setup import apply_plan  # noqa: F401
 from devproxy.lifecycle.setup import build_plan  # noqa: F401
+from devproxy.lifecycle.uninstall import StepResult  # noqa: F401
+from devproxy.lifecycle.uninstall import UninstallPlan  # noqa: F401
+from devproxy.lifecycle.uninstall import UninstallTargets  # noqa: F401
+from devproxy.lifecycle.uninstall import apply_plan as apply_uninstall_plan  # noqa: F401
+from devproxy.lifecycle.uninstall import build_plan as build_uninstall_plan  # noqa: F401

@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import base64
-import binascii
 import getpass
-import hashlib
 import ipaddress
 import os
 import re
@@ -20,7 +17,9 @@ from devproxy.platform.base import (
     SYSTEM_DNSMASQ_CONF,
     SYSTEM_TRUST_DIR,
     ElevatedSession,
+    file_fingerprints as _fingerprints_of_file,
     nss_db_dir,
+    pem_fingerprints as _pem_fingerprints,
 )
 
 # 系统信任库（活库）里可能存放 CA 的位置。
@@ -80,43 +79,6 @@ NSS_TRUSTED_COLUMN = 0
 _NSS_ROW_RE = re.compile(
     r"^(?P<name>.*?)[ ]+(?P<flags>[A-Za-z]*(?:,[A-Za-z]*){2})$"
 )
-
-
-def _pem_der_blocks(text: str) -> list[bytes]:
-    """从 PEM 文本里取出全部证书的 DER 字节。
-
-    只做 base64 解码，不做 X.509 解析 —— 判据是"同一份字节"，
-    解析证书结构反而会引入额外的失败点。
-    """
-    blocks: list[bytes] = []
-    buf: list[str] = []
-    inside = False
-    for raw in text.splitlines():
-        line = raw.strip()
-        if line.startswith("-----BEGIN CERTIFICATE"):
-            inside = True
-            buf = []
-            continue
-        if line.startswith("-----END CERTIFICATE"):
-            inside = False
-            try:
-                blocks.append(base64.b64decode("".join(buf), validate=False))
-            except (binascii.Error, ValueError):
-                pass
-            buf = []
-            continue
-        if inside:
-            buf.append(line)
-    return blocks
-
-
-def _cert_fingerprint(der: bytes) -> str:
-    """证书指纹：DER 的 sha256（与 `openssl x509 -fingerprint -sha256` 同义）。"""
-    return hashlib.sha256(der).hexdigest().upper()
-
-
-def _pem_fingerprints(text: str) -> set[str]:
-    return {_cert_fingerprint(der) for der in _pem_der_blocks(text)}
 
 
 def _store_candidates() -> list[Path]:
@@ -253,15 +215,6 @@ def _nss_db_state(nss: Path) -> bool | None:
     except OSError:
         return None
     return True
-
-
-def _fingerprints_of_file(path: Path) -> set[str] | None:
-    """读文件并返回其中证书的指纹集合；读不了 / 不是 PEM 返回 None。"""
-    try:
-        text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return None
-    return _pem_fingerprints(text)
 
 
 def _nss_entry_matches(
@@ -650,6 +603,23 @@ class LinuxPlatform:
         code, msg = _run(["systemctl", "--user", "restart", name])
         if code != 0:
             raise RuntimeError(f"systemctl restart {name} 失败: {msg}")
+
+    def remove_service(self, name: str) -> None:
+        """停止并删除 user unit；单元不存在是正常情况（幂等）。
+
+        `disable --now` 对不存在的单元返回非零，不能一律当失败 —— 但也
+        不能一律吞掉：命令失败后服务仍 active 才说明是真失败；单元文件
+        只是残留（服务并未运行）时仍应删掉。
+        """
+        _assert_may_mutate()
+        path = self.service_unit_path(name)
+        code, msg = _run(["systemctl", "--user", "disable", "--now", name])
+        if code != 0 and self.service_active(name):
+            raise RuntimeError(f"停止服务 {name} 失败: {msg}")
+        path.unlink(missing_ok=True)
+        code, msg = _run(["systemctl", "--user", "daemon-reload"])
+        if code != 0:
+            raise RuntimeError(f"移除 {name} 后 systemctl daemon-reload 失败: {msg}")
 
     def tail_service_log(self, name: str) -> None:
         """流式跟随服务日志：继承终端 stdio（不捕获），Ctrl-C 自然传播。"""

@@ -61,7 +61,7 @@ def test_macos_platform_name_is_mac():
 
 
 def test_platform_implements_whole_protocol():
-    """协议一共 18 个方法 —— 少一个都是运行期 AttributeError，不是导入期。"""
+    """协议一共 19 个方法 —— 少一个都是运行期 AttributeError，不是导入期。"""
     p = MacOSPlatform()
     assert isinstance(p, Platform)
     assert isinstance(p.privilege.__self__, MacOSPlatform)
@@ -73,6 +73,7 @@ def test_platform_implements_whole_protocol():
         "install_service",
         "enable_service",
         "restart_service",
+        "remove_service",
         "service_unit_path",
         "tail_service_log",
         "enable_linger",
@@ -664,6 +665,8 @@ def test_macos_platform_refuses_mutation_under_test(tmp_path, monkeypatch):
         p.enable_service("caddy")
     with pytest.raises(RuntimeError, match="禁止"):
         p.restart_service("caddy")
+    with pytest.raises(RuntimeError, match="禁止"):
+        p.remove_service("caddy")
     with pytest.raises(RuntimeError, match="禁止"):
         p.privilege()
 
