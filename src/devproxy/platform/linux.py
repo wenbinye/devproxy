@@ -218,9 +218,18 @@ def _nss_repair_flags(flags: str) -> str:
     return ",".join(["C", parts[1], parts[2]])
 
 
-def _run(argv: list[str]) -> tuple[int, str]:
+def _run(argv: list[str], timeout: float | None = None) -> tuple[int, str]:
+    """跑一个 argv。timeout 是**防挂死**，不是性能优化。
+
+    没有超时的子进程调用会被卡在交互提示上的命令永久拖住，并**无限往
+    stdout 里写** —— 实测 `certutil -N` 在密码提示上死循环，把 200GB
+    写进了重定向文件、把 /home 撑到 100%。返回码 124 沿用 coreutils timeout
+    的约定，调用方按"命令失败"处理即可。
+    """
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True)
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return 124, f"命令超时（{timeout}s）: {argv[0]}"
     except OSError as e:
         # 命令不存在（FileNotFoundError）、可执行位缺失（PermissionError）等
         # 都归一为“命令不可用”，让调用方按返回码处理而不是 traceback。
@@ -457,7 +466,8 @@ class LinuxPlatform:
         return self._elevated
 
     def run(self, argv: list[str]) -> tuple[int, str]:
-        return _run(argv)
+        # 普通命令一律带超时；sudo 那条路径不加 —— 它可能要等用户输密码。
+        return _run(argv, timeout=60.0)
 
     def privilege_read(self, path: Path) -> str | None:
         """非交互地读特权文件（`sudo -n`）。读不到返回 None。

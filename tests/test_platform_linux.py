@@ -1256,3 +1256,41 @@ def test_linux_platform_read_only_calls_still_work_under_test(tmp_path, monkeypa
     )
     assert p.binary_version(tmp_path / "absent") == ""
     assert p.linger_enabled() in (True, False)
+
+
+# -- 子进程超时：防挂死，不是性能优化 -------------------------------------
+
+
+def test_run_returns_timeout_code_instead_of_hanging(monkeypatch):
+    """卡在交互提示上的命令必须被超时打断。
+
+    真机事故（2026-10-23）：`certutil -N --empty-password` 在某些情形下
+    不认这个开关，改为反复打印 "Invalid password. Try again." /
+    "Error opening input terminal for read"，两小时写满两个 200GB 的
+    重定向文件，把 /home 撑到 100%。没有超时的子进程调用就是**无限写入**。
+    """
+    from devproxy.platform import linux as linux_mod
+
+    def boom(*a, **k):
+        raise subprocess.TimeoutExpired(cmd=a[0], timeout=k.get("timeout"))
+
+    monkeypatch.setattr(linux_mod.subprocess, "run", boom)
+    code, msg = linux_mod._run(["certutil", "-N"], timeout=1.0)
+    assert code == 124, "沿用 coreutils timeout 的约定"
+    assert "超时" in msg
+
+
+def test_platform_run_passes_a_timeout(monkeypatch):
+    """普通命令调用必须显式带上超时 —— 漏传就等于回到"无限等待"。"""
+    from devproxy.platform import linux as linux_mod
+
+    seen = {}
+
+    def fake(argv, **kw):
+        seen.update(kw)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(linux_mod.subprocess, "run", fake)
+    code, _ = linux_mod.LinuxPlatform().run(["true"])
+    assert code == 0
+    assert seen.get("timeout"), "LinuxPlatform.run 必须传 timeout"

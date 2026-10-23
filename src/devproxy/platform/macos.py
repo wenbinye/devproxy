@@ -251,7 +251,8 @@ class MacOSPlatform:
     # -- 只读探测 ------------------------------------------------------
 
     def run(self, argv: list[str]) -> tuple[int, str]:
-        return _run(argv)
+        # 与 Linux 对齐：普通命令带超时，sudo 那条等用户输密码、不设。
+        return _run(argv, timeout=60.0)
 
     def binary_version(self, binary: Path) -> str:
         if not binary.exists():
