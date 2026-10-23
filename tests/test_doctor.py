@@ -63,9 +63,9 @@ def _patch_cli(monkeypatch, tmp_path, components):
     paths.ensure_files()
     cfg = Config(storage=str(paths.data_dir))
     monkeypatch.setattr(
-        "devproxy.cli.build_context", lambda *a, **k: (paths, cfg, None, None)
+        "devproxy.cli._shared.build_context", lambda *a, **k: (paths, cfg, None, None)
     )
-    monkeypatch.setattr("devproxy.cli._components", lambda *a, **k: components)
+    monkeypatch.setattr("devproxy.cli._shared._components", lambda *a, **k: components)
     return paths, cfg
 
 
@@ -121,7 +121,7 @@ def _patch_cli_with_config(monkeypatch, tmp_path, cfg):
     paths = Paths(tmp_path / "config", tmp_path / "state", tmp_path / "data")
     paths.ensure_files()
     monkeypatch.setattr(
-        "devproxy.cli.build_context", lambda *a, **k: (paths, cfg, None, None)
+        "devproxy.cli._shared.build_context", lambda *a, **k: (paths, cfg, None, None)
     )
     return paths
 
@@ -141,7 +141,7 @@ def test_cli_doctor_uses_config_dns_backend(tmp_path, monkeypatch):
         seen["backend"] = dns_backend
         return [FakeCliComponent("dns", True)]
 
-    monkeypatch.setattr("devproxy.cli._components", fake_components)
+    monkeypatch.setattr("devproxy.cli._shared._components", fake_components)
     result = CliRunner().invoke(app, ["doctor"])
     assert result.exit_code == 0, result.stdout
     assert seen["backend"] == "system"
@@ -161,7 +161,7 @@ def test_cli_doctor_accepts_dns_backend_override(tmp_path, monkeypatch):
         seen["backend"] = dns_backend
         return [FakeCliComponent("dns", True)]
 
-    monkeypatch.setattr("devproxy.cli._components", fake_components)
+    monkeypatch.setattr("devproxy.cli._shared._components", fake_components)
     result = CliRunner().invoke(app, ["doctor", "--dns-backend", "resolved"])
     assert result.exit_code == 0, result.stdout
     assert seen["backend"] == "resolved"
@@ -229,7 +229,7 @@ def test_cli_doctor_reports_wildcard_and_exits_3(tmp_path, monkeypatch):
         "*.test {\n\ttls {\n\t\ton_demand\n\t}\n}\n", encoding="utf-8"
     )
     monkeypatch.setattr(
-        "devproxy.cli._components", lambda *a, **k: [FakeCliComponent("a", True)]
+        "devproxy.cli._shared._components", lambda *a, **k: [FakeCliComponent("a", True)]
     )
     result = CliRunner().invoke(app, ["doctor"])
     assert result.exit_code == 3, result.stdout
@@ -247,7 +247,7 @@ def test_cli_doctor_ok_when_no_wildcard(tmp_path, monkeypatch):
     paths = _patch_cli_with_config(monkeypatch, tmp_path, cfg)
     paths.sites_caddy.write_text("localhost {\n\ttls internal\n}\n", encoding="utf-8")
     monkeypatch.setattr(
-        "devproxy.cli._components", lambda *a, **k: [FakeCliComponent("a", True)]
+        "devproxy.cli._shared._components", lambda *a, **k: [FakeCliComponent("a", True)]
     )
     result = CliRunner().invoke(app, ["doctor"])
     assert result.exit_code == 0, result.stdout

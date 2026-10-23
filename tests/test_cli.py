@@ -5,7 +5,8 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from devproxy.cli import DevProxyGroup, app
+from devproxy.cli import app
+from devproxy.cli._shared import DevProxyGroup
 from devproxy.core.config import Config, ConfigError
 from devproxy.core.paths import Paths
 from devproxy.gateway.routes import Route, RouteTableError
@@ -60,7 +61,7 @@ def _patch_ctx(monkeypatch, tmp_path, admin_alive=True):
     store = RouteStore(paths, cfg, FakeCaddy())
     admin = FakeAdmin(alive=admin_alive)
     monkeypatch.setattr(
-        "devproxy.cli.build_context", lambda *a, **k: (paths, cfg, store, admin)
+        "devproxy.cli._shared.build_context", lambda *a, **k: (paths, cfg, store, admin)
     )
     return paths, cfg, store
 
@@ -98,7 +99,7 @@ def test_separator_is_split_and_passed_through(env, monkeypatch):
         captured["port"] = port
         return 0
 
-    monkeypatch.setattr("devproxy.cli.UpRunner.run", fake_run)
+    monkeypatch.setattr("devproxy.cli._shared.UpRunner.run", fake_run)
     res = CliRunner().invoke(
         app, ["up", "codeup", "--port", "8080", "--", "npx", "vite", "--port", "3000"]
     )
@@ -155,7 +156,7 @@ def test_down_kills_leftover_process_group(env, monkeypatch):
     def fake_kill(pid, proc_start=None):
         killed.append((pid, proc_start))
 
-    monkeypatch.setattr("devproxy.cli.kill_pid_group", fake_kill)
+    monkeypatch.setattr("devproxy.cli._shared.kill_pid_group", fake_kill)
     _seed_route(env / "state", "codeup", 42133, mode="up")
     p = env / "state" / "routes.json"
     data = json.loads(p.read_text())
@@ -195,7 +196,7 @@ def test_config_marks_effective_storage_and_labels_default_dir(env, monkeypatch)
     cfg = replace(cfg, storage=str(other))
     store = RouteStore(paths, cfg, FakeCaddy())
     monkeypatch.setattr(
-        "devproxy.cli.build_context", lambda *a, **k: (paths, cfg, store, FakeAdmin())
+        "devproxy.cli._shared.build_context", lambda *a, **k: (paths, cfg, store, FakeAdmin())
     )
     res = CliRunner().invoke(app, ["config"])
     assert res.exit_code == 0, res.output
@@ -237,7 +238,7 @@ def test_expose_does_not_print_trust_hint_when_ca_trusted(env, monkeypatch):
     fake = FakePlatform()
     fake.trusted.add(ca)
     fake.nss.add(ca)
-    monkeypatch.setattr("devproxy.cli._platform", lambda: fake)
+    monkeypatch.setattr("devproxy.cli._shared._platform", lambda: fake)
     res = CliRunner().invoke(app, ["expose", "legacy", "--port", "3000"])
     assert res.exit_code == 0, res.output
     assert "devproxy trust" not in res.output
@@ -260,7 +261,7 @@ def test_up_prints_trust_hint_when_ca_not_trusted(env, monkeypatch):
             on_ready("codeup.test", 8080)
         return 0
 
-    monkeypatch.setattr("devproxy.cli.UpRunner.run", fake_run)
+    monkeypatch.setattr("devproxy.cli._shared.UpRunner.run", fake_run)
     res = CliRunner().invoke(app, ["up", "codeup", "--", "sleep", "1"])
     assert res.exit_code == 0, res.output
     assert "devproxy trust" in res.output
@@ -383,7 +384,7 @@ def test_cli_never_builds_the_real_platform(env, monkeypatch, tmp_path):
         raise AssertionError("测试里不允许构造真实平台")
 
     monkeypatch.setattr(linux_mod, "LinuxPlatform", boom)
-    monkeypatch.setattr("devproxy.cli._components", lambda *a, **k: [])
+    monkeypatch.setattr("devproxy.cli._shared._components", lambda *a, **k: [])
     res = CliRunner().invoke(app, ["setup", "--yes"])
     assert res.exit_code == 0, res.output
 
@@ -393,13 +394,13 @@ def _fake_setup_platform(monkeypatch, tmp_path, patch_dns_route=True):
     from devproxy.platform.fake import FakePlatform
 
     platform = FakePlatform()
-    monkeypatch.setattr("devproxy.cli._platform", lambda: platform)
+    monkeypatch.setattr("devproxy.cli._shared._platform", lambda: platform)
     # 不装配任何组件：迁移本身与组件流程无关，测试只盯迁移与回滚
-    monkeypatch.setattr("devproxy.cli._components", lambda *a, **k: [])
-    monkeypatch.setattr("devproxy.cli.DNSMASQ_CONF", tmp_path / "dnsmasq.conf")
+    monkeypatch.setattr("devproxy.cli._shared._components", lambda *a, **k: [])
+    monkeypatch.setattr("devproxy.cli._shared.DNSMASQ_CONF", tmp_path / "dnsmasq.conf")
     if patch_dns_route:
         monkeypatch.setattr(
-            "devproxy.cli.default_dns_route", lambda *a, **k: tmp_path / "resolved.conf"
+            "devproxy.cli._shared.default_dns_route", lambda *a, **k: tmp_path / "resolved.conf"
         )
     return platform
 
@@ -591,7 +592,7 @@ def test_build_context_says_so_when_stored_storage_overrides_config(env, capsys)
 
     用户改了 config.toml 却被无声忽略，是最难查的一类问题。
     """
-    from devproxy.cli import build_context
+    from devproxy.cli._shared import build_context
 
     paths = _write_storage_pair(env, "/tmp/from-config-toml", "/tmp/from-legacy")
     _paths, config, _store, _admin = build_context()
@@ -606,7 +607,7 @@ def test_build_context_says_so_when_stored_storage_overrides_config(env, capsys)
 
 def test_build_context_quiet_when_storage_agrees(env, capsys):
     """两边一致时不啰嗦。"""
-    from devproxy.cli import build_context
+    from devproxy.cli._shared import build_context
 
     _write_storage_pair(env, "/tmp/same", "/tmp/same")
     _paths, config, _store, _admin = build_context()
@@ -616,7 +617,7 @@ def test_build_context_quiet_when_storage_agrees(env, capsys):
 
 def test_cli_setup_reports_the_storage_override(env, monkeypatch, tmp_path):
     """CLI 路径上也要说出来 —— 用户看到的是终端输出，不是源码。"""
-    from devproxy.cli import build_context
+    from devproxy.cli._shared import build_context
 
     _write_storage_pair(env, "/tmp/from-config-toml", "/tmp/from-legacy")
     res = CliRunner().invoke(app, ["config"])
@@ -634,7 +635,7 @@ def test_setup_example_command_actually_uses_port():
     `python3 -m http.server` 不读 PORT（永远绑 8000）：照抄示例的用户会
     等满 60 秒后看到「就绪超时」。示例必须是跑得通的那种写法。
     """
-    from devproxy.cli import UP_EXAMPLE
+    from devproxy.cli._shared import UP_EXAMPLE
 
     assert "sh -c" in UP_EXAMPLE, "示例必须用 sh -c 把 $PORT 推迟展开"
     assert "$PORT" in UP_EXAMPLE, "示例必须真的把 PORT 交给应用"
@@ -642,7 +643,7 @@ def test_setup_example_command_actually_uses_port():
 
 def test_setup_prints_the_working_example(env, monkeypatch):
     """终端上打出来的示例必须是同一个能跑通的写法。"""
-    from devproxy.cli import UP_EXAMPLE
+    from devproxy.cli._shared import UP_EXAMPLE
     from devproxy.platform.base import Action, Status
     from devproxy.lifecycle.setup import ComponentReport, SetupPlan
 
@@ -651,12 +652,12 @@ def test_setup_prints_the_working_example(env, monkeypatch):
         status=Status(ok=True, detail="已就绪"),
         actions=[Action(description="noop", kind="run", command=["noop"])],
     )
-    monkeypatch.setattr("devproxy.cli._components", lambda *a, **k: [])
+    monkeypatch.setattr("devproxy.cli._shared._components", lambda *a, **k: [])
     monkeypatch.setattr(
-        "devproxy.cli.build_plan", lambda comps: SetupPlan(reports=[report])
+        "devproxy.cli._shared.build_plan", lambda comps: SetupPlan(reports=[report])
     )
     monkeypatch.setattr(
-        "devproxy.cli.apply_plan",
+        "devproxy.cli._shared.apply_plan",
         lambda plan: [("caddy", Status(ok=True, detail="已就绪"))],
     )
     res = CliRunner().invoke(app, ["setup", "--yes"])

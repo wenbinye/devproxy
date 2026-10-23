@@ -868,15 +868,15 @@ def _patch_cli(monkeypatch, tmp_path, platform):
     paths.ensure_files()
     cfg = Config(storage=str(paths.data_dir))
     monkeypatch.setattr(
-        "devproxy.cli.build_context", lambda *a, **k: (paths, cfg, None, None)
+        "devproxy.cli._shared.build_context", lambda *a, **k: (paths, cfg, None, None)
     )
-    monkeypatch.setattr("devproxy.cli._platform", lambda: platform)
+    monkeypatch.setattr("devproxy.cli._shared._platform", lambda: platform)
     return paths, cfg
 
 
 def _patch_cert_component(monkeypatch, tmp_path):
     monkeypatch.setattr(
-        "devproxy.cli.CertComponent",
+        "devproxy.cli._shared.CertComponent",
         lambda p, paths_, cfg_: CertComponent(
             p,
             paths_,

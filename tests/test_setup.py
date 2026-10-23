@@ -177,12 +177,12 @@ def _patch_cli(monkeypatch, tmp_path, components):
     paths.ensure_files()
     cfg = Config(storage=str(paths.data_dir))
     monkeypatch.setattr(
-        "devproxy.cli.build_context", lambda *a, **k: (paths, cfg, None, None)
+        "devproxy.cli._shared.build_context", lambda *a, **k: (paths, cfg, None, None)
     )
-    monkeypatch.setattr("devproxy.cli._components", lambda *a, **k: components)
+    monkeypatch.setattr("devproxy.cli._shared._components", lambda *a, **k: components)
     # 平台也必须换成假的：setup 的迁移检测会去看真实单元目录，
     # 迁移一旦跑起来就会改写用户机器上的 caddy.service
-    monkeypatch.setattr("devproxy.cli._platform", lambda: FakePlatform())
+    monkeypatch.setattr("devproxy.cli._shared._platform", lambda: FakePlatform())
     return paths, cfg
 
 
@@ -282,7 +282,7 @@ def test_cli_setup_domain_suffix_override(tmp_path, monkeypatch):
         return [FakeCliComponent("caddy")]
 
     _patch_cli(monkeypatch, tmp_path, [])
-    monkeypatch.setattr("devproxy.cli._components", fake_components)
+    monkeypatch.setattr("devproxy.cli._shared._components", fake_components)
     result = CliRunner().invoke(
         app, ["setup", "--domain-suffix", "local", "--dns-backend", "resolved"]
     )
@@ -371,10 +371,10 @@ def test_cli_setup_asks_for_confirmation_interactively(tmp_path, monkeypatch):
         FakeCliComponent("caddy", Status(ok=False, detail="缺"), [Action(description="写文件")])
     ]
     _patch_cli(monkeypatch, tmp_path, comps)
-    monkeypatch.setattr("devproxy.cli._interactive", lambda: True)
+    monkeypatch.setattr("devproxy.cli._shared._interactive", lambda: True)
     asked = []
     monkeypatch.setattr(
-        "devproxy.cli.typer.confirm",
+        "devproxy.cli._shared.typer.confirm",
         lambda prompt, default=True: asked.append(prompt) or True,
     )
     result = CliRunner().invoke(app, ["setup"])
@@ -396,8 +396,8 @@ def test_cli_setup_aborts_when_user_declines(tmp_path, monkeypatch):
         FakeCliComponent("caddy", Status(ok=False, detail="缺"), [Action(description="写文件")])
     ]
     _patch_cli(monkeypatch, tmp_path, comps)
-    monkeypatch.setattr("devproxy.cli._interactive", lambda: True)
-    monkeypatch.setattr("devproxy.cli.typer.confirm", lambda *a, **k: False)
+    monkeypatch.setattr("devproxy.cli._shared._interactive", lambda: True)
+    monkeypatch.setattr("devproxy.cli._shared.typer.confirm", lambda *a, **k: False)
     result = CliRunner().invoke(app, ["setup"])
     assert result.exit_code == 4, result.stdout
     assert comps[0].applied is None

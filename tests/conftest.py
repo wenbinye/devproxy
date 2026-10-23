@@ -43,5 +43,5 @@ def isolated_cli_platform(monkeypatch):
     from devproxy.platform.fake import FakePlatform
 
     platform = FakePlatform()
-    monkeypatch.setattr("devproxy.cli._platform", lambda: platform)
+    monkeypatch.setattr("devproxy.cli._shared._platform", lambda: platform)
     return platform
