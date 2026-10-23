@@ -1214,7 +1214,11 @@ def test_linux_linger_enabled_reads_value(monkeypatch):
     assert LinuxPlatform().linger_enabled() is True
 
 
-def test_linux_linger_enabled_false(monkeypatch):
+def test_linux_linger_enabled_false(tmp_path, monkeypatch):
+    # 必须把 systemd 运行目录也指到临时目录：`linger_status()` 在没有
+    # /run/systemd/system 的宿主（容器、以及跑着 Linux 测试的 macOS）上
+    # 会直接判"linger 不适用"返回 True，那样这条用例测的就不是解析分支了。
+    monkeypatch.setattr(linux_mod, "SYSTEMD_RUN_DIR", tmp_path)
     monkeypatch.setattr(linux_mod, "_run", lambda argv, **kwargs: (0, "no"))
     assert LinuxPlatform().linger_enabled() is False
 

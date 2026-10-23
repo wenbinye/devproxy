@@ -136,16 +136,19 @@ class FakePlatform:
         target = _norm(path)
         if not target.is_absolute():
             raise AssertionError(f"假平台的提权路径必须是绝对路径: {path}")
-        try:
-            target.relative_to(self.sandbox)
-            return target
-        except ValueError:
-            pass
-        try:
-            target.relative_to(_norm(tempfile.gettempdir()))
-            return target
-        except ValueError:
-            pass
+        # 必须按 ``resolve()`` 后的形态比较：macOS 上 pytest 的 tmp_path 是
+        # `/private/var/...`，而 tempfile.gettempdir() 给的是 `/var/...`
+        # （`/var` 是指向 `/private/var` 的符号链接）。不解析就把测试自己的
+        # 临时目录误判成"系统路径"，于是写进沙箱、用例读不回内容 —— 在
+        # macOS 上整片组件测试因此变红，而 Linux 上正常。
+        resolved = target.resolve()
+        allowed_roots = (self.sandbox.resolve(), Path(tempfile.gettempdir()).resolve())
+        for root in allowed_roots:
+            try:
+                resolved.relative_to(root)
+                return target
+            except ValueError:
+                continue
         return self.sandbox / target.relative_to("/")
 
     def privilege(self) -> ElevatedSession:
