@@ -131,6 +131,9 @@ devproxy expose legacy --port 3000
 devproxy ls                 # 路由清单（含可达性）
 devproxy down codeup        # 注销路由（子进程也一并收掉）
 devproxy logs caddy         # 跟随日志（Ctrl-C 退出，不会自己结束）
+
+# 项目里有一份 devproxy.toml（提交进仓库、全组共享）时：
+devproxy sync               # 按声明同步路由
 ```
 
 ### CA 根证书是在第一条路由注册之后才存在的
@@ -164,6 +167,7 @@ Caddy 的内部 CA **在第一次加载 `tls internal` 站点时**才生成 —�
 | `devproxy config` | 显示当前生效配置与渲染出的路由片段 |
 | `devproxy selftest` | 隔离 Caddy 实例端到端自检 |
 | `devproxy uninstall` | 卸载：停服务、移除单元、DNS 路由与（可选）CA。默认保守保留你的配置、个人站点、Caddy 存储与备份 |
+| `devproxy sync` | 按项目根目录的 `devproxy.toml` 同步路由声明（全组共享一份） |
 
 常用选项：
 
@@ -180,14 +184,16 @@ Caddy 的内部 CA **在第一次加载 `tls internal` 站点时**才生成 —�
 | `--port N` | `up` | 显式指定端口（默认自动分配）；被占用时直接失败 |
 | `--port N` | `expose` | **必填**：上游已在监听的端口 |
 | `--ready-timeout S` | `up` | 就绪等待秒数（默认取 `config.toml` 的 `ready_timeout`） |
+| `--file <路径>` | `sync` | 显式指定 `devproxy.toml`（默认从当前目录逐级向上查找） |
+| `--prune` | `sync` | 移除本文件里已删掉的路由（只动本文件声明过的；非交互时须加 `--yes`） |
 
 ### 退出码
 
 | 码 | 含义 |
 |---|---|
 | 0 | 成功 |
-| 1 | 运行失败（子进程退出、reload 失败、路由表损坏、迁移被拒绝……） |
-| 2 | 参数错误（非法路由名 / 非法端口、缺少 `--`、未知日志服务名、非法 `dns_backend`、非法 `--domain-suffix`） |
+| 1 | 运行失败（子进程退出、reload 失败、路由表损坏、迁移被拒绝、**`sync` 发现路由与声明冲突**……） |
+| 2 | 参数错误（非法路由名 / 非法端口、缺少 `--`、未知日志服务名、非法 `dns_backend`、非法 `--domain-suffix`、**`sync` 的配置文件缺失或非法**） |
 | 3 | 前置条件不满足（Caddy 未运行、主 Caddyfile 不存在、`doctor` 体检不通过） |
 | 4 | 需要提权但当前非交互（未加 `--yes`），**或用户在确认提示上选择了「否」** |
 
@@ -497,9 +503,107 @@ devproxy up <name> -- <原来的启动命令>
 
 ---
 
+## 项目级配置 `devproxy.toml`
+
+`config.toml` 是**你机器的**配置（存 `~/.config/devproxy/`，不进版本库）。
+`devproxy.toml` 是**项目的**配置 —— 放在项目仓库根目录、**提交进版本库**，
+全组每个人 clone 下来跑一次 `devproxy sync`，就得到同一套路由。
+
+```toml
+# devproxy.toml —— 项目根目录，提交进仓库
+
+[[routes]]
+name = "web"
+command = ["npm", "run", "dev"]
+
+[[routes]]
+name = "api"
+command = ["sh", "-c", "uv run uvicorn app:app --port $PORT"]
+
+[[routes]]
+name = "legacy"
+mode = "expose"     # 不起进程，给已经在跑的服务开域名
+port = 3000
+```
+
+### 字段
+
+| 键 | 必填 | 说明 |
+|---|---|---|
+| `name` | 是 | 路由名，须是单标签 `[a-z0-9-]`（与 `devproxy up <name>` 同一个规则） |
+| `command` | `mode="up"` 时是 | **argv 数组**，不是 shell 字符串 |
+| `mode` | 否 | `"up"`（默认，起进程）或 `"expose"`（只注册路由） |
+| `port` | `mode="expose"` 时是 | `expose` 模式：上游已在监听的端口。`up` 模式：写了就固定端口，不写就自动分配 |
+| `ready_timeout` | 否 | 覆盖该条路由的就绪等待秒数 |
+
+### ⚠️ `command` 不过 shell，`$PORT` 不会展开
+
+`command` 是 argv 数组，直接交给 `subprocess.Popen` 执行，**中间没有 shell**。
+所以 `["npx", "vite", "--port", "$PORT"]` 里的 `$PORT` 是**字面量**，不是端口号 ——
+应用会收到一个叫 `$PORT` 的参数而报错。
+
+要端口参数的应用，用 `sh -c` 包一层（和上面「两种应用，两种写法」一节是同一件事）：
+
+```toml
+command = ["sh", "-c", "npx vite --port $PORT --host 127.0.0.1"]
+```
+
+`sh` 在子进程启动后才展开 `$PORT`，那时 devproxy 已经把端口写进环境变量了。
+
+### 怎么用
+
+```bash
+devproxy sync                # 从当前目录逐级向上找 devproxy.toml 并同步
+devproxy sync --file <路径>  # 显式指定
+devproxy sync --prune        # 顺带移除本文件里已删掉的路由
+```
+
+**文件发现**：从当前工作目录逐级向上找 `devproxy.toml`，找到第一个就用
+（一路找到文件系统根）。所以在子目录里执行也能找到项目根的那份。
+
+**子进程的工作目录**是 `devproxy.toml` 所在目录，不是你当前所在的子目录 ——
+`npm run dev` 这类相对路径的命令才有意义。
+
+### 同步语义
+
+| 情况 | 动作 |
+|---|---|
+| 路由表里没有这条 | **创建**：`up` 模式起进程并注册，`expose` 模式只注册路由 |
+| 路由表里有，声明与现状一致 | **跳过**（幂等，连跑两次第二次不动任何东西） |
+| 路由表里有，但命令/端口变了 | **报告冲突，不动手**。打印现状、期望与修复命令，**绝不自动杀进程重启** |
+| 路由表里有，但文件里已删掉这条 | 默认**不动**；`--prune` 才移除 |
+
+**`--prune` 只移除"由本文件声明过"的路由** —— 手工 `devproxy up` 出来的路由
+（路由表里没有 `source` 标记的）永远不会被它删掉。`--prune` 会按 `down` 的语义
+一并收掉子进程，所以非交互环境里必须加 `--yes`（否则退出码 4）。
+
+**冲突时退出码是 1** —— 配置漂移要让 CI 看得见。部分路由失败时会继续处理其余路由，
+最后统一退出码 1，并在输出里列清哪些成功、哪些失败。
+
+### 后台进程与日志
+
+`up` 模式在 sync 里启动的应用是**后台进程**（sync 退出后应用继续跑，独立会话），
+标准输出与错误重定向到 `~/.local/state/devproxy/logs/routes/<name>.log`。
+想看某个应用的输出：
+
+```bash
+tail -f ~/.local/state/devproxy/logs/routes/web.log
+```
+
+### 与 `up` / `expose` 的关系
+
+`sync` 就是批量版的 `up` + `expose`。两者共用同一套路由表与事务写入 ——
+`sync` 建的路由和手工 `up` 的路由没有区别，`devproxy ls` 一样能列出来，
+`devproxy down <name>` 一样能注销。
+
+---
+
 ## 目录与文件
 
 ```
+项目根目录/
+└── devproxy.toml     # 项目级路由声明（可选，提交进仓库，全组共享）
+
 ~/.config/devproxy/
 ├── config.toml      # 你的配置（可选，工具不生成）
 ├── Caddyfile        # 工具生成的主配置：全局块 + 两个 import
@@ -514,6 +618,7 @@ devproxy up <name> -- <原来的启动命令>
 ├── dns-route.json       # 上次写入的 DNS 路由内容哈希
 ├── backups/             # 备份目录（每次迁移一个时间戳子目录）
 └── logs/                # macOS 上的服务日志落点
+    └── routes/          # sync 起的后台应用的日志（<name>.log）
 
 ~/.local/share/caddy/    # Caddy 存储：CA 根证书与已签发证书
 ```
