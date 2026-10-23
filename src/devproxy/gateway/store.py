@@ -10,7 +10,7 @@ import fcntl
 import os
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Callable, Iterator
+from typing import Callable, Iterator, NoReturn
 
 from devproxy.core.config import Config
 from devproxy.core.paths import Paths
@@ -53,7 +53,13 @@ class RouteStore:
     def get(self, name: str) -> Route | None:
         return next((r for r in self.list() if r.name == name), None)
 
-    def mutate(self, fn: Callable[[RouteTable], None]) -> list[Route]:
+    def mutate(self, fn: Callable[[RouteTable], None]) -> None:
+        """在 flock 内完成「改表 → 渲染 → 校验 → 落盘 → reload」的整个事务。
+
+        校验通过后，任何一步失败（包括第二次 atomic_write 与 reload）都必须
+        把两份文件恢复到事务开始前的状态 —— 否则 routes.json 与 routes.caddy
+        会永久不一致，Caddy 按旧文件反代到已经死掉的端口。
+        """
         paths = self.paths
         paths.ensure_files()
         with file_lock(paths.lock_path):
@@ -77,18 +83,35 @@ class RouteStore:
                 if not ok:
                     raise RouteStoreError(f"Caddy 配置校验失败，未做任何修改：\n{msg}")
 
-                save_table(paths.routes_json, table)
-                atomic_write(paths.routes_caddy, rendered)
+                try:
+                    save_table(paths.routes_json, table)
+                    atomic_write(paths.routes_caddy, rendered)
 
-                ok, msg = self.caddy.reload()
-                if not ok:
-                    self._restore(old_json, old_caddy)
-                    raise RouteStoreError(f"Caddy reload 失败，已回滚路由表：\n{msg}")
-                return table.routes
+                    ok, msg = self.caddy.reload()
+                    if not ok:
+                        raise RouteStoreError(
+                            f"Caddy reload 失败，已回滚路由表：\n{msg}"
+                        )
+                except Exception as e:
+                    self._rollback(old_json, old_caddy, e)
             finally:
                 # 校验用的临时文件必须清掉 —— 留着它们只是噪音，
                 # 还会让人以为线上有两份配置。
                 self._cleanup_temp()
+
+    def _rollback(
+        self, old_json: str | None, old_caddy: str | None, cause: Exception
+    ) -> NoReturn:
+        """落盘事务失败：恢复两份文件，并把原因统一包装成 RouteStoreError。"""
+        try:
+            self._restore(old_json, old_caddy)
+        except Exception as restore_error:
+            raise RouteStoreError(
+                f"写入路由表失败，且回滚也失败：{cause}；回滚错误：{restore_error}"
+            ) from cause
+        if isinstance(cause, RouteStoreError):
+            raise cause
+        raise RouteStoreError(f"写入路由表失败，已回滚：{cause}") from cause
 
     def _cleanup_temp(self) -> None:
         for path in self._temp_paths():

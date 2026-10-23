@@ -164,3 +164,166 @@ def test_trust_disabled_log_missing_fails_closed(tmp_path):
 
 def test_trust_disabled_log_absent_file_fails_closed(tmp_path):
     assert _wait_trust_disabled_log(tmp_path / "absent.log", timeout=0.2) is False
+
+
+# --------------------------------- I10: 动态端口 + Admin 实例身份校验
+
+
+def _serve_config(payload: dict):
+    import http.server
+    import json
+    import threading
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = json.dumps(payload).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, f"http://127.0.0.1:{srv.server_address[1]}"
+
+
+def test_wait_admin_rejects_instance_with_other_storage():
+    """端口上活着别人的 Caddy → 不能认领（否则 reload 会改到别人）。"""
+    srv, base = _serve_config(
+        {"storage": {"module": "file_system", "root": "/someone/else"}}
+    )
+    try:
+        assert selftest._wait_admin(base, "/our/sandbox", timeout=0.5) is False
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_wait_admin_accepts_matching_sandbox_storage():
+    srv, base = _serve_config(
+        {"storage": {"module": "file_system", "root": "/our/sandbox"}}
+    )
+    try:
+        assert selftest._wait_admin(base, "/our/sandbox", timeout=2) is True
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_free_ports_are_distinct_and_bindable():
+    import socket
+
+    ports = selftest._free_ports(3)
+    assert len(set(ports)) == 3, "同时持有的端口不得重复"
+    for port in ports:
+        s = socket.socket()
+        try:
+            s.bind(("127.0.0.1", port))
+        finally:
+            s.close()
+
+
+def test_selftest_uses_dynamic_ports_and_production_caddyfile(
+    monkeypatch, caddy_bin
+):
+    """沙箱 Caddyfile 必须由 build_main_caddyfile 生成，端口全部动态分配。"""
+    captured: dict[str, str] = {}
+    monkeypatch.setattr(selftest, "_caddy_version", lambda _: (2, 7, 0))
+    monkeypatch.setattr(selftest, "_free_ports", lambda n: [21001, 21002, 21003])
+    monkeypatch.setattr(
+        selftest, "build_main_caddyfile", lambda **kwargs: "MARKER-CADDYFILE\n"
+    )
+
+    def fake_adapt(caddy_bin_, caddyfile, config_json):
+        captured["text"] = caddyfile.read_text(encoding="utf-8")
+        return False, "adapt 失败（测试编排）"
+
+    monkeypatch.setattr(selftest, "_adapt", fake_adapt)
+
+    result = run_selftest(caddy_bin)
+
+    assert captured["text"] == "MARKER-CADDYFILE\n", "必须复用生产生成器"
+    assert any("adapt" in desc for desc, _ in result.checks)
+
+
+# --------------------------------- I11: adapt / reload 必须有超时
+
+
+def test_adapt_timeout_returns_false(monkeypatch, tmp_path):
+    def timeout_run(cmd, *args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout", 30))
+
+    monkeypatch.setattr(selftest.subprocess, "run", timeout_run)
+    ok, msg = selftest._adapt(
+        Path("/unused"), tmp_path / "Caddyfile", tmp_path / "config.json", timeout=1
+    )
+    assert ok is False
+    assert "超时" in msg
+
+
+def test_adapt_oserror_returns_false(monkeypatch, tmp_path):
+    def broken_run(cmd, *args, **kwargs):
+        raise OSError(8, "Exec format error")
+
+    monkeypatch.setattr(selftest.subprocess, "run", broken_run)
+    ok, msg = selftest._adapt(
+        Path("/unused"), tmp_path / "Caddyfile", tmp_path / "config.json"
+    )
+    assert ok is False
+    assert "无法执行" in msg
+
+
+def test_reload_timeout_returns_false(monkeypatch, tmp_path):
+    def timeout_run(cmd, *args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout", 30))
+
+    monkeypatch.setattr(selftest.subprocess, "run", timeout_run)
+    ok, msg = selftest._reload(
+        Path("/unused"), tmp_path / "config.json", 12345, timeout=1
+    )
+    assert ok is False
+    assert "超时" in msg
+
+
+def test_reload_oserror_returns_false(monkeypatch, tmp_path):
+    def broken_run(cmd, *args, **kwargs):
+        raise OSError(8, "Exec format error")
+
+    monkeypatch.setattr(selftest.subprocess, "run", broken_run)
+    ok, msg = selftest._reload(Path("/unused"), tmp_path / "config.json", 12345)
+    assert ok is False
+    assert "无法执行" in msg
+
+
+# ---------------------------- I12: mkdtemp 之后所有异常都必须走统一清理
+
+
+def test_selftest_cleans_tmp_when_setup_raises_after_mkdtemp(
+    monkeypatch, caddy_bin, tmp_path
+):
+    import tempfile
+
+    created: list[Path] = []
+    real_mkdtemp = tempfile.mkdtemp
+
+    def fake_mkdtemp(*args, **kwargs):
+        path = real_mkdtemp(prefix=kwargs.get("prefix", ""), dir=tmp_path)
+        created.append(Path(path))
+        return path
+
+    monkeypatch.setattr(selftest.tempfile, "mkdtemp", fake_mkdtemp)
+    monkeypatch.setattr(selftest, "_caddy_version", lambda _: (2, 7, 0))
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("setup boom")
+
+    monkeypatch.setattr(selftest, "_adapt", boom)
+
+    with pytest.raises(RuntimeError):
+        run_selftest(caddy_bin)
+
+    assert created, "未创建临时目录？"
+    assert not created[0].exists(), "异常路径必须回收 /tmp 沙箱目录"

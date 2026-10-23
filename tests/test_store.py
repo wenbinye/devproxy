@@ -144,3 +144,63 @@ def test_mutate_removes_temp_validation_files_on_failure(paths):
         store.mutate(lambda t: t.upsert(_route()))
     assert not (paths.state_dir / "routes.caddy.new").exists()
     assert not (paths.state_dir / "Caddyfile.new").exists()
+
+
+# --------------------------------- I1: 事务回滚必须覆盖第二次落盘（routes.caddy）
+
+
+def test_mutate_returns_none(paths):
+    """M1: mutate 是命令，不得把内部可变列表暴露给调用方。"""
+    paths.ensure_files()
+    assert _store(paths).mutate(lambda t: t.upsert(_route())) is None
+
+
+def test_mutate_rolls_back_json_when_caddyfile_write_fails(paths, monkeypatch):
+    """routes.json 已写、routes.caddy 写入失败 → 两份文件都要回到旧状态。"""
+    import devproxy.gateway.store as store_mod
+
+    paths.ensure_files()
+    store = _store(paths)
+    store.mutate(lambda t: t.upsert(_route("first", 1111)))
+    before_json = paths.routes_json.read_text()
+    before_caddy = paths.routes_caddy.read_text()
+
+    real_atomic_write = store_mod.atomic_write
+    failures = {"left": 1}
+
+    def flaky_atomic_write(path, content):
+        if path == paths.routes_caddy and failures["left"] > 0:
+            failures["left"] -= 1
+            raise OSError(28, "No space left on device")
+        real_atomic_write(path, content)
+
+    monkeypatch.setattr(store_mod, "atomic_write", flaky_atomic_write)
+    with pytest.raises(RouteStoreError) as cm:
+        store.mutate(lambda t: t.upsert(_route("second", 2222)))
+
+    assert "已回滚" in str(cm.value)
+    assert isinstance(cm.value.__cause__, OSError)
+    assert paths.routes_json.read_text() == before_json, "JSON 必须回滚"
+    assert paths.routes_caddy.read_text() == before_caddy, "Caddyfile 必须保持旧版本"
+    assert "second.test" not in paths.routes_json.read_text()
+
+
+def test_mutate_rolls_back_when_json_save_fails(paths, monkeypatch):
+    """save_table 失败（尚未开始写 Caddyfile）同样不得留下半截状态。"""
+    import devproxy.gateway.store as store_mod
+
+    paths.ensure_files()
+    store = _store(paths)
+    store.mutate(lambda t: t.upsert(_route("first", 1111)))
+    before_json = paths.routes_json.read_text()
+
+    def broken_save(path, table):
+        raise OSError(13, "Permission denied")
+
+    monkeypatch.setattr(store_mod, "save_table", broken_save)
+    with pytest.raises(RouteStoreError) as cm:
+        store.mutate(lambda t: t.upsert(_route("second", 2222)))
+
+    assert "已回滚" in str(cm.value)
+    assert paths.routes_json.read_text() == before_json
+    assert "second.test" not in paths.routes_caddy.read_text()

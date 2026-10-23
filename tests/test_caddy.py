@@ -88,7 +88,7 @@ def test_reload_passes_address(tmp_path):
     fake.write_text('#!/bin/sh\necho "ARGS: $@" >&2\nexit 0\n')
     fake.chmod(0o755)
     cfg = CaddyConfig(caddy_bin=fake, caddyfile=tmp_path / "Caddyfile", admin_addr="127.0.0.1:2019")
-    ok, msg = cfg.reload(tmp_path / "Caddyfile")
+    ok, msg = cfg.reload()
     assert ok is True
     assert "reload" in msg
     assert "--address" in msg and "127.0.0.1:2019" in msg
@@ -103,7 +103,7 @@ def test_validate_missing_binary_returns_false(tmp_path):
 
 def test_reload_missing_binary_returns_false(tmp_path):
     cfg = CaddyConfig(caddy_bin=tmp_path / "absent", caddyfile=tmp_path / "Caddyfile")
-    ok, msg = cfg.reload(tmp_path / "Caddyfile")
+    ok, msg = cfg.reload()
     assert ok is False
     assert str(tmp_path / "absent") in msg
 
@@ -123,7 +123,7 @@ def test_reload_timeout_returns_false(tmp_path):
     fake.write_text("#!/bin/sh\nsleep 5\n")
     fake.chmod(0o755)
     cfg = CaddyConfig(caddy_bin=fake, caddyfile=tmp_path / "Caddyfile")
-    ok, msg = cfg.reload(tmp_path / "Caddyfile", timeout=0.5)
+    ok, msg = cfg.reload(timeout=0.5)
     assert ok is False
     assert "超时" in msg
 
@@ -189,7 +189,7 @@ def test_validate_wrong_format_binary_returns_false_not_exception(tmp_path):
 
 def test_reload_wrong_format_binary_returns_false_not_exception(tmp_path):
     cfg = CaddyConfig(caddy_bin=_nonexec_format_binary(tmp_path), caddyfile=tmp_path / "C")
-    ok, msg = cfg.reload(tmp_path / "C")
+    ok, msg = cfg.reload()
     assert ok is False
     assert "caddy" in msg
 
@@ -219,3 +219,77 @@ def test_api_non_json_200_returns_code_and_none():
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+# ------------------------------------------------ I6: 畸形 HTTP 响应不得穿出 api()
+
+
+def test_api_malformed_status_line_returns_zero_not_exception():
+    """Admin 端口被非 HTTP 服务占用（BadStatusLine）→ (0, None)，不抛异常。"""
+    import socket
+
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    port = srv.getsockname()[1]
+
+    def serve():
+        try:
+            conn, _ = srv.accept()
+        except OSError:
+            return
+        try:
+            conn.recv(4096)
+            conn.sendall(b"BOGUS STATUS LINE\r\n\r\n")
+        finally:
+            conn.close()
+
+    worker = threading.Thread(target=serve, daemon=True)
+    worker.start()
+    try:
+        code, body = CaddyAdmin(
+            base=f"http://127.0.0.1:{port}", timeout=2
+        ).api("GET", "/config/")
+        assert (code, body) == (0, None)
+    finally:
+        srv.close()
+        worker.join(timeout=5)
+
+
+# ------------------------------------- I7: Caddyfile token 引用（空格/换行路径）
+
+
+def test_build_main_caddyfile_quotes_paths_with_spaces(tmp_path):
+    """含空格的合法路径必须被引用成单个 token，否则 Caddyfile 语法错误。"""
+    out = build_main_caddyfile(
+        admin_addr="127.0.0.1:2019",
+        storage=Path("/Volumes/My Disk/caddy"),
+        routes_caddy=Path("/state/my routes.caddy"),
+        sites_caddy=Path("/config/sites.caddy"),
+    )
+    assert 'storage file_system "/Volumes/My Disk/caddy"' in out
+    assert 'import "/state/my routes.caddy"' in out
+    # 不含空格的 token 保持原样，生成结果与旧行为逐字节一致
+    assert "import /config/sites.caddy" in out
+
+
+def test_build_main_caddyfile_escapes_newline_instead_of_injecting_lines():
+    """路径里的换行不得变成额外配置行（否则等于配置注入）。"""
+    out = build_main_caddyfile(
+        admin_addr="127.0.0.1:2019",
+        storage=Path("/data/a\nb"),
+        routes_caddy=Path("/state/routes.caddy"),
+        sites_caddy=Path("/config/sites.caddy"),
+    )
+    assert 'storage file_system "/data/a\\nb"' in out
+    assert not any(line.strip() == "b" for line in out.splitlines())
+
+
+def test_caddy_token_quotes_metacharacters_and_keeps_simple_tokens():
+    from devproxy.gateway.caddy import _caddy_token
+
+    assert _caddy_token("/plain/path-1.2") == "/plain/path-1.2"
+    assert _caddy_token("/with space/x") == '"/with space/x"'
+    assert _caddy_token('a"b') == '"a\\"b"'
+    assert _caddy_token("/a{b") == '"/a{b"'
+    assert _caddy_token("") == '""'

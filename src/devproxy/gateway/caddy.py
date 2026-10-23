@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import subprocess
 import urllib.error
@@ -33,7 +34,10 @@ class CaddyAdmin:
                 status = r.status
         except urllib.error.HTTPError as e:
             return e.code, None
-        except (urllib.error.URLError, OSError):
+        except (OSError, http.client.HTTPException):
+            # URLError 是 OSError 的子类；HTTPException（BadStatusLine /
+            # IncompleteRead 等）不是 —— admin 端口被非 HTTP 服务占用时
+            # 必须同样返回 (0, None)，不能穿出 api() 的「不抛异常」契约
             return 0, None
         try:
             return status, (json.loads(raw) if raw else None)
@@ -56,10 +60,22 @@ class CaddyConfig:
 
     def validate(self, caddyfile: Path | None = None, timeout: float = 30.0) -> tuple[bool, str]:
         """校验配置；二进制缺失/不可执行或超时同样返回 (False, 说明)，不抛异常。"""
-        path = caddyfile or self.caddyfile
+        return self._run("validate", caddyfile or self.caddyfile, False, timeout)
+
+    def reload(self, timeout: float = 30.0) -> tuple[bool, str]:
+        """热加载配置；二进制缺失/不可执行或超时同样返回 (False, 说明)，不抛异常。"""
+        return self._run("reload", self.caddyfile, True, timeout)
+
+    def _run(
+        self, subcommand: str, path: Path, with_address: bool, timeout: float
+    ) -> tuple[bool, str]:
+        """validate / reload 的共同实现：拼参数、执行、把失败映射成 (False, 说明)。"""
+        argv = [str(self.caddy_bin), subcommand, "--config", str(path)]
+        if with_address:
+            argv += ["--address", self.admin_addr]
         try:
             proc = subprocess.run(
-                [str(self.caddy_bin), "validate", "--config", str(path)],
+                argv,
                 capture_output=True,
                 text=True,
                 timeout=timeout,
@@ -68,32 +84,24 @@ class CaddyConfig:
             # 文件缺失 / 不可执行 / 格式不对（Exec format error）都归到这里
             return False, f"caddy 二进制不存在或不可执行: {self.caddy_bin}（{e}）"
         except subprocess.TimeoutExpired:
-            return False, f"caddy validate 超时（{timeout}s）"
+            return False, f"caddy {subcommand} 超时（{timeout}s）"
         return proc.returncode == 0, (proc.stderr or proc.stdout).strip()
 
-    def reload(self, caddyfile: Path | None = None, timeout: float = 30.0) -> tuple[bool, str]:
-        """热加载配置；二进制缺失/不可执行或超时同样返回 (False, 说明)，不抛异常。"""
-        path = caddyfile or self.caddyfile
-        try:
-            proc = subprocess.run(
-                [
-                    str(self.caddy_bin),
-                    "reload",
-                    "--config",
-                    str(path),
-                    "--address",
-                    self.admin_addr,
-                ],
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
-        except OSError as e:
-            # 文件缺失 / 不可执行 / 格式不对（Exec format error）都归到这里
-            return False, f"caddy 二进制不存在或不可执行: {self.caddy_bin}（{e}）"
-        except subprocess.TimeoutExpired:
-            return False, f"caddy reload 超时（{timeout}s）"
-        return proc.returncode == 0, (proc.stderr or proc.stdout).strip()
+
+def _caddy_token(value: str) -> str:
+    """把值渲染成 Caddyfile 的单个 token。
+
+    路径/地址会直接进入 Caddyfile 这种配置语言：含空白时若不引用，会被
+    拆成多个 token（`/Volumes/My Disk`）；含换行时甚至能注入额外的配置行。
+    简单 token 原样输出（保持既有生成结果逐字节不变），其余用 JSON 字符串
+    引用 —— JSON 会把引号与换行转义，Caddy 的词法器只把 `\\"` 当转义，
+    未知转义留在 token 内，因此换行永远不会变成真正的行分隔符。
+    """
+    safe = value and all(
+        not ch.isspace() and ch not in '"`{}#' and 0x20 <= ord(ch) < 0x7F
+        for ch in value
+    )
+    return value if safe else json.dumps(value, ensure_ascii=False)
 
 
 def build_main_caddyfile(
@@ -115,12 +123,12 @@ def build_main_caddyfile(
     """
     return (
         "{\n"
-        f"\tadmin {admin_addr}\n"
-        f"\tstorage file_system {storage}\n"
+        f"\tadmin {_caddy_token(str(admin_addr))}\n"
+        f"\tstorage file_system {_caddy_token(str(storage))}\n"
         f"\thttp_port {http_port}\n"
         f"\thttps_port {https_port}\n"
         "}\n"
         "\n"
-        f"import {routes_caddy}\n"
-        f"import {sites_caddy}\n"
+        f"import {_caddy_token(str(routes_caddy))}\n"
+        f"import {_caddy_token(str(sites_caddy))}\n"
     )

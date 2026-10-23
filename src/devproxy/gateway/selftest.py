@@ -15,6 +15,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import ssl
 import subprocess
 import tempfile
@@ -25,11 +26,8 @@ import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from devproxy.gateway.caddy import build_main_caddyfile
 from devproxy.gateway.routes import Route, RouteTable, render_caddyfile
-
-ADMIN_PORT = 20191
-HTTPS_PORT = 14443
-HTTP_PORT = 14480
 
 UPSTREAM_BODY = b"hello-from-upstream"
 
@@ -41,6 +39,9 @@ MIN_CADDY_VERSION = (2, 7, 0)
 # Caddy 在 install_trust=false 时会打这行日志（modules/caddypki/pki.go）。
 # 它是「宿主信任库安装确实被关掉了」的唯一外部可见证据。
 TRUST_DISABLED_LOG = "root certificate trust store installation disabled"
+
+# 外部命令一律有界：adapt/reload 挂住会把 finally 里的沙箱清理一起拖死。
+CADDY_COMMAND_TIMEOUT = 30.0
 
 
 @dataclass
@@ -93,14 +94,57 @@ def _probe_context() -> ssl.SSLContext:
     return ctx
 
 
-def _wait_admin(base: str, timeout: float = 15.0) -> bool:
+def _free_ports(count: int) -> list[int]:
+    """一次取 count 个互不相同的空闲端口。
+
+    同时持有所有 socket 再一起释放 —— 逐个 bind/close 可能拿到同一个
+    端口。沙箱全部使用动态端口：固定端口会让并发自检连上别人的 Caddy，
+    reload 改到别人的配置，自检结论完全不可信。
+    """
+    sockets: list[socket.socket] = []
+    try:
+        for _ in range(count):
+            s = socket.socket()
+            s.bind(("127.0.0.1", 0))
+            sockets.append(s)
+        return [s.getsockname()[1] for s in sockets]
+    finally:
+        for s in sockets:
+            s.close()
+
+
+def _storage_root(config: object) -> str | None:
+    """从 /config/ 的 JSON 里取 storage.file_system 的 root。"""
+    if not isinstance(config, dict):
+        return None
+    storage = config.get("storage")
+    if not isinstance(storage, dict):
+        return None
+    root = storage.get("root")
+    return root if isinstance(root, str) else None
+
+
+def _wait_admin(base: str, expected_storage: str, timeout: float = 15.0) -> bool:
+    """等 Admin API 就绪，并确认它确实是**本次沙箱**的实例。
+
+    只检查 HTTP 200 是不够的：如果沙箱 caddy 因端口冲突没起来，
+    这个端口可能被另一份自检（或用户自己的 Caddy）占着，随后 reload
+    就会改到别人的配置。storage 是沙箱独有的，用它做身份校验。
+    """
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
             with urllib.request.urlopen(base + "/config/", timeout=2) as r:
                 if r.status == 200:
-                    return True
-        except (urllib.error.URLError, OSError):
+                    body = json.loads(r.read())
+                    if _storage_root(body) == expected_storage:
+                        return True
+        except (
+            urllib.error.URLError,
+            OSError,
+            http.client.HTTPException,
+            json.JSONDecodeError,
+        ):
             pass
         time.sleep(0.3)
     return False
@@ -141,7 +185,8 @@ def _wait_trust_disabled_log(log_path: Path, timeout: float = 10.0) -> bool:
     """等 caddy 打出「宿主信任库安装已禁用」那行日志。
 
     这是 install_trust=false 真正生效的唯一外部可见证据（老版本 caddy
-    会静默忽略该字段）；等不到就当没生效 —— fail closed。
+    会静默忽略该字段）。等不到就记为失败，但不中止后续检查 —— 调用方
+    负责把这条失败汇总到最终结果里。
     """
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -151,18 +196,29 @@ def _wait_trust_disabled_log(log_path: Path, timeout: float = 10.0) -> bool:
     return False
 
 
-def _adapt(caddy_bin: Path, caddyfile: Path, config_json: Path) -> tuple[bool, str]:
+def _adapt(
+    caddy_bin: Path,
+    caddyfile: Path,
+    config_json: Path,
+    timeout: float = CADDY_COMMAND_TIMEOUT,
+) -> tuple[bool, str]:
     """Caddyfile → JSON，并把沙箱 CA 的「装进系统信任库」关掉。
 
     关掉的原因有两个：沙箱是一次性的 CA，装进系统信任库会污染宿主机；
     而安装动作要走 sudo（可能提示密码），会把启动卡住好几十秒。
     这只影响信任库，不影响签发与路由行为 —— 被测的仍是 tls internal。
     """
-    proc = subprocess.run(
-        [str(caddy_bin), "adapt", "--config", str(caddyfile)],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        proc = subprocess.run(
+            [str(caddy_bin), "adapt", "--config", str(caddyfile)],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"caddy adapt 超时（{timeout}s）"
+    except OSError as e:
+        return False, f"caddy adapt 无法执行：{e}"
     if proc.returncode != 0:
         return False, (proc.stderr or proc.stdout).strip()
     try:
@@ -172,24 +228,73 @@ def _adapt(caddy_bin: Path, caddyfile: Path, config_json: Path) -> tuple[bool, s
     cfg.setdefault("apps", {})["pki"] = {
         "certificate_authorities": {"local": {"install_trust": False}}
     }
-    config_json.write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
+    try:
+        config_json.write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
+    except OSError as e:
+        return False, f"写入沙箱配置失败：{e}"
     return True, ""
 
 
-def _reload(caddy_bin: Path, config_json: Path) -> tuple[bool, str]:
-    proc = subprocess.run(
-        [
-            str(caddy_bin),
-            "reload",
-            "--config",
-            str(config_json),
-            "--address",
-            f"127.0.0.1:{ADMIN_PORT}",
-        ],
-        capture_output=True,
-        text=True,
-    )
+def _reload(
+    caddy_bin: Path,
+    config_json: Path,
+    admin_port: int,
+    timeout: float = CADDY_COMMAND_TIMEOUT,
+) -> tuple[bool, str]:
+    try:
+        proc = subprocess.run(
+            [
+                str(caddy_bin),
+                "reload",
+                "--config",
+                str(config_json),
+                "--address",
+                f"127.0.0.1:{admin_port}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"caddy reload 超时（{timeout}s）"
+    except OSError as e:
+        return False, f"caddy reload 无法执行：{e}"
     return proc.returncode == 0, (proc.stderr or proc.stdout).strip()
+
+
+def _write_sandbox_configs(
+    result: SelftestResult,
+    tmp: Path,
+    admin_port: int,
+    https_port: int,
+    http_port: int,
+) -> tuple[bool, Path, Path, Path]:
+    """创建沙箱的 routes/sites/Caddyfile；失败时记录并返回 (False, ...)。
+
+    主 Caddyfile 由生产用的 build_main_caddyfile 生成 —— 否则生产生成器
+    改了全局块，自检覆盖不到，自检通过也证明不了生产路径正确。
+    """
+    routes_file = tmp / "routes.caddy"
+    sites_file = tmp / "sites.caddy"
+    caddyfile = tmp / "Caddyfile"
+    try:
+        sites_file.write_text("", encoding="utf-8")
+        routes_file.write_text(render_caddyfile(RouteTable()), encoding="utf-8")
+        caddyfile.write_text(
+            build_main_caddyfile(
+                admin_addr=f"127.0.0.1:{admin_port}",
+                storage=tmp / "data",
+                routes_caddy=routes_file,
+                sites_caddy=sites_file,
+                http_port=http_port,
+                https_port=https_port,
+            ),
+            encoding="utf-8",
+        )
+    except OSError as e:
+        result.record(f"创建沙箱配置失败：{e}", False)
+        return False, routes_file, sites_file, caddyfile
+    return True, routes_file, sites_file, caddyfile
 
 
 def run_selftest(caddy_bin: Path) -> SelftestResult:
@@ -200,94 +305,80 @@ def run_selftest(caddy_bin: Path) -> SelftestResult:
         return result
 
     tmp = Path(tempfile.mkdtemp(prefix="devproxy-selftest-"))
-    upstream = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _UpstreamHandler)
-    threading.Thread(target=upstream.serve_forever, daemon=True).start()
-    uport = upstream.server_address[1]
+    upstream: http.server.ThreadingHTTPServer | None = None
+    log_file = None
+    proc: subprocess.Popen | None = None
+    try:
+        upstream = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _UpstreamHandler)
+        threading.Thread(target=upstream.serve_forever, daemon=True).start()
+        uport = upstream.server_address[1]
 
-    # 版本地板：老于 2.7 的 caddy 没有 pki app，install_trust 会被静默忽略，
-    # 沙箱 CA 就会装进宿主信任库 —— 这种情况下宁可不跑。
-    version = _caddy_version(caddy_bin)
-    if version is None:
-        result.record("读取 caddy 版本", False)
-        upstream.shutdown()
-        upstream.server_close()
-        shutil.rmtree(tmp, ignore_errors=True)
-        return result
-    ver_str = ".".join(str(x) for x in version)
-    if version < MIN_CADDY_VERSION:
-        floor = ".".join(str(x) for x in MIN_CADDY_VERSION)
+        # 版本地板：老于 2.7 的 caddy 没有 pki app，install_trust 会被静默忽略，
+        # 沙箱 CA 就会装进宿主信任库 —— 这种情况下宁可不跑。
+        version = _caddy_version(caddy_bin)
+        if version is None:
+            result.record("读取 caddy 版本", False)
+            return result
+        ver_str = ".".join(str(x) for x in version)
+        if version < MIN_CADDY_VERSION:
+            floor = ".".join(str(x) for x in MIN_CADDY_VERSION)
+            result.record(
+                f"caddy 版本 {ver_str} 过旧（需要 ≥ {floor}：更老的 caddy 没有 pki app，"
+                "沙箱 CA 会被装进宿主信任库）",
+                False,
+            )
+            return result
         result.record(
-            f"caddy 版本 {ver_str} 过旧（需要 ≥ {floor}：更老的 caddy 没有 pki app，"
-            "沙箱 CA 会被装进宿主信任库）",
-            False,
-        )
-        upstream.shutdown()
-        upstream.server_close()
-        shutil.rmtree(tmp, ignore_errors=True)
-        return result
-    result.record(f"caddy 版本 {ver_str}（≥ {'.'.join(str(x) for x in MIN_CADDY_VERSION)}）", True)
-
-    routes_file = tmp / "routes.caddy"
-    sites_file = tmp / "sites.caddy"
-    sites_file.write_text("", encoding="utf-8")
-
-    def write_routes(routes: list[Route]) -> None:
-        routes_file.write_text(
-            render_caddyfile(RouteTable(routes=routes)), encoding="utf-8"
+            f"caddy 版本 {ver_str}（≥ {'.'.join(str(x) for x in MIN_CADDY_VERSION)}）",
+            True,
         )
 
-    write_routes([])
-
-    caddyfile = tmp / "Caddyfile"
-    caddyfile.write_text(
-        "{\n"
-        f"\tadmin 127.0.0.1:{ADMIN_PORT}\n"
-        f"\tstorage file_system {tmp / 'data'}\n"
-        f"\thttp_port {HTTP_PORT}\n"
-        f"\thttps_port {HTTPS_PORT}\n"
-        "}\n"
-        "\n"
-        f"import {routes_file}\n"
-        f"import {sites_file}\n",
-        encoding="utf-8",
-    )
-
-    config_json = tmp / "config.json"
-    ok, detail = _adapt(caddy_bin, caddyfile, config_json)
-    if not ok:
-        result.record(f"沙箱配置生成（caddy adapt）：{detail}", False)
-        upstream.shutdown()
-        upstream.server_close()
-        shutil.rmtree(tmp, ignore_errors=True)
-        return result
-
-    # 隔离：caddy 的配置目录/数据目录也指向 tmp，别去动生产那套 autosave.json
-    env = {
-        **os.environ,
-        "XDG_CONFIG_HOME": str(tmp / "xdg-config"),
-        "XDG_DATA_HOME": str(tmp / "xdg-data"),
-    }
-    # caddy 的输出不丢：install_trust 是否真的生效，只能从它自己的日志里看出来
-    log_path = tmp / "caddy.log"
-    log_file = open(log_path, "wb")
-    try:
-        proc = subprocess.Popen(
-            [str(caddy_bin), "run", "--config", str(config_json)],
-            stdout=log_file,
-            stderr=log_file,
-            env=env,
+        # 动态端口：并发自检 / 用户已有服务都不会互相认领。
+        admin_port, https_port, http_port = _free_ports(3)
+        ok, routes_file, sites_file, caddyfile = _write_sandbox_configs(
+            result, tmp, admin_port, https_port, http_port
         )
-    except OSError as e:
-        log_file.close()
-        result.record(f"沙箱 caddy 启动（{e}）", False)
-        upstream.shutdown()
-        upstream.server_close()
-        shutil.rmtree(tmp, ignore_errors=True)
-        return result
-    cafile = tmp / "data" / "pki" / "authorities" / "local" / "root.crt"
-    try:
-        base = f"http://127.0.0.1:{ADMIN_PORT}"
-        if not _wait_admin(base):
+        if not ok:
+            return result
+
+        def write_routes(routes: list[Route]) -> bool:
+            try:
+                routes_file.write_text(
+                    render_caddyfile(RouteTable(routes=routes)), encoding="utf-8"
+                )
+            except OSError as e:
+                result.record(f"写入沙箱路由表失败：{e}", False)
+                return False
+            return True
+
+        config_json = tmp / "config.json"
+        ok, detail = _adapt(caddy_bin, caddyfile, config_json)
+        if not ok:
+            result.record(f"沙箱配置生成（caddy adapt）：{detail}", False)
+            return result
+
+        # 隔离：caddy 的配置目录/数据目录也指向 tmp，别去动生产那套 autosave.json
+        env = {
+            **os.environ,
+            "XDG_CONFIG_HOME": str(tmp / "xdg-config"),
+            "XDG_DATA_HOME": str(tmp / "xdg-data"),
+        }
+        # caddy 的输出不丢：install_trust 是否真的生效，只能从它自己的日志里看出来
+        log_path = tmp / "caddy.log"
+        try:
+            log_file = open(log_path, "wb")
+            proc = subprocess.Popen(
+                [str(caddy_bin), "run", "--config", str(config_json)],
+                stdout=log_file,
+                stderr=log_file,
+                env=env,
+            )
+        except OSError as e:
+            result.record(f"沙箱 caddy 启动（{e}）", False)
+            return result
+
+        base = f"http://127.0.0.1:{admin_port}"
+        if not _wait_admin(base, str(tmp / "data")):
             result.record("沙箱 caddy 启动", False)
             return result
         result.record("沙箱 caddy 启动", True)
@@ -303,6 +394,7 @@ def run_selftest(caddy_bin: Path) -> SelftestResult:
                 False,
             )
 
+        cafile = tmp / "data" / "pki" / "authorities" / "local" / "root.crt"
         ctx = None
         if _wait_file(cafile):
             deadline = time.time() + 10
@@ -317,11 +409,11 @@ def run_selftest(caddy_bin: Path) -> SelftestResult:
             return result
 
         # 注册前：沙箱还不该对外服务 —— 明确断言「连接被拒绝」。
-        # 这一项断言的是隔离性（此刻没有站点块，14443 上没人监听），
+        # 这一项断言的是隔离性（此刻没有站点块，https 端口上没人监听），
         # 真正验证「未注册域名拿不到证书」的是注册之后那一项。
         probe = _probe_context()
         try:
-            _fetch("unregistered.test", HTTPS_PORT, probe)
+            _fetch("unregistered.test", https_port, probe)
             result.record("注册前沙箱未对外服务（连接应被拒绝）", False)
         except ConnectionRefusedError:
             result.record("注册前沙箱未对外服务（连接应被拒绝）", True)
@@ -329,7 +421,7 @@ def run_selftest(caddy_bin: Path) -> SelftestResult:
             result.record(f"注册前沙箱未对外服务（连接应被拒绝）：{e}", False)
 
         # 已注册域名：精确块 + tls internal
-        write_routes(
+        if not write_routes(
             [
                 Route(
                     name="foo",
@@ -339,10 +431,11 @@ def run_selftest(caddy_bin: Path) -> SelftestResult:
                     upstream=f"127.0.0.1:{uport}",
                 )
             ]
-        )
+        ):
+            return result
         ok, detail = _adapt(caddy_bin, caddyfile, config_json)
         if ok:
-            ok, detail = _reload(caddy_bin, config_json)
+            ok, detail = _reload(caddy_bin, config_json, admin_port)
         result.record(f"reload 生效：{detail}" if not ok else "reload 生效", ok)
 
         # 证书是 reload 后异步签发的，给它一点时间
@@ -351,7 +444,7 @@ def run_selftest(caddy_bin: Path) -> SelftestResult:
         last_err = ""
         while time.time() < deadline and not hit:
             try:
-                status, body = _fetch("foo.test", HTTPS_PORT, ctx)
+                status, body = _fetch("foo.test", https_port, ctx)
                 hit = status == 200 and body == UPSTREAM_BODY.decode()
                 if not hit:
                     last_err = f"状态 {status}"
@@ -365,7 +458,7 @@ def run_selftest(caddy_bin: Path) -> SelftestResult:
 
         # 这次是在 TLS 服务已经起来之后测：未注册域名必须握手失败（真的没有证书）
         try:
-            _fetch("unregistered.test", HTTPS_PORT, probe)
+            _fetch("unregistered.test", https_port, probe)
             result.record("已注册后未注册域名仍拿不到证书", False)
         except ssl.SSLError:
             result.record("已注册后未注册域名仍拿不到证书", True)
@@ -378,7 +471,7 @@ def run_selftest(caddy_bin: Path) -> SelftestResult:
         deadline = time.time() + 10
         while time.time() < deadline and location is None:
             try:
-                conn = http.client.HTTPConnection("127.0.0.1", HTTP_PORT, timeout=5)
+                conn = http.client.HTTPConnection("127.0.0.1", http_port, timeout=5)
                 conn.request("GET", "/", headers={"Host": "foo.test"})
                 r = conn.getresponse()
                 location = r.getheader("Location")
@@ -392,29 +485,42 @@ def run_selftest(caddy_bin: Path) -> SelftestResult:
         )
 
         # 注销后拿不到证书
-        write_routes([])
+        if not write_routes([]):
+            return result
         ok, detail = _adapt(caddy_bin, caddyfile, config_json)
         if ok:
-            ok, detail = _reload(caddy_bin, config_json)
+            ok, detail = _reload(caddy_bin, config_json, admin_port)
         result.record(f"注销 reload 生效：{detail}" if not ok else "注销 reload 生效", ok)
         try:
-            status, body = _fetch("foo.test", HTTPS_PORT, ctx)
+            status, body = _fetch("foo.test", https_port, ctx)
             result.record("注销后不再有路由", body != UPSTREAM_BODY.decode())
         except (ssl.SSLError, OSError, http.client.HTTPException):
             result.record("注销后不再有路由", True)
+        return result
     finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            # 杀掉之后也要回收，否则留下僵尸进程
+        # 从这里往回的所有资源（tmp 目录、upstream 线程/server、日志、caddy）
+        # 必须在一个 finally 里统一回收：任何前置步骤抛异常都不能留下 /tmp
+        # 残留或 in-process 调用时泄漏线程/socket。
+        if proc is not None:
+            try:
+                proc.terminate()
+            except OSError:
+                pass
             try:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
+                proc.kill()
+                # 杀掉之后也要回收，否则留下僵尸进程
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
+        if log_file is not None:
+            try:
+                log_file.close()
+            except OSError:
                 pass
-        log_file.close()
-        upstream.shutdown()
-        upstream.server_close()
+        if upstream is not None:
+            upstream.shutdown()
+            upstream.server_close()
         shutil.rmtree(tmp, ignore_errors=True)
-    return result

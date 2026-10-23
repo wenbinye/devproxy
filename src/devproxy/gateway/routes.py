@@ -138,10 +138,14 @@ def atomic_write(path: Path, content: str) -> None:
 
 
 def load_table(path: Path) -> RouteTable:
-    if not path.exists():
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        # 不做 exists() 预检：预检与读取之间文件可能被 _restore 删除，
+        # read_text 会抛 FileNotFoundError（不是解析错误）穿到 CLI。
         return RouteTable()
     try:
-        return RouteTable.from_dict(json.loads(path.read_text(encoding="utf-8")))
+        return RouteTable.from_dict(json.loads(text))
     except (json.JSONDecodeError, KeyError, ValueError, TypeError, AttributeError) as e:
         # routes.json 是工具自己的状态文件，但手工编辑 / 版本跨越 / 写一半
         # 都是现实场景 —— 必须映射成领域错误，不能让 KeyError 裸奔到终端

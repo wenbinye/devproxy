@@ -616,3 +616,338 @@ def test_watch_does_not_resurrect_route_removed_between_check_and_write(
     assert not t.is_alive(), "路由已不存在，守护线程应结束"
     table = json.loads(paths.routes_json.read_text())
     assert table["routes"] == [], "被 down 的路由不得被心跳复活"
+
+
+# --------------------------------------- C1: 组长被回收后不得盲杀旧 pgid
+
+
+def test_stop_process_group_skips_unverifiable_reaped_leader():
+    """组长已被回收 + 身份无法核实 → 绝不对该 pgid 发信号（可能已被复用）。"""
+    victim = _spawn_sleeper()
+    reaped = subprocess.Popen(
+        [sys.executable, "-c", "pass"], start_new_session=True
+    )
+    try:
+        reaped.wait()  # 组长已被回收，pid/pgid 理论上可被复用
+        stop_process_group(reaped, victim.pid, expected_start="forged")
+        time.sleep(0.3)
+        assert _process_running(victim.pid), "身份不符时不得杀掉无关进程组"
+
+        stop_process_group(reaped, victim.pid)  # 未提供身份 → 同样跳过
+        time.sleep(0.2)
+        assert _process_running(victim.pid), "无法核实身份时不得发信号"
+    finally:
+        stop_process_group(victim, victim.pid)
+
+
+def test_run_kills_grandchildren_after_leader_already_exited(paths, tmp_path):
+    """正常退出路径：组长先退出，孙进程仍必须被按组清理。
+
+    旧实现先 proc.wait() 回收组长、再 killpg —— 存在 pid 复用窗口；
+    新实现用 waitid(WNOWAIT) 把组长保持为僵尸直到补刀完成。
+    """
+    paths.ensure_files()
+    runner = _runner(paths)
+    marker = tmp_path / "grandchild-left.pid"
+    child_code = (
+        "import os,socket,subprocess,sys,time;"
+        "s=socket.socket();s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1);"
+        "s.bind(('127.0.0.1',int(os.environ['PORT'])));s.listen(8);"
+        "g=subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)']);"
+        f"open({str(marker)!r},'w').write(str(g.pid));"
+        "time.sleep(0.5)"
+    )
+    rc = runner.run("codeup", [sys.executable, "-c", child_code])
+    assert rc == 0
+    assert wait_until(lambda: marker.exists() and marker.read_text().strip())
+    gpid = int(marker.read_text())
+    assert wait_until(
+        lambda: not _process_running(gpid)
+    ), "组长退出后孙进程仍必须被清理"
+
+
+# ------------------------------- I2: 同名路由的注销 / 心跳必须校验归属
+
+
+def test_deregister_does_not_remove_route_replaced_by_new_up(paths):
+    import threading  # noqa: F401
+
+    paths.ensure_files()
+    cfg = Config(storage=str(paths.data_dir))
+    caddy = FakeCaddy()
+    store = RouteStore(paths, cfg, caddy)
+    runner = UpRunner(store, cfg, FakeAdmin())
+
+    old = Route(
+        name="x", domain="x.test", port=1, mode="up", upstream="127.0.0.1:1", pid=111
+    )
+    new = Route(
+        name="x", domain="x.test", port=2, mode="up", upstream="127.0.0.1:2", pid=222
+    )
+    store.mutate(lambda t: t.upsert(new))
+
+    runner._deregister(old)
+    assert store.get("x") == new, "旧 up 的清理不得删掉同名的新路由"
+
+
+def test_watch_stops_without_overwriting_route_replaced_by_new_up(paths):
+    """同名路由已被新 up 接管（pid/port 不同）→ 旧心跳既不复写也不空转。"""
+    import threading
+
+    paths.ensure_files()
+    cfg = Config(storage=str(paths.data_dir))
+    caddy = FakeCaddy()
+    store = RouteStore(paths, cfg, caddy)
+    admin = FakeAdmin()
+    runner = UpRunner(store, cfg, admin)
+    runner.heartbeat_interval = 0.05
+
+    old = Route(
+        name="x", domain="x.test", port=1, mode="up", upstream="127.0.0.1:1", pid=111
+    )
+    new = Route(
+        name="x", domain="x.test", port=2, mode="up", upstream="127.0.0.1:2", pid=222
+    )
+    store.mutate(lambda t: t.upsert(new))
+    admin.config_payload = {}  # 旧路由确实不在 Caddy 里
+    before = caddy.reloads
+
+    stop = threading.Event()
+    t = threading.Thread(target=runner._watch, args=(old, stop), daemon=True)
+    t.start()
+    t.join(timeout=10)
+    stop.set()
+    assert not t.is_alive(), "路由已被接管，旧心跳应结束"
+    assert caddy.reloads == before, "旧心跳不得覆盖新路由"
+    assert store.get("x") == new
+
+
+# --------------------------- I3: kill_pid_group 等待退出并升级 SIGKILL
+
+
+def test_kill_pid_group_escalates_to_sigkill(tmp_path):
+    marker = tmp_path / "sigterm-ignored.ready"
+    code = (
+        "import signal,time,pathlib;"
+        "signal.signal(signal.SIGTERM, lambda *a: None);"
+        f"pathlib.Path({str(marker)!r}).write_text('1');"
+        "time.sleep(60)"
+    )
+    proc = subprocess.Popen(
+        [sys.executable, "-c", code], start_new_session=True
+    )
+    try:
+        assert wait_until(marker.exists), "子进程未完成 SIGTERM handler 安装"
+        start = proc_start_time(proc.pid)
+        assert kill_pid_group(proc.pid, start, timeout=0.3) is True
+        assert wait_until(
+            lambda: not _process_running(proc.pid)
+        ), "忽略 SIGTERM 的进程必须被 SIGKILL 收掉"
+    finally:
+        stop_process_group(proc, proc.pid)
+
+
+def test_run_reclaims_existing_route_and_reuses_its_port(paths):
+    """同名旧进程占着显式端口：先等它死透，再启动新进程 —— 不得误报端口占用。"""
+    paths.ensure_files()
+    cfg = Config(storage=str(paths.data_dir))
+    caddy = FakeCaddy()
+    store = RouteStore(paths, cfg, caddy)
+    port = alloc_port()
+    old_code = (
+        "import os,socket,time;"
+        "s=socket.socket();s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1);"
+        "s.bind(('127.0.0.1',int(os.environ['PORT'])));s.listen(8);"
+        "time.sleep(60)"
+    )
+    old = subprocess.Popen(
+        [sys.executable, "-c", old_code],
+        env=dict(os.environ, PORT=str(port)),
+        start_new_session=True,
+    )
+    try:
+        assert wait_until(lambda: reachable(port, timeout=0.2))
+        store.mutate(
+            lambda t: t.upsert(
+                Route(
+                    name="codeup",
+                    domain="codeup.test",
+                    port=port,
+                    mode="up",
+                    upstream=f"127.0.0.1:{port}",
+                    pid=old.pid,
+                    proc_start=proc_start_time(old.pid),
+                )
+            )
+        )
+        runner = UpRunner(store, cfg, FakeAdmin())
+        rc = runner.run(
+            "codeup", [sys.executable, "-c", _LISTEN_AND_EXIT], port=port
+        )
+        assert rc == 0
+        assert wait_until(lambda: not _process_running(old.pid)), "旧进程必须被收掉"
+        assert wait_until(lambda: json.loads(paths.routes_json.read_text())["routes"] == [])
+    finally:
+        stop_process_group(old, old.pid)
+
+
+# ------------------------------------- I4: 不可执行命令映射成 UpError
+
+
+def test_run_maps_non_executable_command_to_up_error(paths, tmp_path):
+    paths.ensure_files()
+    script = tmp_path / "no-exec.sh"
+    script.write_text("#!/bin/sh\nexit 0\n")  # 故意不 chmod +x
+    with pytest.raises(UpError) as cm:
+        _runner(paths).run("codeup", [str(script)])
+    assert "无法启动命令" in str(cm.value)
+
+
+def test_run_maps_missing_command_to_up_error(paths, tmp_path):
+    paths.ensure_files()
+    with pytest.raises(UpError) as cm:
+        _runner(paths).run("codeup", [str(tmp_path / "absent-cmd")])
+    assert "无法启动命令" in str(cm.value)
+
+
+# ------------------------- I5: 心跳不再静默吞异常（可重试报一次，未知则停）
+
+
+def test_watch_retries_store_errors_and_reports_once(paths, monkeypatch, capsys):
+    import threading
+
+    from devproxy.gateway.store import RouteStoreError
+
+    paths.ensure_files()
+    cfg = Config(storage=str(paths.data_dir))
+    caddy = FakeCaddy()
+    store = RouteStore(paths, cfg, caddy)
+    admin = FakeAdmin()
+    runner = UpRunner(store, cfg, admin)
+    runner.heartbeat_interval = 0.05
+
+    route = Route(
+        name="x", domain="x.test", port=1, mode="up", upstream="127.0.0.1:1"
+    )
+    store.mutate(lambda t: t.upsert(route))
+    admin.config_payload = {}
+
+    calls = {"n": 0}
+
+    def failing_mutate(fn, *args, **kwargs):
+        calls["n"] += 1
+        raise RouteStoreError("reload 持续失败（测试）")
+
+    monkeypatch.setattr(store, "mutate", failing_mutate)
+    stop = threading.Event()
+    t = threading.Thread(target=runner._watch, args=(route, stop), daemon=True)
+    t.start()
+    assert wait_until(lambda: calls["n"] >= 3), "可重试错误不得杀死守护线程"
+    stop.set()
+    t.join(timeout=10)
+    assert not t.is_alive()
+
+    err = capsys.readouterr().err
+    assert err.count("心跳失败") == 1, "相同错误只报一次，避免每轮刷屏"
+
+
+def test_watch_stops_on_unknown_exception(paths, monkeypatch, capsys):
+    import threading
+
+    paths.ensure_files()
+    cfg = Config(storage=str(paths.data_dir))
+    store = RouteStore(paths, cfg, FakeCaddy())
+    admin = FakeAdmin()
+    runner = UpRunner(store, cfg, admin)
+    runner.heartbeat_interval = 0.05
+
+    route = Route(
+        name="x", domain="x.test", port=1, mode="up", upstream="127.0.0.1:1"
+    )
+    store.mutate(lambda t: t.upsert(route))
+    admin.config_payload = {}
+
+    def broken_mutate(fn, *args, **kwargs):
+        raise RuntimeError("未知错误（测试）")
+
+    monkeypatch.setattr(store, "mutate", broken_mutate)
+    stop = threading.Event()
+    t = threading.Thread(target=runner._watch, args=(route, stop), daemon=True)
+    t.start()
+    t.join(timeout=10)
+    stop.set()
+    assert not t.is_alive(), "未知异常应记录后结束线程"
+    assert "已停止" in capsys.readouterr().err
+
+
+# --------------------------- M5: 区分「身份缺失」与「pid 被复用」的诊断
+
+
+def test_kill_pid_group_messages_distinguish_unknown_identity_from_reuse(capsys):
+    proc = _spawn_sleeper()
+    try:
+        assert kill_pid_group(proc.pid, None) is False
+        err = capsys.readouterr().err
+        assert "缺少 proc_start" in err
+        assert "pid 被复用" not in err
+
+        forged = (proc_start_time(proc.pid) or "0") + "-forged"
+        assert kill_pid_group(proc.pid, forged) is False
+        assert "已被复用" in capsys.readouterr().err
+    finally:
+        stop_process_group(proc, proc.pid)
+
+
+# ----------------------- M7: 路由存活判断必须结构化，不能做全局子串匹配
+
+
+def test_route_live_ignores_domain_string_in_unrelated_fields():
+    from devproxy.gateway.runner import _route_live
+
+    admin = FakeAdmin()
+    admin.config_payload = {
+        "apps": {
+            "http": {
+                "servers": {
+                    "srv0": {
+                        "routes": [
+                            {"headers": {"X-Dev": ["x.test"]}},
+                            {"match": [{"host": ["ax.test"]}]},
+                        ]
+                    }
+                }
+            }
+        },
+        "logging": {"note": "x.test"},
+    }
+    assert _route_live(admin, "x.test") is False
+
+
+def test_route_live_sees_structured_host():
+    from devproxy.gateway.runner import _route_live
+
+    admin = FakeAdmin()
+    admin.config_payload = {
+        "apps": {
+            "http": {
+                "servers": {
+                    "srv0": {
+                        "routes": [{"match": [{"host": ["x.test", "y.test"]}]}]
+                    }
+                }
+            }
+        }
+    }
+    assert _route_live(admin, "x.test") is True
+    assert _route_live(admin, "y.test") is True
+    assert _route_live(admin, "z.test") is False
+
+
+def test_route_live_handles_malformed_payload_without_raising():
+    from devproxy.gateway.runner import _route_live
+
+    admin = FakeAdmin()
+    admin.config_payload = ["not", "a", "dict"]
+    assert _route_live(admin, "x.test") is False
+    admin.config_payload = {"apps": {"http": {"servers": "broken"}}}
+    assert _route_live(admin, "x.test") is False
