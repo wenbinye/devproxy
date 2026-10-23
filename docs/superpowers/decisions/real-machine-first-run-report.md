@@ -206,6 +206,28 @@ https://not-registered.test/           000（握手失败 —— 安全属性成
 1. **竞态**：重启解析器后没有等待/重试就做依赖解析的探测。
 2. **归因错误**：`http_ok` 无法区分"解析失败""连接被拒""TLS 失败"，一律报成 TLS。
 
+### V3（已修，`ba50e4f`）：DNS 测试不是 hermetic 的
+
+真机首次 `devproxy setup` 写入 `/etc/systemd/resolved.conf.d/devproxy.conf` 之后，
+**四个 DNS 组件测试立刻变红**（`test_plan_writes_resolved_conf` 等）：
+
+```
+assert any(a.privileged for a in actions), "写 /etc 需要提权"
+E   AssertionError: 写 /etc 需要提权
+```
+
+根因：`DnsComponent.plan()` 的就绪判据是**直接读**目标文件的内容，
+而这些路径都在 `/etc` 下 —— conftest 的 `isolated_home` 夹具只重定向 `HOME`/`XDG_*`，
+**管不到绝对路径**。真实文件内容恰好与渲染结果一致 → `plan()` 返回空 → 断言"有动作"的全部失败。
+
+也就是说：**这套测试在开发者的机器上一旦真跑过工具就会红，而代码没有任何问题**。
+
+修法：`tests/test_component_dns.py` 加模块级 autouse 夹具，把 `RESOLVED_CONF` /
+`SYSTEM_DNSMASQ_CONF` / `RESOLVER_DIR` 三个常量重定向到 `tmp_path`；
+另加一条守卫用例，断言生产上这三个常量仍是 `/etc` 下的真实位置。
+
+验证：把真实 drop-in 文件追加一行"tampered"之后重跑，43 个用例仍全绿 —— 夹具确实挡住了宿主状态。
+
 ### V2（Minor）：`dns_route_installed` 只认自己的标记文件
 
 工具只检查 `/etc/systemd/resolved.conf.d/devproxy.conf` 是否存在。
