@@ -33,8 +33,8 @@ PATCH /config/apps/http/servers/srv0/routes
 2. **它不碰系统。** 没有部署、没有 DNS 路由、没有证书信任、没有开机自启 ——
    这些都得手工来。新工具把这些一次性做完。
 
-`devproxy` 用**文件即真相**的方式取代它：路由写在 `state/routes.json`，
-渲染成 `state/routes.caddy`，由主 Caddyfile `import`；改动走
+`devproxy` 用**文件即真相**的方式取代它：路由写在 `~/.local/state/devproxy/routes.json`，
+渲染成 `~/.local/state/devproxy/routes.caddy`，由主 Caddyfile `import`；改动走
 "加锁 → 改表 → 渲染 → 校验 → 落盘 → reload" 的事务，reload 失败会回滚。
 
 ## 迁移到 `devproxy` 之后

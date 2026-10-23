@@ -1,28 +1,36 @@
 # devproxy 真机验证清单
 
-自动化测试（607 个用例 + 18 个子测试）覆盖不到的、**必须在真实机器上跑一遍**的行为。
+自动化测试（997 个用例）覆盖不到的、**必须在真实机器上跑一遍**的行为。
 发版前逐条打勾；打不了勾的项写明「未验证 + 原因」。
 
 **条目统计**
 
 | 分组 | 条数 | 来源 |
 |---|---|---|
-| A. macOS 未验证行为 | 22 | `.superpowers/sdd/2026-10-22-devproxy-migrate-and-macos/task-16-report.md` §7 第 1-17 项 + 第二轮第 18-22 项 |
-| B. Task 16 评审的遗留缺口 | 5 | 同上目录 `progress.md` 中「Task 16: minor (deferred)」的 ①-⑤ |
+| A. macOS 行为 | 22 | 迁移与 macOS 阶段的评审缺口（Task 16 §7 第 1-17 项 + 第二轮第 18-22 项） |
+| B. Task 16 评审的遗留缺口 | 5 | 同上，「Task 16: minor (deferred)」的 ①-⑤ |
 | C. 迁移检测的残留风险 | 1 | `migrate.detect_legacy()`「读不到遗留单元 ⇒ 视为没有遗留环境」 |
 | **小计（A+B+C）** | **28** | |
 | D. Linux 真机检查 | 8 | 单元测试覆盖不到的 Linux 侧行为（不计入 28） |
+| F. 新增功能的真机检查 | 11 | 2026-10-23 起新增的 `uninstall` / `sync` / `run` / 域名后缀护栏 / 子进程超时 |
 
 约定：
 
-- `[ ]` 未验证；`[x]` 已通过；`[!]` 未通过（后面写现象）；`[-]` 无法验证（写原因）。
+- 每项写成「**检查**」与「**预期**」两段：检查是可照着敲的命令，预期是可判定的结论。
+- 已在真机跑过并有结论的，结论写在 E / F 组里；A / B / C / D 组是**待跑**的清单。
 - 所有命令在**真实机器**上执行；不要用 fake 平台跑。
 - 涉及 sudo 的步骤先确认再执行。
-- macOS 组（A）需要一台**真 Mac**；本项目的开发机是 Linux，A 组至今**未在真机验证过**。
+- macOS 组（A）需要一台**真 Mac**；本项目的开发机是 Linux，A 组多数项至今**未在真机验证过**。
+
+**修订记录**
+
+| 日期 | 改了什么 |
+|---|---|
+| 2026-10-24 | 补 F 组（新增功能的真机检查）；C1 标注为已在代码层修复；更新用例数；修掉指向 gitignored 目录的悬空引用 |
 
 ---
 
-## A. macOS 未验证行为（22 项，本机为 Linux，全部未验证）
+## A. macOS 行为（22 项；多数仍未验证，结论见 E 组）
 
 > 这一组的行为在代码里都有实现与单元测试（用假 subprocess 验证「调用了什么、参数对不对」），
 > 但**真实系统的反馈**只能在 Mac 上取得。逐条执行并记录结果。
@@ -209,6 +217,18 @@
 
 ### C1. `migrate.detect_legacy()`：读不到遗留单元 ⇒ 视为「没有遗留环境」
 
+> **已在代码层修复（2026-10-23，Clean Code 评审 P1 批）**。
+> `detect_legacy()` 现在**不再**在读不到遗留单元时返回 `None`（=「没有遗留环境」），
+> 而是返回一个带 `error` 的 `LegacyState`；`migrate()` 见到 `state.error` 会
+> **抛 `MigrationError` 并中止迁移**（`未改动任何文件`），错误信息里带上单元路径与
+> 「为避免在没有备份的情况下覆盖用户手工维护的单元」这句解释。
+>
+> 同一批还堵住了两个兄弟分支：`ExecStart=` 里**解析不出 `--config`**、
+> 以及单元使用 **`EnvironmentFile=`**（变量无法安全带到新单元）—— 两者都明确拒绝迁移。
+>
+> 下面这条**仍然要在真机上跑**：修复本身是按「读不到 = 中止」设计的，
+> 但要确认真机上确实走到「中止」而不是又滑回「静默接管」。
+
 - 背景：`detect_legacy()` 在**读不到**遗留的 `caddy.service` 时（普通用户无权限、
   sudo 不可用）返回 `None`，即「没有遗留环境」。极端情况下迁移会**接管用户手工维护的
   Caddyfile 与单元环境变量**（例如 `MINIKUBE_IP`），而用户毫不知情。
@@ -223,8 +243,11 @@
      否则本项只能验证「提权回退生效」这一半（普通用户读不到 → 提权读到 → 仍识别出遗留环境）；
   3. 跑 `devproxy setup`，看它是否报告「检测到遗留的 caddy 服务」。
 - 预期：**要么**正确检测到遗留环境并给出备份与回滚提示，**要么**明确提示
-  「遗留单元读不到，无法确认是否有遗留环境」而不是静默接管。
-  若出现静默接管（无任何提示地改写单元），本项记为 `[!]` 并上报。
+  「遗留单元读不到，无法确认是否有遗留环境」并**中止迁移**而不是静默接管。
+  若出现静默接管（无任何提示地改写单元），本项记为失败并上报。
+
+  > 补一条更易触发的检查：把 `ExecStart=` 里的 `--config` 去掉（或改成 `--config=<路径>` 之外的
+  > 怪写法），`devproxy setup` 应当**明确拒绝迁移**并说明原因，而不是当成干净机器接管。
 
 ---
 
@@ -301,7 +324,7 @@
 
 | 项 | 结果 |
 |---|---|
-| 全量测试套件 | **662 passed**（修完下面三处之后；修复前 656 passed / 2 failed） |
+| 全量测试套件 | **662 passed**（当时的用例数；2026-10-24 已达 **997 passed**，含 Linux 与 macOS 两端） |
 | `devproxy config` | ✅ 路径与配置渲染正常 |
 | `devproxy doctor` | ✅ 表格渲染、退出码语义正常 |
 | `devproxy selftest` | ✅ **11/11 全过** —— 真实 Caddy 2.11.7 在 macOS 上：隔离实例启动、trust store 安装被禁用（caddy 日志佐证）、注册→reload→命中上游、未注册域名拿不到证书、http→https 跳转、注销→不再有路由 |
@@ -370,6 +393,94 @@ devproxy: 1 个步骤失败：把 CA 根证书加入系统钥匙串（…）
 - A9/A10/A13：`dscacheutil` / curl / `tail -f` 的真实行为
 - A15/A16/A18/A21：plist 权限、提权会话缓存、devproxy 能否读回自己装的 plist、root 属主文件
 
+### E4. 2026-10-24 之后的进展
+
+- 全部单元测试仍**两端全绿**（Linux 997 passed / macOS 997 passed）。
+- 期间新增了 `uninstall`、`sync`、`run` 三个命令与域名后缀白名单护栏 ——
+  它们的真机检查项在 **F 组**。
+- 那台 Mac 至今仍未装上 `devproxy` 本体（只跑测试脚手架），也**没有在图形界面里**
+  执行过 `devproxy trust` —— A / E 组里需要图形授权的项仍全部未验证。
+
+## F. 新增功能的真机检查（11 项）
+
+2026-10-23 之后新增的命令与护栏。单元测试覆盖了逻辑分支，但**真机上的副作用**
+（真删文件、真起进程、真改信任库）只能在这里验。
+
+### F1. `uninstall --dry-run` 零副作用
+
+- 检查：跑 `devproxy uninstall --dry-run`，前后对比：caddy/dnsmasq 服务状态、
+  `/etc` 下的 DNS 路由文件、系统信任库里的 CA、`~/.local/state/devproxy/` 下各文件的存在与 mtime。
+- 预期：**完全不变**。输出里应列出会做的每一步，并明确标出「以下内容将保留」。
+
+### F2. `uninstall` 的实际卸载与保留清单
+
+- 检查：在**测试机**上跑 `devproxy uninstall --yes`，然后逐项核对。
+- 预期：caddy/dnsmasq 服务被停并移除单元；DNS 路由文件被删；CA 从系统信任库与 NSS 库移除；
+  `sites.caddy`、`config.toml`、`~/.local/share/caddy`、`backups/`、linger **都还在**；
+  结尾打印出「保留了什么」。
+
+### F3. CA 按**指纹**卸载，不按昵称
+
+- 检查：先装一个**同昵称、不同内容**的 CA 进 NSS 库，再跑 `uninstall --remove-ca`。
+- 预期：只删工具那一张，同昵称的另一张**必须还在**（昵称不是标识，字节才是）。
+
+### F4. `uninstall --purge` 的额外删除
+
+- 检查：跑 `devproxy uninstall --yes --purge`。
+- 预期：除 F2 的项外，`~/.local/share/caddy`、`backups/`、`config.caddy_bin_path` 也被删；
+  **迁移备份随之消失** —— 顺序是「先回滚、再卸载」或「卸载但不 purge」。
+
+### F5. `uninstall` 幂等
+
+- 检查：连跑两次 `devproxy uninstall --yes`。
+- 预期：第二次输出「没有可卸载的东西」并**退出码 0**。
+
+### F6. `sync` 端到端：声明 → 起服务 → 域名可访问
+
+- 检查：项目根放一份 `devproxy.toml`（`[[routes]]` + `command`），跑 `devproxy sync`，
+  然后 `curl -k https://<name>.test/`。
+- 预期：进程起来、路由注册、**域名真的能通**；应用日志在
+  `~/.local/state/devproxy/logs/routes/<name>.log` 里。
+
+### F7. `sync` 的冲突报告**不杀进程**
+
+- 检查：跑一次 `sync` 后改 `devproxy.toml` 里的 `command` 再跑。
+- 预期：报告冲突（现状 vs 期望 + 修复命令），**旧进程仍在**（`ps` 可见），
+  退出码 1（配置漂移要让 CI 看得见）。
+
+### F8. `sync --prune` 的边界
+
+- 检查：手工 `devproxy up manual-route` 建一条；再从 `devproxy.toml` 里删掉某条并
+  跑 `devproxy sync --prune --yes`。
+- 预期：只删**本文件声明过**的那条；手工建的那条**必须还在**。
+
+### F9. `run` 的前台托管与 Ctrl-C 优雅退出
+
+- 检查：停掉现役 caddy 服务后跑 `devproxy run`，另开一个终端 `curl -k https://<name>.test/`，
+  然后在 `run` 的终端里按 Ctrl-C。
+- 预期：域名在 `run` 期间可达；Ctrl-C 后 Caddy **优雅退出**（日志有
+  `shutdown complete`）、devproxy 退出码 0、**无残留进程**（`pgrep -f caddy` 为空）。
+  停服务后路由**不再被服务**（路由表是文件，但没人加载它了）。
+
+### F10. `run` 在**没有 systemd** 的环境可用（容器 / WSL）
+
+- 检查：在没有 systemd 的容器里跑 `devproxy setup`（装服务会失败）→ 改用 `devproxy run`。
+- 预期：`run` 能起来并托管路由；这正是它存在的理由。
+
+### F11. 域名后缀白名单与子进程超时护栏
+
+- 检查：① `config.toml` 里写 `domain_suffix = "com"` → 跑任何命令；
+  ② 改成 `domain_suffix = "dev"` + `allowed_domain_suffixes = ["dev"]` → 再跑。
+- 预期：① 退出码 **1**（配置错误）并说明「整机解析会被劫持 / cookie 串味 / HSTS」；
+  ② 正常。
+
+> **子进程超时**（2026-10-23 真机事故的产物）：此前 `certutil -N --empty-password`
+> 在密码提示上死循环，两小时往重定向文件写了 **200GB×2**，把 `/home` 撑到 100%。
+> 修法是给普通子进程调用加超时（`platform/linux.py` 的 `_run`，超时返回 124）。
+> **已在本机实测**（那次事故本身），无需再验；这里记一笔是为了别把它当"没发生过"。
+
+---
+
 ## 附：不在本清单内的自动化覆盖
 
 以下内容已有自动化测试覆盖，**不需要**在真机上重复验证：
@@ -381,3 +492,9 @@ devproxy: 1 个步骤失败：把 CA 根证书加入系统钥匙串（…）
 - 四个组件的 check/plan/apply/verify 与 macOS 分支 → `tests/test_component_*.py`、`tests/test_platform_macos.py`
 - CLI 各子命令与退出码 → `tests/test_cli.py`
 - 端到端自检 → `tests/test_selftest.py`、`tests/test_integration.py`、`devproxy selftest`
+- 域名后缀白名单与放行机制 → `tests/test_config.py`
+- 证书信任探测与 Firefox 提示 → `tests/test_component_certs.py`、`tests/test_doctor.py`
+- 卸载的规划、保留清单、幂等、CA 按指纹卸载 → `tests/test_uninstall.py`
+- 项目级配置的解析、发现、冲突判定、prune 边界 → `tests/test_project.py`、`tests/test_sync.py`
+- 前台托管的信号处理与前置检查 → `tests/test_run.py`
+- 平台层（systemd / launchd / 假平台）与子进程超时 → `tests/test_platform_linux.py`、`tests/test_platform_macos.py`
