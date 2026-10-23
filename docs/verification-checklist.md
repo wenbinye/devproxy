@@ -330,6 +330,35 @@
    `doctor` 却报 `dns ✔ 就绪`。改为内容优先、读不到才退回平台存在性判据。
    与 Linux 侧此前记录的 V2 属同一类："只认存在性 / 只认自己的产物"。
 
+### E2b. 第四处缺陷：macOS 拒绝在非图形会话里改系统信任设置
+
+真机（macOS 26 + SSH）跑 `devproxy trust` 的实测结果：
+
+```
+devproxy: 1 个步骤失败：把 CA 根证书加入系统钥匙串（…）
+  （安装 CA 到系统钥匙串失败: SecTrustSettingsSetTrustSettings:
+    The authorization was denied since no user interaction was possible.）
+退出码: 1
+```
+
+**排障结论（逐项核实）**：
+
+- 证书**已经**进了系统钥匙串（按指纹能在 `/Library/Keychains/System.keychain` 里找到）
+  —— 失败的只是"设信任标志"这一步。
+- `security verify-cert -c <ca> -p ssl` → `CSSMERR_TP_NOT_TRUSTED`，与工具判定一致
+  （工具的 `ca_trusted` 用的就是这个）。
+- 根因：`SecTrustSettingsSetTrustSettings` 需要**图形界面里的授权框**；
+  SSH 会话没有图形上下文，系统直接拒绝（`errAuthorizationInteractionNotAllowed`）。
+  **sudo 本身是成功的** —— 这不是权限不足。
+- `launchctl asuser <uid>` 的绕法在纯 SSH 下也走不通：内层 `sudo` 仍要 TTY。
+
+**修法**（`4d7fc8a`）：识别这类系统原文，改抛 `PermissionError`（CLI 映射为退出码 4），
+并把"请在那台 Mac 的「终端」窗口里运行：devproxy trust"单独成行输出
+（整段会被 Rich 折行，命令必须保持完整可复制）。
+
+**结论**：这个步骤**只能在 Mac 的图形界面里完成**，属于系统限制而非工具缺陷；
+工具能做的是把失败讲清楚、给对退出码。
+
 ### E3. 仍未验证（需要 root，须由机器主人交互执行）
 
 以下都发生在 `devproxy setup` 的提权阶段，SSH 非交互无法完成（那台机器 sudo 需要密码）：
