@@ -361,6 +361,26 @@ def test_apply_raises_when_update_ca_certificates_fails(tmp_path, monkeypatch):
 # 工具就会一直以为装好了，而库里根本没有自己那条。
 
 
+class _StalePlatform(FakePlatform):
+    """自有昵称下有陈旧条目，`-D` 执行成功后消失（删除后复验才通得过）。"""
+
+    def __init__(self):
+        super().__init__()
+        self.stale = True
+
+    def nss_stale_nickname(self, ca, nickname, nss_dir=None):
+        return self.stale
+
+    def nss_has_nickname(self, nickname, nss_dir=None):
+        return self.stale
+
+    def run(self, argv):
+        result = super().run(argv)
+        if argv[:1] == ["certutil"] and "-D" in argv:
+            self.stale = False
+        return result
+
+
 class _NssFlagPlatform(FakePlatform):
     """库里有这张 CA，但缺 SSL 信任标志 —— 只有 -M 能补上。"""
 
@@ -550,11 +570,7 @@ def test_plan_offers_stale_cleanup_when_ca_trusted(tmp_path, monkeypatch):
     """
     _certutil_installed(monkeypatch)
 
-    class Stale(FakePlatform):
-        def nss_stale_nickname(self, ca, nickname, nss_dir=None):
-            return True
-
-    platform = Stale()
+    platform = _StalePlatform()
     comp, _platform, paths = _component(tmp_path, platform)
     ca = _write_ca(paths)
     _trust_both(platform, ca)
@@ -562,6 +578,7 @@ def test_plan_offers_stale_cleanup_when_ca_trusted(tmp_path, monkeypatch):
     status = comp.check()
     assert status.ok is True
     assert "陈旧" in status.detail
+    assert "devproxy trust" in status.hint, "修复列要能直接给出动作"
 
     actions = comp.plan()
     assert [a.command[0] for a in actions] == ["remove-stale-nss-ca"]
@@ -572,11 +589,7 @@ def test_plan_offers_stale_cleanup_when_ca_trusted(tmp_path, monkeypatch):
 def test_remove_stale_action_runs_certutil_delete(tmp_path, monkeypatch):
     _certutil_installed(monkeypatch)
 
-    class Stale(FakePlatform):
-        def nss_stale_nickname(self, ca, nickname, nss_dir=None):
-            return True
-
-    platform = Stale()
+    platform = _StalePlatform()
     comp, paths, _ = _injected(tmp_path, platform)
     ca = _write_ca(paths)
     comp.apply(
@@ -628,6 +641,76 @@ def test_remove_stale_action_raises_when_delete_fails(tmp_path, monkeypatch):
             ]
         )
     assert "database locked" in str(ei.value)
+
+
+def test_remove_stale_action_raises_when_delete_unverifiable(tmp_path, monkeypatch):
+    """库被锁 / 不可读时 `-L` 也非零 —— 判不了就必须报错，不能当"条目不存在"。"""
+    _certutil_installed(monkeypatch)
+
+    class Locked(FakePlatform):
+        def run(self, argv):
+            self.commands.append(list(argv))
+            if argv[:1] == ["certutil"] and "-D" in argv:
+                return 255, "certutil: function failed: SEC_ERROR_BAD_DATABASE"
+            return 0, ""
+
+        def nss_stale_nickname(self, ca, nickname, nss_dir=None):
+            return True
+
+        def nss_has_nickname(self, nickname, nss_dir=None):
+            return None  # 判不了
+
+    platform = Locked()
+    comp, paths, _ = _injected(tmp_path, platform)
+    ca = _write_ca(paths)
+    with pytest.raises(RuntimeError) as ei:
+        comp.apply(
+            [
+                Action(
+                    description="清理 NSS 库中工具昵称下的陈旧 CA 根证书",
+                    kind="run",
+                    command=["remove-stale-nss-ca", str(ca), str(tmp_path / "nssdb")],
+                    privileged=False,
+                )
+            ]
+        )
+    message = str(ei.value)
+    assert "无法确认" in message
+    assert "SEC_ERROR_BAD_DATABASE" in message
+
+
+def test_remove_stale_action_raises_when_delete_reports_success_but_fails(
+    tmp_path, monkeypatch
+):
+    """`-D` 返回 0 但条目仍在（库目录只读）→ 必须报错。"""
+    _certutil_installed(monkeypatch)
+
+    class SilentNoop(FakePlatform):
+        def run(self, argv):
+            self.commands.append(list(argv))
+            return 0, ""  # 假装成功，但下面 stale 仍是 True
+
+        def nss_stale_nickname(self, ca, nickname, nss_dir=None):
+            return True
+
+        def nss_has_nickname(self, nickname, nss_dir=None):
+            return True
+
+    platform = SilentNoop()
+    comp, paths, _ = _injected(tmp_path, platform)
+    ca = _write_ca(paths)
+    with pytest.raises(RuntimeError) as ei:
+        comp.apply(
+            [
+                Action(
+                    description="清理 NSS 库中工具昵称下的陈旧 CA 根证书",
+                    kind="run",
+                    command=["remove-stale-nss-ca", str(ca), str(tmp_path / "nssdb")],
+                    privileged=False,
+                )
+            ]
+        )
+    assert "未生效" in str(ei.value)
 
 
 def test_remove_stale_action_tolerates_missing_entry(tmp_path, monkeypatch):
@@ -697,11 +780,7 @@ def test_apply_drops_stale_own_entry_when_trusted_elsewhere(tmp_path, monkeypatc
     """已信任但自有昵称下残留**旧 CA** → 定向删除那一条。"""
     _certutil_installed(monkeypatch)
 
-    class Stale(FakePlatform):
-        def nss_stale_nickname(self, ca, nickname, nss_dir=None):
-            return nickname == certs_module.CA_NAME
-
-    platform = Stale()
+    platform = _StalePlatform()
     comp, paths, _ = _injected(tmp_path, platform)
     ca = _write_ca(paths)
     platform.nss.add(ca)  # 平台判定已信任（异昵称）
@@ -817,6 +896,20 @@ def test_cli_trust_is_idempotent(tmp_path, monkeypatch):
     assert result.exit_code == 0
     assert "CA 根证书已信任，无需变更。" in result.stdout
     assert platform.commands == []
+
+
+def test_cli_trust_reports_cleanup_not_install(tmp_path, monkeypatch):
+    """只做清理时不能说"已安装 CA 根证书" —— 那是两回事。"""
+    _certutil_installed(monkeypatch)
+    platform = _StalePlatform()
+    paths, cfg = _patch_cli(monkeypatch, tmp_path, platform)
+    ca = _write_ca(paths)
+    _trust_both(platform, ca)
+
+    result = CliRunner().invoke(app, ["trust", "--yes"])
+    assert result.exit_code == 0, result.stdout
+    assert "已清理" in result.stdout
+    assert "已安装" not in result.stdout
 
 
 def test_cli_trust_without_ca_is_a_note(tmp_path, monkeypatch):

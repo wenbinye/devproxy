@@ -726,7 +726,12 @@ def trust(
         raise typer.Exit(EXIT_SUDO)
     except Exception as e:  # noqa: BLE001 —— 面向用户的友好报错，不是 traceback
         fail(str(e))
-    console.print("已安装 CA 根证书（Chrome 需完全退出重启后生效）")
+    # 只做清理时不能说"已安装" —— 那是两回事，用户会以为 CA 被重装过
+    commands = {a.command[0] for a in actions if a.command}
+    if commands <= {"remove-stale-nss-ca"}:
+        console.print("已清理 NSS 库中的陈旧 CA 根证书（Chrome 需完全退出重启后生效）")
+    else:
+        console.print("已安装 CA 根证书（Chrome 需完全退出重启后生效）")
 
 
 @app.command()

@@ -10,6 +10,7 @@
 本机没有 certutil 就整组跳过（`sudo apt install libnss3-tools`）。
 """
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -228,6 +229,15 @@ def _install_action(ca: Path, db: Path) -> Action:
         description="安装 CA 根证书到 NSS 库（Chrome/Chromium）",
         kind="run",
         command=["install-nss-ca", str(ca), str(db)],
+        privileged=False,
+    )
+
+
+def _remove_action(ca: Path, db: Path) -> Action:
+    return Action(
+        description="清理 NSS 库中工具昵称下的陈旧 CA 根证书",
+        kind="run",
+        command=["remove-stale-nss-ca", str(ca), str(db)],
         privileged=False,
     )
 
@@ -475,6 +485,50 @@ def test_apply_removes_stale_entry_while_repairing_flags(tmp_path):
     assert _rows(db) == [("Caddy Local Authority", "C,,")]
 
 
+def test_production_construction_detects_stale_entry(tmp_path, isolated_home):
+    """**生产构造**（不注入 nss_dir）也必须能看见陈旧条目。
+
+    `NSS_DIR = Path("~/.pki/nssdb")` —— pathlib 不展开 `~`。组件构造时若不展开，
+    `(nss_dir / "cert9.db").exists()` 查的是「当前工作目录下名为 `~` 的目录」，
+    恒为 False。cli.py 的三处生产构造都不传 nss_dir，于是这整条清理逻辑
+    在任何真实用户身上都是死的。
+
+    本用例刻意**不注入** nss_dir：库放在 `$HOME/.pki/nssdb`（isolated_home），
+    平台也用默认的 `Path.home()`。
+    """
+    old_ca = _make_ca(tmp_path, "old devproxy CA")
+    ca = _make_ca(tmp_path, "current devproxy CA")
+    db = _new_db(isolated_home / ".pki" / "nssdb")
+    _certutil(db, "-A", "-n", "devproxy Local CA", "-t", "C,,", "-i", str(old_ca))
+    _certutil(db, "-A", "-n", "Caddy Local Authority", "-t", "C,,", "-i", str(ca))
+
+    paths = Paths(tmp_path / "config", tmp_path / "state", tmp_path / "data")
+    paths.ensure_files()
+    cfg = Config(storage=str(paths.data_dir))
+    platform = _SystemTrusted()  # user_home 默认 = Path.home() = isolated_home
+    comp = CertComponent(platform, paths, cfg)  # ← 生产构造：不传 nss_dir
+
+    comp.ca_path.parent.mkdir(parents=True, exist_ok=True)
+    comp.ca_path.write_text(ca.read_text(encoding="utf-8"), encoding="utf-8")
+
+    assert comp.nss_dir == isolated_home / ".pki" / "nssdb", "`~` 必须被展开"
+    assert (comp.nss_dir / "cert9.db").exists()
+
+    status = comp.check()
+    assert status.ok is True
+    assert "陈旧" in status.detail, "生产构造下 check() 必须报出陈旧条目"
+    assert "devproxy trust" in status.hint
+
+    actions = comp.plan()
+    assert [a.command[0] for a in actions] == ["remove-stale-nss-ca"], (
+        "生产构造下 plan() 必须产出清理动作，否则 apply() 永远不会被调用"
+    )
+
+    comp.apply(actions)
+    assert _rows(db) == [("Caddy Local Authority", "C,,",)]
+    assert comp.plan() == []
+
+
 def test_apply_keeps_own_entry_when_it_is_the_current_ca(tmp_path):
     """自有昵称下就是**当前** CA（已信任）→ 什么都不删。"""
     ca = _make_ca(tmp_path)
@@ -511,3 +565,37 @@ def test_apply_fails_loud_when_platform_db_differs(tmp_path):
     assert "不一致" in message
     assert str(other_db) in message and str(platform_db) in message
     assert _rows(other_db) == [], "报错前不得往任何一个库写东西"
+
+
+# -- fix round 3：删除之后的复验 -------------------------------------------
+
+
+def test_apply_reports_when_delete_silently_does_nothing(tmp_path):
+    """库**目录只读**时 `certutil -D` 返回 0 但什么都没删 —— 必须报错。
+
+    实测（NSS 3.120）：`chmod 500 <db>` 后 `certutil -D` 返回码是 0，
+    `certutil -L` 里条目却还在。只看返回码就会报"清理成功"。
+    """
+    if os.geteuid() == 0:
+        pytest.skip("root 不受目录写权限限制，复现不出这个场景")
+    old_ca = _make_ca(tmp_path, "old devproxy CA")
+    ca = _make_ca(tmp_path, "current devproxy CA")
+    home = tmp_path / "home"
+    db = _new_db(home / ".pki" / "nssdb")
+    _certutil(db, "-A", "-n", "devproxy Local CA", "-t", "C,,", "-i", str(old_ca))
+    _certutil(db, "-A", "-n", "Caddy Local Authority", "-t", "C,,", "-i", str(ca))
+
+    comp, _platform, _paths, _cfg = _component(tmp_path, home, db)
+    comp.ca_path.parent.mkdir(parents=True, exist_ok=True)
+    comp.ca_path.write_text(ca.read_text(encoding="utf-8"), encoding="utf-8")
+
+    db.chmod(0o500)
+    try:
+        with pytest.raises(RuntimeError) as ei:
+            comp.apply([_remove_action(comp.ca_path, db)])
+    finally:
+        db.chmod(0o700)
+    assert "未生效" in str(ei.value)
+    assert [n for n, _ in _rows(db)] == ["devproxy Local CA", "Caddy Local Authority"], (
+        "这个场景下条目本来就删不掉 —— 测试的职责是断言我们**报错**了"
+    )

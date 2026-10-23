@@ -177,6 +177,25 @@ def _nss_rows(listing: str) -> list[tuple[str, str]]:
     return rows
 
 
+def _nss_missing_cert(text: str) -> bool:
+    """`certutil` 的输出是否在**明确**说"这个条目不存在"。
+
+    只有这几种文案才算"不存在"：
+    - `could not find certificate named "…"`（`-D` / `-L` 找不到昵称）
+    - `could not find cert: …`
+    - `PR_FILE_NOT_FOUND_ERROR`
+
+    库被锁 / 不可读 / 损坏时的 `SEC_ERROR_BAD_DATABASE` 之类**不算** ——
+    那种情况是"判不了"，必须往上报，绝不能当成"没有"。
+    """
+    lowered = text.lower()
+    return (
+        "could not find" in lowered
+        or "pr_file_not_found_error" in lowered
+        or "not found" in lowered
+    )
+
+
 def _nss_flags_trusted(flags: str) -> bool:
     """这条目的 **SSL 列** 是否表示"受信任的 CA"。
 
@@ -610,7 +629,11 @@ class LinuxPlatform:
         这是**非协议方法**（组件层用 getattr 探测）：macOS 没有 NSS 库，
         不实现也不影响。
         """
-        nss = Path(nss_dir) if nss_dir is not None else self.nss_db_path()
+        nss = (
+            Path(nss_dir).expanduser()
+            if nss_dir is not None
+            else self.nss_db_path()
+        )
         if not (nss / "cert9.db").exists():
             return []
         try:
@@ -665,7 +688,11 @@ class LinuxPlatform:
 
         判不了（读不到、不是 PEM）一律返回 False：宁可漏删也不能误删。
         """
-        nss = Path(nss_dir) if nss_dir is not None else self.nss_db_path()
+        nss = (
+            Path(nss_dir).expanduser()
+            if nss_dir is not None
+            else self.nss_db_path()
+        )
         if not (nss / "cert9.db").exists():
             return False
         code, pem = _run(["certutil", "-L", "-d", f"sql:{nss}", "-n", nickname, "-a"])
@@ -680,17 +707,33 @@ class LinuxPlatform:
             return False
         return not (stored & expected)
 
-    def nss_has_nickname(self, nickname: str, nss_dir: Path | None = None) -> bool:
-        """`nickname` 下是否有条目（不看内容）。**非协议方法**。
+    def nss_has_nickname(
+        self, nickname: str, nss_dir: Path | None = None
+    ) -> bool | None:
+        """`nickname` 下是否有条目（不看内容）。**非协议方法**，三态。
 
-        用来区分 `certutil -D` 的两种失败：条目已经不存在（幂等，可以忽略）
-        还是删除真的失败了（库被锁 / 权限 / 其他，必须报出来）。
+        - `True` / `False`：确定有 / 确定没有；
+        - `None`：**判不了**（库被锁、不可读、DB 损坏…）。
+
+        为什么必须三态：`certutil -L -n` 在"条目不存在"和"库读不了"两种
+        情况下**都**返回非零。把后者当"不存在"，删除失败就会被当成幂等成功
+        吞掉（旧根还留在库里，工具却报已就绪）。实测库不可读时输出是
+        `SEC_ERROR_BAD_DATABASE: security library: bad database.` ——
+        与"找不到"完全是两种文案。
         """
-        nss = Path(nss_dir) if nss_dir is not None else self.nss_db_path()
+        nss = (
+            Path(nss_dir).expanduser()
+            if nss_dir is not None
+            else self.nss_db_path()
+        )
         if not (nss / "cert9.db").exists():
+            return False  # 库都没有，条目自然不存在
+        code, msg = _run(["certutil", "-L", "-d", f"sql:{nss}", "-n", nickname])
+        if code == 0:
+            return True
+        if _nss_missing_cert(msg):
             return False
-        code, _ = _run(["certutil", "-L", "-d", f"sql:{nss}", "-n", nickname])
-        return code == 0
+        return None  # 锁 / 权限 / DB 损坏 —— 判不了
 
     def nss_trust_flags(self, flags: str) -> str:
         """补 SSL 信任标志时用的完整三列标志字符串（**非协议方法**）。

@@ -904,14 +904,34 @@ def test_linux_nss_stale_nickname_false_when_absent(tmp_path, monkeypatch):
 
 
 def test_linux_nss_has_nickname_true_and_false(tmp_path, monkeypatch):
-    """`-L -n <昵称>` 能跑通 = 条目存在；失败 = 不存在。"""
+    """`-L -n <昵称>` 跑通 = 存在；输出明确说找不到 = 不存在。"""
     p = _nss_platform(tmp_path)
     monkeypatch.setattr(linux_mod, "_run", lambda argv: (0, "Certificate: …"))
     assert p.nss_has_nickname("devproxy Local CA") is True
     monkeypatch.setattr(
-        linux_mod, "_run", lambda argv: (255, "could not find certificate")
+        linux_mod,
+        "_run",
+        lambda argv: (255, 'certutil: could not find certificate named "x"'),
     )
     assert p.nss_has_nickname("devproxy Local CA") is False
+
+
+def test_linux_nss_has_nickname_unknown_when_database_unreadable(
+    tmp_path, monkeypatch
+):
+    """库被锁 / 不可读时 `-L` 也非零 —— 这是"判不了"，不是"不存在"。
+
+    实测 `chmod 000 cert9.db` 后 certutil 输出
+    `SEC_ERROR_BAD_DATABASE: security library: bad database.`，
+    条目其实还在。把它当"不存在"，删除失败就会被当成幂等成功吞掉。
+    """
+    p = _nss_platform(tmp_path)
+    monkeypatch.setattr(
+        linux_mod,
+        "_run",
+        lambda argv: (255, "certutil: function failed: SEC_ERROR_BAD_DATABASE"),
+    )
+    assert p.nss_has_nickname("devproxy Local CA") is None
 
 
 def test_linux_nss_has_nickname_false_without_db(tmp_path, monkeypatch):

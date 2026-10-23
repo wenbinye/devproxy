@@ -52,7 +52,12 @@ class CertComponent:
         self.paths = paths
         self.config = config
         self.system_dest = Path(system_dest) if system_dest else SYSTEM_CA_DEST
-        self.nss_dir = Path(nss_dir) if nss_dir else NSS_DIR
+        # **必须在这里展开 `~`**：NSS_DIR 是 `Path("~/.pki/nssdb")`，
+        # pathlib 不认波浪号。不展开的话 `(nss_dir / "cert9.db").exists()`
+        # 查的是「当前工作目录下的 ~/.pki/nssdb」—— 恒为 False，
+        # 生产构造（不注入 nss_dir 的三处调用）下所有 NSS 判定都会瞎掉。
+        # 只在这里展开一次，组件内部任何消费方拿到的都是绝对路径。
+        self.nss_dir = (Path(nss_dir) if nss_dir else NSS_DIR).expanduser()
 
     @property
     def ca_path(self) -> Path:
@@ -154,17 +159,25 @@ class CertComponent:
             return "C,,"
 
     def _nss_has_nickname(self, nss: Path, nickname: str) -> bool | None:
-        """昵称下是否有条目；平台不支持这个探测时返回 None（判不了）。"""
+        """昵称下是否有条目；判不了返回 None（平台不支持这个探测也是 None）。
+
+        **必须原样透传三态**：平台的 `None` 是"库读不了/被锁"，与
+        "确定没有"（False）完全不是一回事 —— 把 None 压成 bool 会让
+        "删除失败"重新变成"幂等成功"。
+        """
         getter = getattr(self.platform, "nss_has_nickname", None)
         if getter is None:
             return None
         try:
             try:
-                return bool(getter(nickname, nss_dir=nss))
+                result = getter(nickname, nss_dir=nss)
             except TypeError:
-                return bool(getter(nickname))
+                result = getter(nickname)
         except Exception:  # noqa: BLE001 —— 探测失败按"判不了"处理
             return None
+        if result is None:
+            return None
+        return bool(result)
 
     def _stale_own_entry(self) -> bool:
         """工具自有昵称下是否残留着**别的** CA。判定失败一律当作没有。"""
@@ -212,11 +225,15 @@ class CertComponent:
         if self._is_macos:
             return Status(ok=True, detail="CA 根证书已信任（系统钥匙串）")
         # 陈旧根属于"卫生问题"而不是"未就绪"：HTTPS 一切正常，所以 ok 仍是 True；
-        # 但也不能谎称完全没问题 —— detail 里点名，plan() 会产出清理动作。
-        detail = "CA 根证书已信任（系统信任库 + NSS 库）"
+        # 但也不能谎称完全没问题 —— 警示**前置**到 detail 开头（doctor 表格会截断
+        # 长字符串的末尾），同时放进 hint，让"修复"列直接给出动作。
         if self._stale_own_entry():
-            detail += "；NSS 库中工具昵称下残留陈旧 CA 根（devproxy trust 可清理）"
-        return Status(ok=True, detail=detail)
+            return Status(
+                ok=True,
+                detail="NSS 库中工具昵称下残留陈旧 CA 根；CA 根证书已信任（系统信任库 + NSS 库）",
+                hint="devproxy trust（清理陈旧 CA 根）",
+            )
+        return Status(ok=True, detail="CA 根证书已信任（系统信任库 + NSS 库）")
 
     # -- plan ----------------------------------------------------------
 
@@ -455,22 +472,38 @@ class CertComponent:
         `certutil -D` 的返回码**必须**检查：陈旧根会被浏览器永久信任，
         删除失败若被当成成功，旧根就留在库里而工具报"已就绪"。
         只有"条目确实不存在"（并发下已被别处删掉 / 本来就没有）才算幂等成功。
+
+        两种真实的"假成功"都被挡住了：
+        - 库被锁 / 不可读 → `-D` 非零，`nss_has_nickname` 返回 **None**（判不了）
+          → 必须往上报，不能当"已经没有这条"；
+        - 库**目录只读**时 `certutil -D` 返回 **0 却什么都没删**（实测）
+          → 删除之后必须复验条目真的没了。
         """
         if not unconditional and not self._nss_stale(ca, nss):
             return
         code, msg = self.platform.run(
             ["certutil", "-d", f"sql:{nss}", "-D", "-n", CA_NAME]
         )
-        if code == 0:
-            return
-        present = self._nss_has_nickname(nss, CA_NAME)
-        if present is False:
-            # 条目确实不存在 —— 目标状态已达成，幂等
-            return
-        if present is None and _nss_missing_output(msg):
-            # 平台不提供探测能力，只能看 certutil 的输出
-            return
-        raise RuntimeError(f"删除 NSS 库中的陈旧 CA 条目失败: {msg}")
+        if code != 0:
+            has_probe = getattr(self.platform, "nss_has_nickname", None) is not None
+            present = self._nss_has_nickname(nss, CA_NAME)
+            if present is False:
+                return  # 条目确实不存在 —— 目标状态已达成，幂等
+            if not has_probe and _nss_missing_output(msg):
+                # 平台不提供探测能力，只能看 certutil 的输出
+                return
+            if present is None and has_probe:
+                raise RuntimeError(
+                    "删除 NSS 库中的陈旧 CA 条目失败，且无法确认条目是否仍在"
+                    f"（库可能被锁或不可读）: {msg}"
+                )
+            raise RuntimeError(f"删除 NSS 库中的陈旧 CA 条目失败: {msg}")
+        # 返回 0 不代表真的删了：NSS 库目录只读时 certutil -D 静默无效（实测）。
+        if self._nss_stale(ca, nss):
+            raise RuntimeError(
+                "删除 NSS 库中的陈旧 CA 条目未生效（certutil 返回成功但条目仍在，"
+                f"库目录可能不可写）: {msg}"
+            )
 
     def _repair_flags(
         self,
