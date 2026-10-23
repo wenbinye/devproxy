@@ -21,6 +21,9 @@ def doctor(
     paths, config, _, _ = s.build_context()
     backend = s._dns_backend(dns_backend, config)
     platform = s._platform()
+    # macOS 显式 resolved 是参数错误 —— 提前给出明确信息（退出码 2），
+    # 不要等到组件 plan() 抛 RuntimeError
+    s.ensure_backend_supported(backend, platform)
     reports = build_report(s._components(paths, config, backend))
     # 现役配置里还有通配站点块（*.test）时必须报出来：它与工具生成的
     # 精确站点块同后缀，会让 TLS 握手整体失败。迁移正是移除它的动作。

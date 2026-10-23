@@ -4,6 +4,7 @@ import typer
 
 from devproxy.cli import app
 from devproxy.cli._shared import EXIT_OK
+from devproxy.cli._shared import EXIT_USAGE
 from devproxy.gateway.names import InvalidNameError
 from devproxy.gateway.names import validate_name
 from devproxy.gateway.routes import RouteTableError
@@ -11,13 +12,14 @@ from devproxy.gateway.store import RouteStoreError
 
 from devproxy.cli import _shared as s
 
+
 @app.command()
 def down(name: str = typer.Argument(..., help="路由名")) -> None:
     """注销路由；若该路由的子进程还在，一并收掉。"""
     try:
         validate_name(name)
     except InvalidNameError as e:
-        s.fail(str(e))
+        s.fail(str(e), EXIT_USAGE)
     _, _, store, _ = s.build_context()
     try:
         route = store.get(name)

@@ -6,6 +6,7 @@ import typer
 
 from devproxy.cli import app
 from devproxy.cli._shared import EXIT_PRECONDITION
+from devproxy.cli._shared import EXIT_USAGE
 from devproxy.gateway.names import InvalidNameError
 from devproxy.gateway.names import domain_for
 from devproxy.gateway.names import validate_name
@@ -16,6 +17,7 @@ from devproxy.gateway.store import RouteStoreError
 
 from devproxy.cli import _shared as s
 
+
 @app.command()
 def expose(
     name: str = typer.Argument(..., help="路由名"),
@@ -25,9 +27,9 @@ def expose(
     try:
         validate_name(name)
     except InvalidNameError as e:
-        s.fail(str(e))
+        s.fail(str(e), EXIT_USAGE)
     if not (1 <= port <= 65535):
-        s.fail(f"非法端口 {port}：必须在 1..65535 之间")
+        s.fail(f"非法端口 {port}：必须在 1..65535 之间", EXIT_USAGE)
 
     paths, config, store, admin = s.build_context()
     s._require_caddyfile(paths)

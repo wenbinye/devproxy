@@ -10,7 +10,7 @@ from devproxy.cli import _shared as s
 @app.command()
 def config() -> None:
     """显示当前生效配置。"""
-    paths, cfg, store, _ = s.build_context()
+    paths, cfg, _, _ = s.build_context()
     s.console.print_json(
         data={
             "domain_suffix": cfg.domain_suffix,

@@ -20,7 +20,7 @@ def logs(
         s.err_console.print(f"devproxy: 未知服务 {service}（可选 caddy / dnsmasq）")
         raise typer.Exit(EXIT_USAGE)
     try:
-        # 只读命令：不碰 build_context（它会在用户家目录里建文件）
+        # 只读命令：不碰 build_context（它会加载配置并解析 storage 留档）
         s._platform().tail_service_log(service)
     except PermissionError as e:
         s.err_console.print(f"devproxy: {escape(str(e))}")

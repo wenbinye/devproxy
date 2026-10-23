@@ -112,14 +112,15 @@ def test_separator_is_split_and_passed_through(env, monkeypatch):
 def test_up_without_separator_is_rejected(env, monkeypatch):
     _patch_ctx(monkeypatch, env)
     res = CliRunner().invoke(app, ["up", "codeup", "npx", "vite"])
-    assert res.exit_code != 0
+    # 命令写法错误 → 参数错误（2），不是运行失败
+    assert res.exit_code == 2, res.output
     assert "--" in res.output
 
 
 def test_up_without_command_is_rejected(env, monkeypatch):
     _patch_ctx(monkeypatch, env)
     res = CliRunner().invoke(app, ["up", "codeup", "--"])
-    assert res.exit_code != 0
+    assert res.exit_code == 2, res.output
 
 
 def test_expose_registers_route(env, monkeypatch):
@@ -493,7 +494,8 @@ def test_invalid_name_error_keeps_charset_in_output(env, monkeypatch):
     """[a-z0-9-] 会被 Rich 当标记吞掉 —— 错误输出必须保留字面字符集。"""
     _patch_ctx(monkeypatch, env)
     res = CliRunner().invoke(app, ["expose", "Bad_Name", "--port", "3000"])
-    assert res.exit_code == 1
+    # 非法路由名是参数错误（约定 2），不是运行失败
+    assert res.exit_code == 2
     assert "[a-z0-9-]" in res.output
 
 
@@ -664,3 +666,252 @@ def test_setup_prints_the_working_example(env, monkeypatch):
     assert res.exit_code == 0, res.output
     assert UP_EXAMPLE in res.output
     assert "$PORT" in res.output
+
+
+# ------------------------------------- I7：参数错误一律退出 2
+
+
+def test_up_invalid_name_exits_2(env, monkeypatch):
+    _patch_ctx(monkeypatch, env)
+    res = CliRunner().invoke(app, ["up", "Bad_Name", "--", "sleep", "1"])
+    assert res.exit_code == 2, res.output
+    assert "[a-z0-9-]" in res.output
+
+
+def test_up_invalid_port_exits_2(env, monkeypatch):
+    _patch_ctx(monkeypatch, env)
+    res = CliRunner().invoke(app, ["up", "codeup", "--port", "0", "--", "sleep", "1"])
+    assert res.exit_code == 2, res.output
+    assert "1..65535" in res.output
+
+
+def test_up_invalid_ready_timeout_exits_2(env, monkeypatch):
+    _patch_ctx(monkeypatch, env)
+    res = CliRunner().invoke(
+        app, ["up", "codeup", "--ready-timeout", "0", "--", "sleep", "1"]
+    )
+    assert res.exit_code == 2, res.output
+    assert "就绪超时" in res.output
+
+
+def test_expose_invalid_port_exits_2(env, monkeypatch):
+    _patch_ctx(monkeypatch, env)
+    res = CliRunner().invoke(app, ["expose", "legacy", "--port", "65536"])
+    assert res.exit_code == 2, res.output
+
+
+def test_down_invalid_name_exits_2(env, monkeypatch):
+    _patch_ctx(monkeypatch, env)
+    res = CliRunner().invoke(app, ["down", "Bad_Name"])
+    assert res.exit_code == 2, res.output
+
+
+# ------------------------------------- I1：只读命令不产生写副作用
+
+
+@pytest.mark.parametrize("command", ["ls", "config", "doctor"])
+def test_readonly_commands_do_not_create_config_dir(env, monkeypatch, command):
+    """查询命令不得 mkdir/touch —— 配置目录父路径是普通文件时也不能炸。"""
+    blocker = env / "blocker"
+    blocker.write_text("not a directory", encoding="utf-8")
+    config_dir = blocker / "devproxy"
+    monkeypatch.setenv("DEVPROXY_CONFIG_DIR", str(config_dir))
+    if command == "doctor":
+        # doctor 会做真实组件探测（读宿主 /etc 等）—— 这里只关心 build_context
+        monkeypatch.setattr("devproxy.cli._shared._components", lambda *a, **k: [])
+    res = CliRunner().invoke(app, [command])
+    assert "Traceback" not in res.output, res.output
+    assert res.exit_code in (0, 3), res.output
+    assert not config_dir.exists(), "只读命令不得创建配置目录"
+
+
+# ------------------------------------- I2：storage 留档损坏不得静默回退
+
+
+def test_corrupt_storage_archive_is_precondition_error(env):
+    """留档存在但读不懂 → 退出 3，提示删除留档，绝不静默换 storage。"""
+    from devproxy.core.paths import default_paths
+
+    paths = default_paths()
+    paths.caddy_storage.parent.mkdir(parents=True, exist_ok=True)
+    paths.caddy_storage.write_text("{ 截断", encoding="utf-8")
+    res = CliRunner().invoke(app, ["config"])
+    assert res.exit_code == 3, res.output
+    assert "留档损坏" in res.output
+    assert "Traceback" not in res.output
+
+
+def test_missing_storage_archive_is_not_an_error(env):
+    res = CliRunner().invoke(app, ["config"])
+    assert res.exit_code == 0, res.output
+
+
+def test_resolve_storage_reports_warnings_without_side_effects(env, capsys):
+    """M2：查询函数只返回警告，不直接写 stderr。"""
+    from devproxy.cli._shared import _resolve_storage
+
+    paths = _write_storage_pair(env, "/tmp/from-config-toml", "/tmp/from-legacy")
+    config, warnings = _resolve_storage(Config(), paths)
+    assert config.storage == "/tmp/from-legacy"
+    assert warnings and "/tmp/from-legacy" in warnings[0]
+    assert capsys.readouterr().err == "", "解析函数不应有 stderr 副作用"
+
+
+# ------------------------------------- C1：回滚后重启失败不得静默
+
+
+def test_setup_rollback_restart_failure_is_reported(env, monkeypatch, tmp_path):
+    """文件已还原但 caddy 重启失败：必须报出来，且不能说成回滚失败。"""
+    platform = _fake_setup_platform(monkeypatch, tmp_path)
+    unit, _old = _seed_legacy_unit(platform, tmp_path)
+    assert CliRunner().invoke(app, ["setup", "--yes"]).exit_code == 0
+    backup_dir = next((env / "state" / "backups").iterdir())
+
+    def boom(name):
+        raise RuntimeError("systemctl restart caddy 失败: unit 坏了")
+
+    monkeypatch.setattr(platform, "restart_service", boom)
+    res = CliRunner().invoke(app, ["setup", "--rollback", str(backup_dir)])
+    assert res.exit_code == 1, res.output
+    assert "已回滚" in res.output, "文件确实还原了，必须如实说"
+    assert "Caddy 可能仍在运行迁移后的配置" in res.output
+    assert "Traceback" not in res.output
+
+
+def test_setup_rollback_restart_permission_error_exits_4(env, monkeypatch, tmp_path):
+    platform = _fake_setup_platform(monkeypatch, tmp_path)
+    _seed_legacy_unit(platform, tmp_path)
+    assert CliRunner().invoke(app, ["setup", "--yes"]).exit_code == 0
+    backup_dir = next((env / "state" / "backups").iterdir())
+
+    def boom(name):
+        raise PermissionError("提权失败：sudo 不可用")
+
+    monkeypatch.setattr(platform, "restart_service", boom)
+    res = CliRunner().invoke(app, ["setup", "--rollback", str(backup_dir)])
+    assert res.exit_code == 4, res.output
+    assert "已还原" in res.output
+    assert "Traceback" not in res.output
+
+
+def test_setup_rollback_skips_restart_when_service_was_absent(
+    env, monkeypatch, tmp_path
+):
+    """迁移前没有服务单元 → 回滚无需重启，也不该报错。"""
+    platform = _fake_setup_platform(monkeypatch, tmp_path)
+    _seed_legacy_unit(platform, tmp_path)
+    assert CliRunner().invoke(app, ["setup", "--yes"]).exit_code == 0
+    backup_dir = next((env / "state" / "backups").iterdir())
+
+    monkeypatch.setattr(
+        platform, "service_unit_path", lambda name: tmp_path / "no-such-unit.service"
+    )
+    monkeypatch.setattr(
+        platform, "restart_service", lambda name: pytest.fail("不应尝试重启")
+    )
+    res = CliRunner().invoke(app, ["setup", "--rollback", str(backup_dir)])
+    assert res.exit_code == 0, res.output
+    assert "跳过重启" in res.output
+
+
+# ------------------------------------- I5 / I6：回滚参数的边界与恢复路径
+
+
+def test_setup_rejects_empty_rollback_dir(env, monkeypatch, tmp_path):
+    """--rollback "" 是参数错误，绝不能落进完整部署分支。"""
+    platform = _fake_setup_platform(monkeypatch, tmp_path)
+    res = CliRunner().invoke(app, ["setup", "--rollback", ""])
+    assert res.exit_code == 2, res.output
+    assert "空字符串" in res.output
+    # 没做迁移、也没开始部署
+    assert platform.services == {}
+
+
+def test_setup_rejects_empty_domain_suffix(env, monkeypatch, tmp_path):
+    platform = _fake_setup_platform(monkeypatch, tmp_path)
+    res = CliRunner().invoke(app, ["setup", "--domain-suffix", ""])
+    assert res.exit_code == 2, res.output
+    assert platform.services == {}
+
+
+def test_setup_rollback_works_with_corrupt_config_toml(env, monkeypatch, tmp_path):
+    """配置损坏正是最需要回滚的时刻 —— 恢复路径不能先加载配置。"""
+    platform = _fake_setup_platform(monkeypatch, tmp_path)
+    unit, _old = _seed_legacy_unit(platform, tmp_path)
+    assert CliRunner().invoke(app, ["setup", "--yes"]).exit_code == 0
+    backup_dir = next((env / "state" / "backups").iterdir())
+
+    (env / "config" / "config.toml").write_text("storage = [", encoding="utf-8")
+    unit.write_text("CLOBBERED\n", encoding="utf-8")
+    res = CliRunner().invoke(app, ["setup", "--rollback", str(backup_dir)])
+    assert res.exit_code == 0, res.output
+    assert "MINIKUBE_IP=1.2.3.4" in unit.read_text(encoding="utf-8")
+
+
+# ------------------------------------- M7：交互判定统一走 _shared 接缝
+
+
+def test_setup_migration_uses_interactive_seam(env, monkeypatch, tmp_path):
+    """打桩 `_shared._interactive` 必须能驱动迁移的交互确认分支。"""
+    platform = _fake_setup_platform(monkeypatch, tmp_path)
+    _seed_legacy_unit(platform, tmp_path)
+    monkeypatch.setattr("devproxy.cli._shared._interactive", lambda: True)
+    monkeypatch.setattr("devproxy.cli._shared.typer.confirm", lambda *a, **k: True)
+    res = CliRunner().invoke(app, ["setup"])
+    assert res.exit_code == 0, res.output
+    assert "MINIKUBE_IP=1.2.3.4" in platform.services["caddy"]
+
+
+# ------------------------------------- 平台构造失败（如 sudo/root）
+
+
+def test_up_does_not_mask_programming_errors(env, monkeypatch):
+    """M1：UpRunner 只该把已知运行错误转成退出码；bug 不能被伪装成运行失败。"""
+    _patch_ctx(monkeypatch, env)
+
+    def boom(self, *a, **k):
+        raise AttributeError("runner 内部 bug")
+
+    monkeypatch.setattr("devproxy.cli._shared.UpRunner.run", boom)
+    res = CliRunner().invoke(app, ["up", "codeup", "--", "sleep", "1"])
+    assert isinstance(res.exception, AttributeError), res.output
+
+
+def test_trust_lets_programming_errors_escape(env, monkeypatch):
+    """M6：trust 只该捕获契约内的 PermissionError / RuntimeError。"""
+    from devproxy.platform.base import Action
+    from devproxy.platform.fake import FakePlatform
+
+    _patch_ctx(monkeypatch, env)
+    monkeypatch.setattr("devproxy.cli._shared._platform", lambda: FakePlatform())
+
+    class BoomCert:
+        def __init__(self, *a, **k):
+            pass
+
+        def plan(self):
+            return [Action(description="装 CA")]
+
+        def apply(self, actions):
+            raise AttributeError("组件内部 bug")
+
+    monkeypatch.setattr("devproxy.cli._shared.CertComponent", BoomCert)
+    with pytest.raises(AttributeError):
+        CliRunner().invoke(app, ["trust"], catch_exceptions=False)
+
+
+def test_platform_construction_failure_is_clean_precondition(env, monkeypatch):
+    """sudo devproxy ... 在构造平台时被拒绝 → 一行可读错误 + 退出 3。"""
+    from devproxy.cli import _context
+
+    _patch_ctx(monkeypatch, env)
+    monkeypatch.setattr("devproxy.cli._shared._platform", _context._platform)
+
+    def refuse():
+        raise RuntimeError("请以普通用户运行 devproxy：以 root 运行会装错家目录")
+
+    monkeypatch.setattr("devproxy.platform.get_platform", refuse)
+    res = CliRunner().invoke(app, ["trust"])
+    assert res.exit_code == 3, res.output
+    assert "普通用户" in res.output
+    assert "Traceback" not in res.output

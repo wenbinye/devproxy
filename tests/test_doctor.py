@@ -167,6 +167,29 @@ def test_cli_doctor_accepts_dns_backend_override(tmp_path, monkeypatch):
     assert seen["backend"] == "resolved"
 
 
+def test_cli_doctor_macos_rejects_resolved_backend(tmp_path, monkeypatch):
+    """macOS 显式 resolved：doctor 也要给参数错误，而不是组件 traceback。"""
+    from types import SimpleNamespace
+
+    from typer.testing import CliRunner
+
+    from devproxy.cli import app
+    from devproxy.core.config import Config
+
+    cfg = Config(storage=str(tmp_path / "data"))
+    _patch_cli_with_config(monkeypatch, tmp_path, cfg)
+    monkeypatch.setattr(
+        "devproxy.cli._shared._components", lambda *a, **k: []
+    )
+    monkeypatch.setattr(
+        "devproxy.cli._shared._platform", lambda: SimpleNamespace(name="mac")
+    )
+    result = CliRunner().invoke(app, ["doctor", "--dns-backend", "resolved"])
+    assert result.exit_code == 2, result.output
+    assert "macOS 不支持 resolved" in result.output
+    assert "Traceback" not in result.output
+
+
 def test_cli_doctor_rejects_invalid_dns_backend(tmp_path, monkeypatch):
     from typer.testing import CliRunner
 
