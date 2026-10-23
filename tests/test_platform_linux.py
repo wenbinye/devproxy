@@ -102,7 +102,7 @@ def test_linux_elevated_write_uses_system_temp_then_sudo_install(
     """内容须在系统临时目录备好，再 sudo install 到目标；临时文件不得落在目标目录里。"""
     calls = []
 
-    def fake_run(argv):
+    def fake_run(argv, **kwargs):
         calls.append(list(argv))
         if argv[:3] == ["sudo", "install", "-m"]:
             assert Path(argv[8]).read_text(encoding="utf-8") == "hello", "安装时临时文件内容必须已写好"
@@ -134,7 +134,7 @@ def test_linux_elevated_write_produces_world_readable_root_file(
     """
     calls = []
 
-    def fake_run(argv):
+    def fake_run(argv, **kwargs):
         calls.append(list(argv))
         return 0, ""
 
@@ -156,7 +156,7 @@ def test_linux_elevated_copy_produces_world_readable_root_file(
     """CA 装进系统信任库走 copy —— 同样必须落成 root:root 0644。"""
     calls = []
 
-    def fake_run(argv):
+    def fake_run(argv, **kwargs):
         calls.append(list(argv))
         return 0, ""
 
@@ -179,7 +179,7 @@ def test_linux_elevated_write_failure_raises_and_cleans_temp(
     """特权写入失败时抛 PermissionError，且临时文件也必须清理（try/finally）。"""
     seen_tmp = []
 
-    def fake_run(argv):
+    def fake_run(argv, **kwargs):
         if argv[:3] == ["sudo", "install", "-m"]:
             seen_tmp.append(Path(argv[-2]))
             return 1, "boom"
@@ -211,7 +211,7 @@ def test_linux_service_mutations_raise_on_failure(
     monkeypatch, tmp_path, allow_platform_mutation
 ):
     """enable/restart/daemon-reload 失败必须立即抛 RuntimeError，带上服务名与 stderr。"""
-    monkeypatch.setattr(linux_mod, "_run", lambda argv: (1, "unit not found"))
+    monkeypatch.setattr(linux_mod, "_run", lambda argv, **kwargs: (1, "unit not found"))
     p = LinuxPlatform(user_home=tmp_path)
 
     with pytest.raises(RuntimeError) as ei:
@@ -280,7 +280,7 @@ def test_render_systemd_unit_service_type_follows_program():
 def test_linux_install_service_writes_unit_file(
     tmp_path, monkeypatch, allow_platform_mutation
 ):
-    monkeypatch.setattr(linux_mod, "_run", lambda argv: (0, ""))
+    monkeypatch.setattr(linux_mod, "_run", lambda argv, **kwargs: (0, ""))
     p = LinuxPlatform(user_home=tmp_path)
     p.install_service(
         "caddy",
@@ -299,10 +299,11 @@ def test_linux_elevated_read_distinguishes_missing_from_permission(
 ):
     """文件缺失抛 FileNotFoundError，其余失败（如权限）抛 PermissionError。"""
 
-    def fake_run(argv):
+    def fake_run(argv, **kwargs):
+        # 存在性靠 `test -e` 的返回码，不解析本地化的 cat 文案
+        if "test" in argv:
+            return (1 if "missing" in argv[-1] else 0), ""
         if "cat" in argv:
-            if "missing" in argv[-1]:
-                return 1, "cat: /etc/missing: No such file or directory"
             return 1, "cat: /etc/secret: Permission denied"
         return 0, ""
 
@@ -389,7 +390,7 @@ def trust_store(tmp_path, monkeypatch):
     staged_dir = tmp_path / "usr" / "local" / "share" / "ca-certificates"
     staged_dir.mkdir(parents=True)
     monkeypatch.setattr(linux_mod, "TRUST_BUNDLE_FILES", (bundle,))
-    monkeypatch.setattr(linux_mod, "TRUST_HASH_DIR", hashed)
+    # 散列索引目录与 openssl -CApath 共用同一个常量（不再有第二份定义）
     monkeypatch.setattr(linux_mod, "SYSTEM_TRUST_DIR", hashed)
     return bundle, hashed, staged_dir
 
@@ -407,7 +408,7 @@ def test_linux_ca_trusted_true_when_fingerprint_in_live_store(
     ca.write_text(_fake_pem("mine"), encoding="utf-8")
     bundle.write_text(_fake_pem("other") + _fake_pem("mine"), encoding="utf-8")
 
-    def fake_run(argv):
+    def fake_run(argv, **kwargs):
         # 复现歧义：openssl 按 SUBJECT 选到了另一份根
         return 1, "error 18 at 0 depth lookup: self-signed certificate"
 
@@ -426,7 +427,7 @@ def test_linux_ca_trusted_true_when_fingerprint_in_hashed_dir(
     monkeypatch.setattr(
         linux_mod,
         "_run",
-        lambda argv: (1, "error 18 at 0 depth lookup: self-signed certificate"),
+        lambda argv, **kwargs: (1, "error 18 at 0 depth lookup: self-signed certificate"),
     )
     assert LinuxPlatform().ca_trusted(ca) is True
 
@@ -443,7 +444,7 @@ def test_linux_ca_trusted_false_when_only_staged_file_present(
     monkeypatch.setattr(
         linux_mod,
         "_run",
-        lambda argv: (1, "error 20 at 0 depth lookup: unable to get local issuer"),
+        lambda argv, **kwargs: (1, "error 20 at 0 depth lookup: unable to get local issuer"),
     )
     assert LinuxPlatform().ca_trusted(ca) is False
 
@@ -460,7 +461,7 @@ def test_linux_ca_trusted_false_when_same_subject_other_root(
     monkeypatch.setattr(
         linux_mod,
         "_run",
-        lambda argv: (1, "error 18 at 0 depth lookup: self-signed certificate"),
+        lambda argv, **kwargs: (1, "error 18 at 0 depth lookup: self-signed certificate"),
     )
     assert LinuxPlatform().ca_trusted(ca) is False
 
@@ -472,7 +473,7 @@ def test_linux_ca_trusted_true_when_openssl_verifies(trust_store, tmp_path, monk
     ca.write_text(_fake_pem("mine"), encoding="utf-8")
     calls = []
 
-    def fake_run(argv):
+    def fake_run(argv, **kwargs):
         calls.append(argv)
         return 0, "root.crt: OK"
 
@@ -491,7 +492,7 @@ def test_linux_ca_trusted_never_raises_on_binary_file(
     ca = tmp_path / "root.crt"
     ca.write_text(_fake_pem("mine"), encoding="utf-8")
     monkeypatch.setattr(
-        linux_mod, "_run", lambda argv: (127, "命令不存在: openssl")
+        linux_mod, "_run", lambda argv, **kwargs: (127, "命令不存在: openssl")
     )
     assert LinuxPlatform().ca_trusted(ca) is False
 
@@ -502,7 +503,7 @@ def test_linux_ca_trusted_false_when_ca_not_pem(trust_store, tmp_path, monkeypat
     ca = tmp_path / "root.crt"
     ca.write_text("这不是证书", encoding="utf-8")
     monkeypatch.setattr(
-        linux_mod, "_run", lambda argv: (127, "命令不存在: openssl")
+        linux_mod, "_run", lambda argv, **kwargs: (127, "命令不存在: openssl")
     )
     assert LinuxPlatform().ca_trusted(ca) is False
 
@@ -554,7 +555,7 @@ def _nss_listing(*rows: tuple[str, str]) -> str:
 def _fake_certutil(listing: str, pem: str, calls: list | None = None):
     """假 certutil：`-L` 给表格，`-L -n <昵称> -a` 给 PEM。"""
 
-    def fake_run(argv):
+    def fake_run(argv, **kwargs):
         if calls is not None:
             calls.append(list(argv))
         if "-a" in argv:
@@ -613,7 +614,7 @@ def test_linux_nss_trusted_false_when_entry_missing(tmp_path, monkeypatch):
     ca = tmp_path / "root.crt"
     ca.write_text(PEM_OLD, encoding="utf-8")
 
-    def fake_run(argv):
+    def fake_run(argv, **kwargs):
         if "-a" in argv:
             return 255, "certutil: could not find cert: devproxy Local CA"
         return 0, _nss_listing(("devproxy Local CA", "C,,"))
@@ -637,7 +638,7 @@ def test_linux_nss_trusted_false_when_ca_unreadable(tmp_path, monkeypatch):
 def test_linux_nss_trusted_false_without_db(tmp_path, monkeypatch):
     p = LinuxPlatform(user_home=tmp_path)
     monkeypatch.setattr(
-        linux_mod, "_run", lambda argv: pytest.fail("没有 NSS 库就不该跑 certutil")
+        linux_mod, "_run", lambda argv, **kwargs: pytest.fail("没有 NSS 库就不该跑 certutil")
     )
     assert p.nss_trusted(tmp_path / "root.crt") is False
 
@@ -646,7 +647,7 @@ def test_linux_nss_trusted_false_when_certutil_missing(tmp_path, monkeypatch):
     p = _nss_platform(tmp_path)
     ca = tmp_path / "root.crt"
     ca.write_text(PEM_OLD, encoding="utf-8")
-    monkeypatch.setattr(linux_mod, "_run", lambda argv: (127, "命令不存在: certutil"))
+    monkeypatch.setattr(linux_mod, "_run", lambda argv, **kwargs: (127, "命令不存在: certutil"))
     assert p.nss_trusted(ca) is False
 
 
@@ -712,7 +713,7 @@ def test_linux_nss_entries_ignores_nickname_that_cannot_be_fetched(
     ca = tmp_path / "root.crt"
     ca.write_text(PEM_OLD, encoding="utf-8")
 
-    def fake_run(argv):
+    def fake_run(argv, **kwargs):
         if "-a" in argv:
             nickname = argv[argv.index("-n") + 1]
             if "取不到" in nickname:
@@ -739,7 +740,7 @@ def test_linux_nss_entries_fast_path_stops_after_own_nickname(tmp_path, monkeypa
     ca.write_text(PEM_OLD, encoding="utf-8")
     calls = []
 
-    def fake_run(argv):
+    def fake_run(argv, **kwargs):
         calls.append(list(argv))
         if "-a" in argv:
             return 0, PEM_OLD
@@ -759,7 +760,7 @@ def test_linux_nss_entries_fast_path_stops_after_own_nickname(tmp_path, monkeypa
 def test_linux_nss_entries_empty_without_db(tmp_path, monkeypatch):
     p = LinuxPlatform(user_home=tmp_path)
     monkeypatch.setattr(
-        linux_mod, "_run", lambda argv: pytest.fail("没有 NSS 库就不该跑 certutil")
+        linux_mod, "_run", lambda argv, **kwargs: pytest.fail("没有 NSS 库就不该跑 certutil")
     )
     assert p.nss_entries(tmp_path / "root.crt") == []
 
@@ -840,9 +841,10 @@ def test_linux_nss_trust_flags_repairs_only_ssl_column():
     assert linux_mod._nss_repair_flags(",,", ) == "C,,"
     assert linux_mod._nss_repair_flags(",C,") == "C,C,"
     assert linux_mod._nss_repair_flags(",C,C") == "C,C,C"
-    # 形态不认识时退回标准的三列形态
-    assert linux_mod._nss_repair_flags("") == "C,,"
-    assert linux_mod._nss_repair_flags("C") == "C,,"
+    # 形态不认识时**原样返回**（绝不重置成 "C,,"）：重置会抹掉未知形态里
+    # 可能存在的 S/MIME / JAR 信任，正是本函数要避免的事。
+    assert linux_mod._nss_repair_flags("") == ""
+    assert linux_mod._nss_repair_flags("C") == "C"
 
 
 def test_linux_nss_db_path_points_at_user_home(tmp_path):
@@ -863,7 +865,7 @@ def test_linux_nss_entries_accepts_explicit_nss_dir(tmp_path, monkeypatch):
 
     seen = []
 
-    def fake_run(argv):
+    def fake_run(argv, **kwargs):
         seen.append(list(argv))
         if "-a" in argv:
             return 0, PEM_OLD
@@ -881,7 +883,7 @@ def test_linux_nss_stale_nickname_true_for_other_cert(tmp_path, monkeypatch):
     p = _nss_platform(tmp_path)
     ca = tmp_path / "root.crt"
     ca.write_text(PEM_NEW, encoding="utf-8")
-    monkeypatch.setattr(linux_mod, "_run", lambda argv: (0, PEM_OLD))
+    monkeypatch.setattr(linux_mod, "_run", lambda argv, **kwargs: (0, PEM_OLD))
     assert p.nss_stale_nickname(ca, "devproxy Local CA") is True
 
 
@@ -890,7 +892,7 @@ def test_linux_nss_stale_nickname_false_for_same_cert(tmp_path, monkeypatch):
     p = _nss_platform(tmp_path)
     ca = tmp_path / "root.crt"
     ca.write_text(PEM_OLD, encoding="utf-8")
-    monkeypatch.setattr(linux_mod, "_run", lambda argv: (0, PEM_OLD))
+    monkeypatch.setattr(linux_mod, "_run", lambda argv, **kwargs: (0, PEM_OLD))
     assert p.nss_stale_nickname(ca, "devproxy Local CA") is False
 
 
@@ -899,19 +901,23 @@ def test_linux_nss_stale_nickname_false_when_absent(tmp_path, monkeypatch):
     p = _nss_platform(tmp_path)
     ca = tmp_path / "root.crt"
     ca.write_text(PEM_OLD, encoding="utf-8")
-    monkeypatch.setattr(linux_mod, "_run", lambda argv: (255, "could not find cert"))
+    monkeypatch.setattr(
+        linux_mod,
+        "_run",
+        lambda argv, **kwargs: (255, "certutil: could not find cert: x"),
+    )
     assert p.nss_stale_nickname(ca, "devproxy Local CA") is False
 
 
 def test_linux_nss_has_nickname_true_and_false(tmp_path, monkeypatch):
     """`-L -n <昵称>` 跑通 = 存在；输出明确说找不到 = 不存在。"""
     p = _nss_platform(tmp_path)
-    monkeypatch.setattr(linux_mod, "_run", lambda argv: (0, "Certificate: …"))
+    monkeypatch.setattr(linux_mod, "_run", lambda argv, **kwargs: (0, "Certificate: …"))
     assert p.nss_has_nickname("devproxy Local CA") is True
     monkeypatch.setattr(
         linux_mod,
         "_run",
-        lambda argv: (255, 'certutil: could not find certificate named "x"'),
+        lambda argv, **kwargs: (255, 'certutil: could not find certificate named "x"'),
     )
     assert p.nss_has_nickname("devproxy Local CA") is False
 
@@ -929,7 +935,7 @@ def test_linux_nss_has_nickname_unknown_when_database_unreadable(
     monkeypatch.setattr(
         linux_mod,
         "_run",
-        lambda argv: (255, "certutil: function failed: SEC_ERROR_BAD_DATABASE"),
+        lambda argv, **kwargs: (255, "certutil: function failed: SEC_ERROR_BAD_DATABASE"),
     )
     assert p.nss_has_nickname("devproxy Local CA") is None
 
@@ -937,18 +943,22 @@ def test_linux_nss_has_nickname_unknown_when_database_unreadable(
 def test_linux_nss_has_nickname_false_without_db(tmp_path, monkeypatch):
     p = LinuxPlatform(user_home=tmp_path)
     monkeypatch.setattr(
-        linux_mod, "_run", lambda argv: pytest.fail("没有 NSS 库就不该跑 certutil")
+        linux_mod, "_run", lambda argv, **kwargs: pytest.fail("没有 NSS 库就不该跑 certutil")
     )
     assert p.nss_has_nickname("devproxy Local CA") is False
 
 
-def test_linux_nss_stale_nickname_false_when_unparsable(tmp_path, monkeypatch):
-    """取回来的不是 PEM（判不了）→ 宁可漏删也不能误删。"""
+def test_linux_nss_stale_nickname_unknown_when_unparsable(tmp_path, monkeypatch):
+    """取回来的不是 PEM → 判不了（None），绝不能报"确定不陈旧"。
+
+    删除对象固定是工具自有昵称，不存在误删用户条目的风险；把"判不了"
+    压成 False 会让陈旧根永久留在库里。
+    """
     p = _nss_platform(tmp_path)
     ca = tmp_path / "root.crt"
     ca.write_text(PEM_OLD, encoding="utf-8")
-    monkeypatch.setattr(linux_mod, "_run", lambda argv: (0, "not a pem"))
-    assert p.nss_stale_nickname(ca, "devproxy Local CA") is False
+    monkeypatch.setattr(linux_mod, "_run", lambda argv, **kwargs: (0, "not a pem"))
+    assert p.nss_stale_nickname(ca, "devproxy Local CA") is None
 
 
 def test_fake_platform_nss_trusted_tracks_its_own_set(tmp_path):
@@ -967,7 +977,7 @@ def test_linux_elevated_write_creates_parent_dir_before_install(
 ):
     calls = []
 
-    def fake_run(argv):
+    def fake_run(argv, **kwargs):
         calls.append(list(argv))
         return 0, ""
 
@@ -988,7 +998,7 @@ def test_linux_elevated_write_raises_when_mkdir_fails(
     monkeypatch.setattr(
         linux_mod,
         "_run",
-        lambda argv: (0, "") if argv == ["sudo", "-v"] else (1, "permission denied"),
+        lambda argv, **kwargs: (0, "") if argv == ["sudo", "-v"] else (1, "permission denied"),
     )
     with pytest.raises(PermissionError, match="创建目录"):
         linux_mod.LinuxElevated().write(tmp_path / "etc" / "devproxy.conf", "x")
@@ -1010,7 +1020,7 @@ def test_linux_elevated_falls_back_to_passwordless_sudo(
     """sudo -v 失败但 sudo -n true 成功 → 提权可用，后续命令自带 -n。"""
     calls = []
 
-    def fake_run(argv):
+    def fake_run(argv, **kwargs):
         calls.append(list(argv))
         if argv == ["sudo", "-v"]:
             return 1, "sudo: A terminal is required to authenticate"
@@ -1035,7 +1045,7 @@ def test_linux_elevated_keeps_plain_sudo_when_pre_auth_succeeds(
     """sudo -v 成功 → 维持现状：时间戳已预热，命令就是 sudo <cmd>。"""
     calls = []
 
-    def fake_run(argv):
+    def fake_run(argv, **kwargs):
         calls.append(list(argv))
         return 0, ""
 
@@ -1052,7 +1062,7 @@ def test_linux_elevated_raises_when_both_sudo_probes_fail(
     monkeypatch, tmp_path, allow_platform_mutation
 ):
     """两条路都走不通 → 抛 PermissionError，信息要带上两条命令的输出。"""
-    def fake_run(argv):
+    def fake_run(argv, **kwargs):
         if argv == ["sudo", "-v"]:
             return 1, "sudo: a terminal is required to authenticate"
         if argv == ["sudo", "-n", "true"]:
@@ -1071,7 +1081,7 @@ def test_linux_elevated_passwordless_path_survives_a_failing_command(
     monkeypatch, tmp_path, allow_platform_mutation
 ):
     """免密路径下命令失败照常返回错误码 —— 不该因为 -n 就当成提权失败。"""
-    def fake_run(argv):
+    def fake_run(argv, **kwargs):
         if argv == ["sudo", "-v"]:
             return 1, "sudo: A terminal is required to authenticate"
         if argv == ["sudo", "-n", "true"]:
@@ -1090,13 +1100,13 @@ def test_linux_elevated_passwordless_path_survives_a_failing_command(
 
 def test_linux_resolved_active_true_from_systemctl(monkeypatch):
     monkeypatch.setattr(
-        linux_mod, "_run", lambda argv: (0, "active") if "is-active" in argv else (1, "")
+        linux_mod, "_run", lambda argv, **kwargs: (0, "active") if "is-active" in argv else (1, "")
     )
     assert LinuxPlatform().resolved_active() is True
 
 
 def test_linux_resolved_active_falls_back_to_resolvectl(monkeypatch):
-    def fake_run(argv):
+    def fake_run(argv, **kwargs):
         if "is-active" in argv:
             return 1, "inactive"
         if argv[:1] == ["resolvectl"]:
@@ -1108,14 +1118,14 @@ def test_linux_resolved_active_falls_back_to_resolvectl(monkeypatch):
 
 
 def test_linux_resolved_active_false_when_both_fail(monkeypatch):
-    monkeypatch.setattr(linux_mod, "_run", lambda argv: (1, "inactive"))
+    monkeypatch.setattr(linux_mod, "_run", lambda argv, **kwargs: (1, "inactive"))
     assert LinuxPlatform().resolved_active() is False
 
 
 def test_linux_dns_query_prefers_resolvectl(monkeypatch):
     calls = []
 
-    def fake_run(argv):
+    def fake_run(argv, **kwargs):
         calls.append(argv)
         if argv[:2] == ["resolvectl", "query"]:
             return 0, "foo.test: 127.0.0.1\n          127.0.0.1"
@@ -1129,7 +1139,7 @@ def test_linux_dns_query_prefers_resolvectl(monkeypatch):
 def test_linux_dns_query_falls_back_to_dig(monkeypatch):
     calls = []
 
-    def fake_run(argv):
+    def fake_run(argv, **kwargs):
         calls.append(argv)
         if argv[:2] == ["resolvectl", "query"]:
             return 1, "not found"
@@ -1143,25 +1153,26 @@ def test_linux_dns_query_falls_back_to_dig(monkeypatch):
 
 
 def test_linux_dns_query_returns_none_when_unresolvable(monkeypatch):
-    monkeypatch.setattr(linux_mod, "_run", lambda argv: (1, "not found"))
+    monkeypatch.setattr(linux_mod, "_run", lambda argv, **kwargs: (1, "not found"))
     assert LinuxPlatform().dns_query("foo.test") is None
 
 
 def test_linux_http_ok_uses_bounded_curl(monkeypatch):
     calls = []
 
-    def fake_run(argv):
+    def fake_run(argv, **kwargs):
         calls.append(argv)
         return 0, ""
 
     monkeypatch.setattr(linux_mod, "_run", fake_run)
     assert LinuxPlatform().http_ok("https://localhost") is True
-    assert calls[0][:2] == ["curl", "-fsS"]
+    assert calls[0][:3] == ["curl", "--noproxy", "*"], "本地探测必须绕过用户代理"
+    assert "-fsS" in calls[0]
     assert "--max-time" in calls[0]
 
 
 def test_linux_http_ok_false_on_curl_failure(monkeypatch):
-    monkeypatch.setattr(linux_mod, "_run", lambda argv: (7, "connection refused"))
+    monkeypatch.setattr(linux_mod, "_run", lambda argv, **kwargs: (7, "connection refused"))
     assert LinuxPlatform().http_ok("https://localhost") is False
 
 
@@ -1181,27 +1192,30 @@ def test_fake_platform_dns_route_installed_uses_backend():
 # -- linger -----------------------------------------------------------------
 
 
-def test_linux_enable_linger_uses_sudo_loginctl(monkeypatch, allow_platform_mutation):
+def test_linux_enable_linger_prefers_noninteractive_sudo(
+    monkeypatch, allow_platform_mutation
+):
+    """与平台其他特权操作一致：先 `sudo -n`，绝不主动弹密码框。"""
     calls = []
     monkeypatch.setattr(
         linux_mod,
         "_run",
-        lambda argv: calls.append(argv) or (0, ""),
+        lambda argv, **kwargs: calls.append(argv) or (0, ""),
     )
     code, _ = LinuxPlatform().enable_linger()
     assert code == 0
-    assert calls[0][:3] == ["sudo", "loginctl", "enable-linger"]
+    assert calls[0][:4] == ["sudo", "-n", "loginctl", "enable-linger"]
 
 
 def test_linux_linger_enabled_reads_value(monkeypatch):
     monkeypatch.setattr(
-        linux_mod, "_run", lambda argv: (0, "yes") if "--value" in argv else (1, "")
+        linux_mod, "_run", lambda argv, **kwargs: (0, "yes") if "--value" in argv else (1, "")
     )
     assert LinuxPlatform().linger_enabled() is True
 
 
 def test_linux_linger_enabled_false(monkeypatch):
-    monkeypatch.setattr(linux_mod, "_run", lambda argv: (0, "no"))
+    monkeypatch.setattr(linux_mod, "_run", lambda argv, **kwargs: (0, "no"))
     assert LinuxPlatform().linger_enabled() is False
 
 
@@ -1211,7 +1225,7 @@ def test_linux_linger_enabled_true_when_loginctl_unavailable(monkeypatch):
     判成"未启用"会让每次 setup 都计划一个注定失败、还要 sudo 的动作，
     失败时 setup 直接退 1 —— 整个工具在那种机器上不可用。
     """
-    monkeypatch.setattr(linux_mod, "_run", lambda argv: (127, "命令不可用: loginctl"))
+    monkeypatch.setattr(linux_mod, "_run", lambda argv, **kwargs: (127, "命令不可用: loginctl"))
     assert LinuxPlatform().linger_enabled() is True
 
 
@@ -1294,3 +1308,409 @@ def test_platform_run_passes_a_timeout(monkeypatch):
     code, _ = linux_mod.LinuxPlatform().run(["true"])
     assert code == 0
     assert seen.get("timeout"), "LinuxPlatform.run 必须传 timeout"
+
+
+# -- p4：超时默认值、交互路径与代理绕过 ---------------------------------------
+
+
+def test_run_defaults_to_bounded_timeout_and_devnull_stdin(monkeypatch):
+    """`_run` 漏传 timeout 时也必须是有界等待，且不能抢终端输入。"""
+    seen = {}
+
+    def fake(argv, **kwargs):
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(linux_mod.subprocess, "run", fake)
+    code, _ = linux_mod._run(["true"])
+    assert code == 0
+    assert seen["timeout"] == linux_mod.DEFAULT_TIMEOUT
+    assert seen["stdin"] is subprocess.DEVNULL
+
+
+def test_linux_dns_query_has_bounded_timeout(monkeypatch):
+    """resolved 挂起不能把 verify() 永久拖死 —— 两条查询路径都要有上限。"""
+    timeouts = []
+
+    def fake_run(argv, **kwargs):
+        timeouts.append(kwargs.get("timeout"))
+        return 1, ""
+
+    monkeypatch.setattr(linux_mod, "_run", fake_run)
+    assert LinuxPlatform().dns_query("foo.test") is None
+    assert timeouts and all(t is not None for t in timeouts)
+    assert all(t <= 5 for t in timeouts)
+
+
+def test_linux_http_ok_bypasses_proxy_env(monkeypatch):
+    """公司代理环境下，本地回环探测不能被 http(s)_proxy 带走。"""
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9")
+    monkeypatch.setenv("ALL_PROXY", "socks5://127.0.0.1:9")
+    calls = []
+    monkeypatch.setattr(
+        linux_mod,
+        "_run",
+        lambda argv, **kwargs: (calls.append(list(argv)) or (0, "")),
+    )
+    assert LinuxPlatform().http_ok("https://codeup.test") is True
+    assert calls[0][1:3] == ["--noproxy", "*"]
+
+
+def test_linux_elevated_interactive_run_allows_waiting_for_password(
+    monkeypatch, allow_platform_mutation
+):
+    """交互路径可能等用户输密码，只有这条路径允许无超时。"""
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((list(argv), kwargs))
+        return 0, ""
+
+    monkeypatch.setattr(linux_mod, "_run", fake_run)
+    sess = linux_mod.LinuxElevated.__new__(linux_mod.LinuxElevated)
+    sess._noninteractive = False
+    sess.run(["install", "-d", "/etc/devproxy"])
+    argv, kwargs = calls[-1]
+    assert argv == ["sudo", "install", "-d", "/etc/devproxy"]
+    assert kwargs.get("timeout", "missing") is None
+
+
+def test_linux_elevated_noninteractive_run_uses_default_timeout(
+    monkeypatch, allow_platform_mutation
+):
+    """免密路径不走密码提示，必须回到默认的有界等待。"""
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((list(argv), kwargs))
+        return 0, ""
+
+    monkeypatch.setattr(linux_mod, "_run", fake_run)
+    sess = linux_mod.LinuxElevated.__new__(linux_mod.LinuxElevated)
+    sess._noninteractive = True
+    sess.run(["true"])
+    argv, kwargs = calls[-1]
+    assert argv == ["sudo", "-n", "true"]
+    assert "timeout" not in kwargs, "省略 timeout 应落到 DEFAULT_TIMEOUT 而非 None"
+
+
+# -- p4：linger 三态与 enable_linger 的交互回退 -------------------------------
+
+
+def test_linux_linger_status_unknown_is_fail_closed(tmp_path, monkeypatch):
+    """systemd 在、探测失败 → 判不了；plan 必须按“未启用”继续尝试。"""
+    run_dir = tmp_path / "run-systemd"
+    run_dir.mkdir()
+    monkeypatch.setattr(linux_mod, "SYSTEMD_RUN_DIR", run_dir)
+    monkeypatch.setattr(
+        linux_mod, "_run", lambda argv, **kwargs: (1, "Failed to connect to bus")
+    )
+    p = LinuxPlatform()
+    assert p.linger_status() is None
+    assert p.linger_enabled() is False
+
+
+def test_linux_linger_status_not_applicable_without_systemd(tmp_path, monkeypatch):
+    monkeypatch.setattr(linux_mod, "SYSTEMD_RUN_DIR", tmp_path / "absent")
+    monkeypatch.setattr(
+        linux_mod, "_run", lambda *a, **k: pytest.fail("没有 systemd 就不该探测")
+    )
+    assert LinuxPlatform().linger_status() is True
+
+
+def test_linux_linger_status_not_applicable_without_loginctl(tmp_path, monkeypatch):
+    run_dir = tmp_path / "run-systemd"
+    run_dir.mkdir()
+    monkeypatch.setattr(linux_mod, "SYSTEMD_RUN_DIR", run_dir)
+    monkeypatch.setattr(
+        linux_mod, "_run", lambda argv, **kwargs: (127, "命令不可用: loginctl")
+    )
+    assert LinuxPlatform().linger_status() is True
+
+
+def test_linux_enable_linger_falls_back_to_prompting_sudo(
+    monkeypatch, allow_platform_mutation
+):
+    """有 TTY 且 `sudo -n` 失败时才允许回退到会提示密码的 sudo。"""
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((list(argv), kwargs))
+        if len(calls) == 1:
+            return 1, "sudo: a password is required"
+        return 0, ""
+
+    monkeypatch.setattr(linux_mod, "_run", fake_run)
+    monkeypatch.setattr(
+        linux_mod.sys, "stdin", type("FakeTTY", (), {"isatty": lambda self: True})()
+    )
+    code, _ = LinuxPlatform().enable_linger()
+    assert code == 0
+    argv, kwargs = calls[1]
+    assert argv[:2] == ["sudo", "loginctl"]
+    assert kwargs.get("timeout", "missing") is None
+
+
+def test_linux_enable_linger_noninteractive_never_prompts(
+    monkeypatch, allow_platform_mutation
+):
+    """无 TTY 时绝不回退到密码提示，而是返回可解释的错误。"""
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        return 1, "sudo: a password is required"
+
+    monkeypatch.setattr(linux_mod, "_run", fake_run)
+    monkeypatch.setattr(
+        linux_mod.sys, "stdin", type("NoTTY", (), {"isatty": lambda self: False})()
+    )
+    code, msg = LinuxPlatform().enable_linger()
+    assert code != 0
+    assert "非交互" in msg
+    assert len(calls) == 1
+
+
+# -- p4：单元渲染的换行校验与 root 拒绝 ---------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("env", "description"),
+    [
+        ({"A": "ok\nExecStartPre=/bin/evil"}, ""),
+        ({"A\nB": "x"}, ""),
+        ({}, "line1\nline2"),
+        ({}, "line1\rline2"),
+    ],
+)
+def test_render_systemd_unit_rejects_newlines(env, description):
+    """Environment / Description 也是外部输入，换行会伪造 unit 行。"""
+    with pytest.raises(RuntimeError, match="换行"):
+        render_systemd_unit(
+            "caddy", ["/bin/caddy", "run"], None, None, env, description
+        )
+
+
+def test_linux_platform_refuses_to_run_as_root(tmp_path, monkeypatch):
+    monkeypatch.setattr(linux_mod.os, "geteuid", lambda: 0)
+    with pytest.raises(RuntimeError, match="普通用户"):
+        LinuxPlatform(user_home=tmp_path)
+
+
+# -- p4：NSS 探测的三态与精确缺失文案 -----------------------------------------
+
+
+def test_linux_nss_probes_treat_stat_failure_as_unknown(tmp_path, monkeypatch):
+    """`Path.exists()` 会把 PermissionError 吞成 False —— 必须保留“判不了”。"""
+    db = tmp_path / ".pki" / "nssdb"
+    db.mkdir(parents=True)
+    cert9 = db / "cert9.db"
+    cert9.write_text("", encoding="utf-8")
+    real_stat = Path.stat
+
+    def guarded_stat(self, *args, **kwargs):
+        if self == cert9:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", guarded_stat)
+    monkeypatch.setattr(
+        linux_mod, "_run", lambda *a, **k: pytest.fail("库不可读时不该跑 certutil")
+    )
+    ca = tmp_path / "root.crt"
+    ca.write_text(PEM_OLD, encoding="utf-8")
+    p = LinuxPlatform(user_home=tmp_path)
+
+    assert p.nss_entries(ca) is None
+    assert p.nss_stale_nickname(ca, "devproxy Local CA") is None
+    assert p.nss_has_nickname("devproxy Local CA") is None
+    assert p.nss_trusted(ca) is False, "判不了时按未信任处理（fail closed）"
+
+
+def test_linux_nss_entries_unknown_when_listing_fails(tmp_path, monkeypatch):
+    """`certutil -L` 非零时无法区分空库与坏库 —— 不能返回 []。"""
+    p = _nss_platform(tmp_path)
+    ca = tmp_path / "root.crt"
+    ca.write_text(PEM_OLD, encoding="utf-8")
+    monkeypatch.setattr(
+        linux_mod, "_run", lambda argv, **kwargs: (255, "SEC_ERROR_BAD_DATABASE")
+    )
+    assert p.nss_entries(ca) is None
+
+
+def test_linux_nss_missing_cert_only_accepts_exact_markers():
+    """泛化的 "not found" 会把模块加载失败误判成条目不存在。"""
+    assert linux_mod._nss_missing_cert(
+        'certutil: could not find certificate named "x"'
+    )
+    assert linux_mod._nss_missing_cert("certutil: could not find cert: x")
+    assert linux_mod._nss_missing_cert("PR_FILE_NOT_FOUND_ERROR: ...")
+    assert not linux_mod._nss_missing_cert("not found")
+    assert not linux_mod._nss_missing_cert(
+        "could not find the module libsoftokn3.so"
+    )
+
+
+def test_linux_nss_has_nickname_unknown_when_generic_load_error(
+    tmp_path, monkeypatch
+):
+    p = _nss_platform(tmp_path)
+    monkeypatch.setattr(
+        linux_mod,
+        "_run",
+        lambda argv, **kwargs: (255, "could not find the module libsoftokn3.so"),
+    )
+    assert p.nss_has_nickname("devproxy Local CA") is None
+
+
+def test_linux_ca_trusted_does_not_swallow_bugs(monkeypatch, tmp_path):
+    """指纹判定的“永不抛异常”由被调函数负责，外层不再宽泛 catch。"""
+
+    def boom(ca):
+        raise ValueError("bug")
+
+    monkeypatch.setattr(linux_mod, "ca_in_trust_store", boom)
+    with pytest.raises(ValueError, match="bug"):
+        LinuxPlatform().ca_trusted(tmp_path / "root.crt")
+
+
+def test_linux_nss_trusted_does_not_swallow_bugs(tmp_path, monkeypatch):
+    p = _nss_platform(tmp_path)
+
+    def boom(ca):
+        raise ValueError("bug")
+
+    monkeypatch.setattr(p, "nss_entries", boom)
+    with pytest.raises(ValueError, match="bug"):
+        p.nss_trusted(tmp_path / "root.crt")
+
+
+def test_nss_db_dir_expands_home_every_call(tmp_path, monkeypatch):
+    """常量不能做成导入期快照 —— 测试重定向 HOME 后必须生效。"""
+    from devproxy.platform.base import nss_db_dir
+
+    assert nss_db_dir(tmp_path) == tmp_path / ".pki" / "nssdb"
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert nss_db_dir() == tmp_path / ".pki" / "nssdb"
+
+
+# -- p4：假平台的沙箱与 NSS 语义 ----------------------------------------------
+
+
+def test_fake_elevated_write_sandboxes_system_paths():
+    p = FakePlatform()
+    target = Path("/etc/systemd/resolved.conf.d/devproxy.conf")
+    p.privilege().write(target, "nameserver 127.0.0.1\n")
+    mapped = p.sandbox / "etc/systemd/resolved.conf.d/devproxy.conf"
+    assert mapped.read_text(encoding="utf-8") == "nameserver 127.0.0.1\n"
+    assert p.written[target] == "nameserver 127.0.0.1\n"
+
+
+def test_fake_elevated_write_rejects_relative_paths():
+    p = FakePlatform()
+    with pytest.raises(AssertionError, match="绝对路径"):
+        p.privilege().write(Path("relative.conf"), "x")
+
+
+def test_fake_privilege_read_never_touches_real_system_files():
+    p = FakePlatform()
+    target = Path("/etc/devproxy/secret.conf")
+    p.privilege().write(target, "sandboxed")
+    assert p.privilege_read(target) == "sandboxed"
+    # 宿主机真实文件不参与：映射后的沙箱里没有它，只能得到 None。
+    assert p.privilege_read(Path("/etc/hostname")) is None
+
+
+def test_fake_elevated_copy_closes_install_then_recheck_loop(tmp_path):
+    """copy 成功后立刻记入 trusted —— 安装 → 复查这条链路要真的闭合。"""
+    p = FakePlatform()
+    ca = tmp_path / "root.crt"
+    ca.write_text("FAKE CA\n", encoding="utf-8")
+    dest = Path("/usr/local/share/ca-certificates/devproxy-local.crt")
+    p.privilege().copy(ca, dest)
+    assert p.ca_trusted(ca) is True
+    mapped = p.sandbox / "usr/local/share/ca-certificates/devproxy-local.crt"
+    assert mapped.read_text(encoding="utf-8") == "FAKE CA\n"
+    assert p.written[dest] == "FAKE CA\n"
+    assert ["cp", str(ca), str(dest)] in p.commands
+
+
+def test_fake_certutil_only_ssl_column_counts_as_trusted(tmp_path):
+    p = FakePlatform()
+    ca = tmp_path / "ca.crt"
+    ca.write_text("CA\n", encoding="utf-8")
+    p.run(
+        ["certutil", "-A", "-d", f"sql:{p.nss_db}", "-n", "n", "-t", ",,", "-i", str(ca)]
+    )
+    assert p.nss_entries(ca) == [("n", ",,")]
+    assert p.nss_trusted(ca) is False, "SSL 列为空不能算已信任"
+    p.run(["certutil", "-M", "-d", f"sql:{p.nss_db}", "-n", "n", "-t", "C,,"])
+    assert p.nss_trusted(ca) is True
+
+
+def test_fake_certutil_scopes_writes_and_deletes_by_database(tmp_path):
+    p = FakePlatform()
+    ca = tmp_path / "ca.crt"
+    ca.write_text("CA\n", encoding="utf-8")
+    db_a = tmp_path / "db-a"
+    db_b = tmp_path / "db-b"
+    p.run(
+        ["certutil", "-A", "-d", f"sql:{db_a}", "-n", "n", "-t", "C,,", "-i", str(ca)]
+    )
+    assert p.nss_trusted(ca) is False, "写进 A 库不等于默认库已信任"
+    assert p.nss_entries(ca, nss_dir=db_a) == [("n", "C,,")]
+    assert p.nss_entries(ca, nss_dir=db_b) == []
+    p.run(["certutil", "-D", "-d", f"sql:{db_b}", "-n", "n"])
+    assert p.nss_has_nickname("n", nss_dir=db_a) is True, "删错库不能影响 A"
+    p.run(["certutil", "-D", "-d", f"sql:{db_a}", "-n", "n"])
+    assert p.nss_has_nickname("n", nss_dir=db_a) is False
+
+
+def test_fake_nss_stale_nickname_matches_linux_tristate(tmp_path):
+    p = FakePlatform()
+    old = tmp_path / "old.crt"
+    old.write_text("OLD\n", encoding="utf-8")
+    new = tmp_path / "new.crt"
+    new.write_text("NEW\n", encoding="utf-8")
+    p.run(
+        [
+            "certutil",
+            "-A",
+            "-d",
+            f"sql:{p.nss_db}",
+            "-n",
+            "devproxy Local CA",
+            "-t",
+            "C,,",
+            "-i",
+            str(old),
+        ]
+    )
+    assert p.nss_stale_nickname(new, "devproxy Local CA") is True
+    assert p.nss_stale_nickname(old, "devproxy Local CA") is False
+    assert p.nss_stale_nickname(new, "absent") is False
+    old.unlink()
+    assert p.nss_stale_nickname(new, "devproxy Local CA") is None, "内容读不到 → 判不了"
+
+
+def test_fake_nss_helpers_cover_linux_optional_interface(tmp_path):
+    """少一个方法，组件测试就会走“降级平台”分支而不是 Linux 分支。"""
+    p = FakePlatform()
+    for name in (
+        "nss_db_path",
+        "nss_entries",
+        "nss_stale_nickname",
+        "nss_has_nickname",
+        "nss_trust_flags",
+    ):
+        assert callable(getattr(p, name)), f"假平台缺少 {name}"
+    assert p.nss_db_path() == p.nss_db
+    assert p.nss_trust_flags(",C,") == "C,C,"
+    assert p.nss_trust_flags("broken") == "broken", "未知形态必须原样返回"
+
+
+def test_fake_linger_status_tracks_enable_linger():
+    p = FakePlatform()
+    assert p.linger_status() is False
+    p.enable_linger()
+    assert p.linger_status() is True

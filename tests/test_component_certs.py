@@ -172,6 +172,9 @@ def _injected(tmp_path, platform):
     paths = Paths(tmp_path / "config", tmp_path / "state", tmp_path / "data")
     paths.ensure_files()
     cfg = Config(storage=str(paths.data_dir))
+    # 平台复查证书时默认会用 HOME 下的 NSS 库；这里把假平台的默认库
+    # 同步成组件注入的库，否则 `_require_same_nss_db` 会（正确地）拒绝。
+    platform.nss_db = tmp_path / "nssdb"
     comp = CertComponent(
         platform,
         paths,
@@ -875,16 +878,19 @@ def _patch_cli(monkeypatch, tmp_path, platform):
 
 
 def _patch_cert_component(monkeypatch, tmp_path):
-    monkeypatch.setattr(
-        "devproxy.cli._shared.CertComponent",
-        lambda p, paths_, cfg_: CertComponent(
+    def build(p, paths_, cfg_):
+        # 组件注入的 NSS 库必须同时成为假平台的默认库，
+        # 否则 `_require_same_nss_db` 会判定“写入库 A、复查库 B”。
+        p.nss_db = tmp_path / "nssdb"
+        return CertComponent(
             p,
             paths_,
             cfg_,
             system_dest=tmp_path / "ca" / "devproxy-local.crt",
             nss_dir=tmp_path / "nssdb",
-        ),
-    )
+        )
+
+    monkeypatch.setattr("devproxy.cli._shared.CertComponent", build)
 
 
 def test_cli_trust_is_idempotent(tmp_path, monkeypatch):

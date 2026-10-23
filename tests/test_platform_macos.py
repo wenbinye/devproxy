@@ -8,6 +8,7 @@ tmp_path。
 import os
 import plistlib
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -243,8 +244,10 @@ def test_macos_elevated_raises_when_both_sudo_probes_fail(
     assert "sudo -n true" in message and "a password is required" in message
 
 
-def test_elevated_write_creates_parent_dir_before_cp(monkeypatch, tmp_path):
-    """/etc/resolver 可能压根不存在 —— 先建目录再 cp。"""
+def test_elevated_write_creates_parent_dir_then_installs_644(
+    monkeypatch, tmp_path
+):
+    """/etc/resolver 可能压根不存在 —— 先建目录，再 install -m 644 写入。"""
     calls = []
 
     def fake_run(argv, timeout=None):
@@ -255,19 +258,23 @@ def test_elevated_write_creates_parent_dir_before_cp(monkeypatch, tmp_path):
     target = tmp_path / "etc" / "resolver" / "test"
     MacOSElevated.__new__(MacOSElevated).write(target, "hello")
 
-    install = [c for c in calls if c[:2] == ["sudo", "install"]]
-    cp = [c for c in calls if c[:2] == ["sudo", "cp"]]
-    assert install and install[0][2:] == ["-d", str(target.parent)]
-    assert cp, "创建目录后仍须 cp 写入"
-    assert calls.index(install[0]) < calls.index(cp[0]), "install -d 必须在 cp 之前"
+    install_dir = [c for c in calls if c[:3] == ["sudo", "install", "-d"]]
+    install_file = [c for c in calls if c[:3] == ["sudo", "install", "-m"]]
+    assert install_dir and install_dir[0][3:] == [str(target.parent)]
+    assert install_file, "创建目录后仍须 install 写入"
+    assert install_file[0][3:8] == ["644", "-o", "root", "-g", "wheel"]
+    assert not [c for c in calls if c[:2] == ["sudo", "cp"]], (
+        "不能用 cp（会把 mkstemp 的 0600 带到目标）"
+    )
+    assert calls.index(install_dir[0]) < calls.index(install_file[0])
 
 
 def test_elevated_write_failure_raises_and_cleans_temp(monkeypatch, tmp_path):
     seen_tmp = []
 
     def fake_run(argv, timeout=None):
-        if argv[:2] == ["sudo", "cp"]:
-            seen_tmp.append(Path(argv[2]))
+        if argv[:3] == ["sudo", "install", "-m"]:
+            seen_tmp.append(Path(argv[-2]))
             return 1, "boom"
         return 0, ""
 
@@ -279,9 +286,10 @@ def test_elevated_write_failure_raises_and_cleans_temp(monkeypatch, tmp_path):
 
 def test_elevated_read_distinguishes_missing_from_permission(monkeypatch):
     def fake_run(argv, timeout=None):
+        # 存在性靠 `test -e` 的返回码，不解析本地化的 cat 文案
+        if "test" in argv:
+            return (1 if "missing" in argv[-1] else 0), ""
         if "cat" in argv:
-            if "missing" in argv[-1]:
-                return 1, "cat: /etc/missing: No such file or directory"
             return 1, "cat: /etc/secret: Permission denied"
         return 0, ""
 
@@ -293,7 +301,7 @@ def test_elevated_read_distinguishes_missing_from_permission(monkeypatch):
         sess.read(Path("/etc/secret"))
 
 
-def test_elevated_copy_uses_sudo_cp(monkeypatch, tmp_path):
+def test_elevated_copy_installs_644_root_wheel(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(
         macos_mod,
@@ -303,7 +311,11 @@ def test_elevated_copy_uses_sudo_cp(monkeypatch, tmp_path):
     src = tmp_path / "src.txt"
     src.write_text("data", encoding="utf-8")
     MacOSElevated.__new__(MacOSElevated).copy(src, tmp_path / "dest.txt")
-    assert ["sudo", "cp", str(src), str(tmp_path / "dest.txt")] in calls
+    installs = [c for c in calls if c[:3] == ["sudo", "install", "-m"]]
+    assert installs, "复制到特权目录必须走 install（可显式设定权限与归属）"
+    argv = installs[0]
+    assert argv[3:8] == ["644", "-o", "root", "-g", "wheel"]
+    assert not [c for c in calls if c[:2] == ["sudo", "cp"]]
 
 
 # ---------- 只读探测 ----------
@@ -440,7 +452,8 @@ def test_http_ok_uses_bounded_curl(monkeypatch):
         lambda argv, timeout=None: (calls.append(list(argv)) or (0, "")),
     )
     assert MacOSPlatform().http_ok("https://localhost") is True
-    assert calls[0][:2] == ["curl", "-fsS"]
+    assert calls[0][:3] == ["curl", "--noproxy", "*"], "本地探测必须绕过用户代理"
+    assert "-fsS" in calls[0]
     assert "--max-time" in calls[0]
 
 
@@ -547,9 +560,9 @@ def test_install_service_system_scope_uses_elevated_write(
 
     def fake_run(argv, timeout=None):
         calls.append(list(argv))
-        if argv[:2] == ["sudo", "cp"]:
+        if argv[:3] == ["sudo", "install", "-m"]:
             # 特权写入的源是临时文件，内容必须已经是渲染好的 plist
-            src = Path(argv[2])
+            src = Path(argv[-2])
             data = plistlib.loads(src.read_bytes())
             assert data["Label"] == "com.devproxy.caddy"
             assert data["ProgramArguments"][0] == "/opt/caddy"
@@ -560,7 +573,9 @@ def test_install_service_system_scope_uses_elevated_write(
     monkeypatch.setattr(p, "service_unit_path", lambda name: target)
     p.install_service("caddy", exec_start=["/opt/caddy", "run"], env={})
 
-    assert any(c[:2] == ["sudo", "cp"] for c in calls), "system scope 必须走特权写入"
+    assert any(
+        c[:3] == ["sudo", "install", "-m"] for c in calls
+    ), "system scope 必须走特权写入"
     assert any(c[:2] == ["sudo", "launchctl"] or c[:2] == ["launchctl", "bootstrap"] for c in calls)
 
 
@@ -675,14 +690,14 @@ def test_macos_platform_read_only_calls_still_work_under_test(tmp_path, monkeypa
 
 
 def test_get_platform_returns_macos_on_darwin(monkeypatch):
-    monkeypatch.setattr(macos_mod.sys, "platform", "darwin")
+    monkeypatch.setattr(sys, "platform", "darwin")
     assert isinstance(get_platform(), MacOSPlatform)
 
 
 def test_get_platform_returns_linux_elsewhere(monkeypatch):
     from devproxy.platform.linux import LinuxPlatform
 
-    monkeypatch.setattr(macos_mod.sys, "platform", "linux")
+    monkeypatch.setattr(sys, "platform", "linux")
     assert isinstance(get_platform(), LinuxPlatform)
 
 
@@ -734,9 +749,9 @@ def test_install_service_system_scope_makes_plist_readable(
 ):
     """单元落盘后必须用户可读 —— 工具自己要读它来判断"单元是不是当前的"。
 
-    特权写入走"临时文件 + sudo cp"：临时文件是 0600，cp 把权限带过来，
-    单元于是变成 0600 root。launchd 读得了，工具读不了 → doctor 永远
-    报"单元过期"，每次 setup 都要重装并再要一次密码。
+    特权写入用 `install -m 644 -o root -g wheel`：mkstemp 的 0600 不会
+    被带到目标，单元天然是 root:wheel 0644。若退回 `cp`，单元会变成
+    0600 root —— launchd 读得了、工具读不了，doctor 永远报"单元过期"。
     """
     calls = []
     target = tmp_path / "LaunchDaemons" / "com.devproxy.caddy.plist"
@@ -750,12 +765,18 @@ def test_install_service_system_scope_makes_plist_readable(
     monkeypatch.setattr(p, "service_unit_path", lambda name: target)
     p.install_service("caddy", exec_start=["/opt/caddy", "run"], env={})
 
-    chmod = [c for c in calls if c[:3] == ["sudo", "chmod", "644"]]
-    chown = [c for c in calls if c[:3] == ["sudo", "chown", "root:wheel"]]
-    assert chmod and chmod[0][3] == str(target), "单元必须改成 0644"
-    assert chown and chown[0][3] == str(target), "单元归属应为 root:wheel"
-    cp = [c for c in calls if c[:2] == ["sudo", "cp"]]
-    assert cp and calls.index(cp[0]) < calls.index(chmod[0]), "改权限必须在写入之后"
+    installs = [c for c in calls if c[:3] == ["sudo", "install", "-m"]]
+    assert installs, "system scope 必须用 install 显式设定权限"
+    argv = installs[0]
+    assert argv[3] == "644", "单元必须落成 0644"
+    assert argv[4:8] == ["-o", "root", "-g", "wheel"]
+    assert argv[-1] == str(target)
+    assert not [c for c in calls if c[:2] == ["sudo", "cp"]], (
+        "cp 会把 mkstemp 的 0600 带到目标"
+    )
+    # 不再需要事后再跑一次 chmod/chown
+    assert not [c for c in calls if c[:2] == ["sudo", "chmod"]]
+    assert not [c for c in calls if c[:2] == ["sudo", "chown"]]
 
 
 def test_install_service_system_scope_creates_log_dir(
@@ -826,5 +847,93 @@ def test_unit_exec_argv_reads_both_unit_formats():
         "/etc/Caddyfile",
     ]
     assert unit_exec_argv("什么都不像") is None
+
+
+# ---------- p4：超时默认值、交互路径与代理绕过 ----------
+
+
+def test_run_defaults_to_bounded_timeout_and_devnull_stdin(monkeypatch):
+    """`_run` 漏传 timeout 时也必须是有界等待，且不能抢终端输入。"""
+    seen = {}
+
+    def fake(argv, **kwargs):
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(macos_mod.subprocess, "run", fake)
+    code, _ = macos_mod._run(["true"])
+    assert code == 0
+    assert seen["timeout"] == macos_mod.DEFAULT_TIMEOUT
+    assert seen["stdin"] is subprocess.DEVNULL
+
+
+def test_platform_run_is_bounded(monkeypatch):
+    seen = {}
+
+    def fake(argv, **kwargs):
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(macos_mod.subprocess, "run", fake)
+    assert MacOSPlatform().run(["true"])[0] == 0
+    assert seen.get("timeout"), "MacOSPlatform.run 必须传 timeout"
+
+
+def test_macos_http_ok_bypasses_proxy_env(monkeypatch):
+    """公司代理环境下，本地回环探测不能被 http(s)_proxy 带走。"""
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9")
+    monkeypatch.setenv("ALL_PROXY", "socks5://127.0.0.1:9")
+    calls = []
+    monkeypatch.setattr(
+        macos_mod,
+        "_run",
+        lambda argv, timeout=None: (calls.append(list(argv)) or (0, "")),
+    )
+    assert MacOSPlatform().http_ok("https://codeup.test") is True
+    assert calls[0][1:3] == ["--noproxy", "*"]
+
+
+def test_macos_elevated_interactive_run_allows_waiting_for_password(
+    monkeypatch, allow_platform_mutation
+):
+    """交互路径可能等用户输密码，只有这条路径允许无超时。"""
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((list(argv), kwargs))
+        return 0, ""
+
+    monkeypatch.setattr(macos_mod, "_run", fake_run)
+    sess = MacOSElevated.__new__(MacOSElevated)
+    sess._noninteractive = False
+    sess.run(["install", "-d", "/etc/resolver"])
+    argv, kwargs = calls[-1]
+    assert argv == ["sudo", "install", "-d", "/etc/resolver"]
+    assert kwargs.get("timeout", "missing") is None
+
+
+def test_macos_elevated_noninteractive_run_uses_default_timeout(
+    monkeypatch, allow_platform_mutation
+):
+    """免密路径不走密码提示，必须回到默认的有界等待。"""
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((list(argv), kwargs))
+        return 0, ""
+
+    monkeypatch.setattr(macos_mod, "_run", fake_run)
+    sess = MacOSElevated.__new__(MacOSElevated)
+    sess._noninteractive = True
+    sess.run(["true"])
+    argv, kwargs = calls[-1]
+    assert argv == ["sudo", "-n", "true"]
+    assert "timeout" not in kwargs, "省略 timeout 应落到 DEFAULT_TIMEOUT 而非 None"
+
+
+def test_macos_platform_refuses_to_run_as_root(tmp_path, monkeypatch):
+    monkeypatch.setattr(macos_mod.os, "geteuid", lambda: 0)
+    with pytest.raises(RuntimeError, match="普通用户"):
+        MacOSPlatform(user_home=tmp_path)
 
 

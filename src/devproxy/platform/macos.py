@@ -16,7 +16,6 @@ import os
 import plistlib
 import re
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
 
@@ -33,16 +32,34 @@ LAUNCH_DAEMONS = "/Library/LaunchDaemons"
 
 # DNS 解析的超时上限（秒）：解析器挂住不能把 setup 的自检拖死。
 # dns_query 只在 verify() 里被调用（doctor 不做 DNS 解析）。
-DNS_QUERY_TIMEOUT = 3
+# 与 Linux 的 DNS_QUERY_TIMEOUT 保持一致。
+DNS_QUERY_TIMEOUT = 3.0
+
+# 子进程的默认超时（秒）：跨进程调用必须有界，漏传超时等于允许永久挂起。
+DEFAULT_TIMEOUT = 30.0
 
 # launchctl print 里的服务状态行（"state = running" / "state = not running"）。
 _LAUNCHD_STATE = re.compile(r"^\s*state\s*=\s*(\S+)", re.MULTILINE)
 
 
-def _run(argv: list[str], timeout: float | None = None) -> tuple[int, str]:
-    """执行一个 argv 列表（不走 shell）。返回 (返回码, 输出)。"""
+def _run(
+    argv: list[str], timeout: float | None = DEFAULT_TIMEOUT
+) -> tuple[int, str]:
+    """执行一个 argv 列表（不走 shell）。返回 (返回码, 输出)。
+
+    默认超时是 `DEFAULT_TIMEOUT` 而不是 `None`：漏传超时是有界等待，
+    不是无限等待。只有确实要等用户输入密码的调用（sudo 密码路径）才
+    显式传 `timeout=None`。`stdin=DEVNULL` 防止交互式探针抢占终端输入
+    （`sudo` 从 `/dev/tty` 读密码，不受影响）。
+    """
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+        proc = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            stdin=subprocess.DEVNULL,
+        )
     except FileNotFoundError:
         # 命令不存在 —— 调用方按返回码处理，而不是拿到 traceback
         return 127, f"命令不存在: {argv[0]}"
@@ -164,21 +181,19 @@ class MacOSElevated:
         # 护栏也必须拦构造函数：直接 new 一个提权会话会真的跑 sudo -v，
         # 后面还可能往系统钥匙串里写东西。
         _assert_may_mutate()
-        self._authenticated = False
         self._authenticate()
 
     def _authenticate(self) -> None:
-        code, msg = _run(["sudo", "-v"])
+        # `sudo -v` 可能要等用户输密码 —— 只有这条路径允许无超时。
+        code, msg = _run(["sudo", "-v"], timeout=None)
         if code == 0:
             # 时间戳已预热，后续 `sudo <cmd>` 直接复用。
-            self._authenticated = True
             return
         # 免密探测：`-n` 保证绝不等待输入（非交互环境会直接失败而不是挂住）。
         code_nopasswd, msg_nopasswd = _run(["sudo", "-n", "true"])
         if code_nopasswd == 0:
             # 免密可用。`sudo -v` 的预热在这台机器上不可用，
             # 后续命令必须自带 `-n` 才不会弹密码框。
-            self._authenticated = True
             self._noninteractive = True
             return
         # 两条路都走不通 —— 错误信息要同时带上两条命令的输出，
@@ -190,15 +205,22 @@ class MacOSElevated:
     def run(self, argv: list[str]) -> tuple[int, str]:
         if self._noninteractive:
             return _run(["sudo", "-n", *argv])
-        return _run(["sudo", *argv])
+        # 交互路径可能要等用户输入密码 —— 不设超时（其余调用一律有界）。
+        return _run(["sudo", *argv], timeout=None)
 
     def write(self, path: Path, content: str) -> None:
-        """通过系统临时目录中的文件 + sudo cp 写入，避免 shell 引号问题。
+        """通过系统临时目录中的文件 + `install -m 644` 写入，避免 shell 引号问题。
 
         父目录不一定存在：`/etc/resolver` 在干净的 macOS 上可能尚未创建。
-        先 `install -d` 建目录，否则 sudo cp 必然失败，setup 永远无法收敛。
+        先 `install -d` 建目录，否则写入必然失败，setup 永远无法收敛。
         临时文件必须放在用户可写的系统临时目录（目标目录本身可能不可写），
         且无论成功失败都要清理。
+
+        必须用 `install -m 644 -o root -g wheel` 而不是 `cp`：mkstemp 建出来
+        的临时文件是 0600，`cp` 会把权限一并带过去，于是 /etc/resolver/<后缀>
+        与 /Library/LaunchDaemons 下的文件变成 root:wheel 0600 —— 普通用户
+        自己都读不了，doctor 的内容判据（`read_text`）会永远失效。
+        `resolver(5)` 的常规形态也是 root:wheel 0644。与 Linux 对齐。
         """
         code, msg = self.run(["install", "-d", str(path.parent)])
         if code != 0:
@@ -208,23 +230,54 @@ class MacOSElevated:
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(content)
-            code, msg = self.run(["cp", str(tmp), str(path)])
+            code, msg = self.run(
+                [
+                    "install",
+                    "-m",
+                    "644",
+                    "-o",
+                    "root",
+                    "-g",
+                    "wheel",
+                    str(tmp),
+                    str(path),
+                ]
+            )
             if code != 0:
                 raise PermissionError(f"写入 {path} 失败: {msg}")
         finally:
             tmp.unlink(missing_ok=True)
 
     def read(self, path: Path) -> str:
-        """读取特权文件。文件不存在抛 FileNotFoundError，其余失败抛 PermissionError。"""
+        """读取特权文件。文件不存在抛 FileNotFoundError，其余失败抛 PermissionError。
+
+        存在性用 `test -e` 的**返回码**判断，不解析 `cat` 的错误文案：
+        BSD/GNU coreutils 的报错都会本地化，语言一换就把缺失文件误判成
+        权限错误。
+        """
+        exists, _ = self.run(["test", "-e", str(path)])
+        if exists != 0:
+            raise FileNotFoundError(path)
         code, out = self.run(["cat", str(path)])
         if code != 0:
-            if "No such file" in out:
-                raise FileNotFoundError(path)
             raise PermissionError(f"读取 {path} 失败: {out}")
         return out
 
     def copy(self, src: Path, dest: Path) -> None:
-        code, msg = self.run(["cp", str(src), str(dest)])
+        """复制文件并落成 root:wheel 0644（理由同 `write`）。"""
+        code, msg = self.run(
+            [
+                "install",
+                "-m",
+                "644",
+                "-o",
+                "root",
+                "-g",
+                "wheel",
+                str(src),
+                str(dest),
+            ]
+        )
         if code != 0:
             raise PermissionError(f"复制 {src} → {dest} 失败：{msg}")
 
@@ -236,6 +289,14 @@ class MacOSPlatform:
     dns_port = 5300
 
     def __init__(self, user_home: Path | None = None) -> None:
+        # 设计前提是"以普通用户运行，内部按需 sudo"。以 root 运行时
+        # Path.home() 是 /var/root，`gui/0` 域通常不存在，服务与单元
+        # 会装进 root 的家目录 —— 必须在构造时就显式失败。
+        if os.geteuid() == 0:
+            raise RuntimeError(
+                "请以普通用户运行 devproxy：需要特权的步骤由工具内部调用 sudo，"
+                "以 root 运行会把服务装进 root 的家目录"
+            )
         self.user_home = Path(user_home) if user_home else Path.home()
         self._elevated: MacOSElevated | None = None
 
@@ -295,7 +356,10 @@ class MacOSPlatform:
         return None
 
     def http_ok(self, url: str) -> bool:
-        code, _ = _run(["curl", "-fsS", "--max-time", "3", url])
+        # 本地回环探测必须绕过用户代理：curl 默认读 http_proxy/ALL_PROXY，
+        # 公司代理配置会让发往 <dnsmasq 解析的 .test 域名> 的请求跑去公网，
+        # verify() 于是假阴性。
+        code, _ = _run(["curl", "--noproxy", "*", "-fsS", "--max-time", "3", url])
         return code == 0
 
     def ca_trusted(self, ca: Path) -> bool:
@@ -365,6 +429,11 @@ class MacOSPlatform:
         """渲染 launchd plist 并 bootstrap 到对应域。
 
         单元格式由平台自己决定 —— 组件只给"跑什么、带什么环境变量"。
+
+        `exec_reload` / `exec_stop` 在 launchd 下**不适用**（launchd 用
+        kickstart / KeepAlive 管理生命周期，没有对应的 plist 字段），
+        这里刻意忽略；协议允许平台忽略这两个可选项。若将来需要
+        reload 语义，应作为非协议能力单独加，而不是往 plist 里塞伪字段。
         """
         _assert_may_mutate()
         path = self.service_unit_path(name)
@@ -378,17 +447,11 @@ class MacOSPlatform:
         # 用用户身份建即可（root 进程照样写得进去）。
         self.log_path(name).parent.mkdir(parents=True, exist_ok=True)
         if self._is_system_scope(name):
-            # /Library/LaunchDaemons 归 root —— 必须走特权写入
+            # /Library/LaunchDaemons 归 root —— 必须走特权写入。
+            # `MacOSElevated.write` 用 `install -m 644 -o root -g wheel`
+            # 落盘，单元天然是 root:wheel 0644（工具自己也读得到），
+            # 不再需要额外的 chown/chmod。
             self.privilege().write(path, content)
-            # 特权写入是"临时文件 + sudo cp"：临时文件是 0600，cp 会把权限
-            # 带过来，单元于是变成 0600 root。launchd 读得了，工具自己读不了
-            # —— doctor 会永远报"单元过期"，每次 setup 都要重装并再要一次密码。
-            # 归属改成 root:wheel 是锦上添花（wheel 是 macOS 的标准组），
-            # 失败不阻断安装；权限 0644 才是关键。
-            self.privilege().run(["chown", "root:wheel", str(path)])
-            code, msg = self.privilege().run(["chmod", "644", str(path)])
-            if code != 0:
-                raise RuntimeError(f"设置单元权限失败（chmod 644）: {msg}")
             self.privilege().run(["launchctl", "bootout", target])
             code, msg = self.privilege().run(
                 ["launchctl", "bootstrap", "system", str(path)]

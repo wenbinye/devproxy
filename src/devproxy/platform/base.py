@@ -11,7 +11,23 @@ from typing import Protocol, runtime_checkable
 CA_NICKNAME = "devproxy Local CA"
 SYSTEM_CA_DEST = Path("/usr/local/share/ca-certificates/devproxy-local.crt")
 SYSTEM_TRUST_DIR = Path("/etc/ssl/certs")
-NSS_DIR = Path("~/.pki/nssdb")
+
+# NSS 库默认位置的**模板**：`~` 未展开（pathlib 不认波浪号）。
+# 新代码请用 `nss_db_dir()`；`NSS_DIR` 仅为兼容既有导入保留，任何消费方
+# 都必须自己 expanduser()，否则会去查「当前目录下的 ~/.pki/nssdb」。
+NSS_DIR_TEMPLATE = "~/.pki/nssdb"
+NSS_DIR = Path(NSS_DIR_TEMPLATE)
+
+
+def nss_db_dir(home: Path | None = None) -> Path:
+    """NSS 库的默认路径（已展开，绝对路径）。
+
+    每次调用时才展开 `~` / 读取 `home` —— 测试重定向 HOME 后必须生效，
+    所以不能做成导入期常量。
+    """
+    base = Path(home) if home is not None else Path.home()
+    return base / ".pki" / "nssdb"
+
 
 # macOS 的对应物：CA 进系统钥匙串（Safari/Chrome 都认它），
 # DNS 路由走每域解析器文件（/etc/resolver/<后缀>），不动 /etc/resolv.conf。
@@ -118,6 +134,10 @@ class Platform(Protocol):
 
         组件层只给"跑什么、带什么环境变量"，不碰单元格式 ——
         否则 systemd 与 launchd 的差异会渗进组件里。
+
+        `exec_reload` / `exec_stop` 是**可选能力**：平台可以忽略。
+        launchd 没有对应的 plist 字段，`MacOSPlatform` 即刻意丢弃这两个值
+        （见其实现注释），调用方不应假设所有平台都支持。
         """
 
     def enable_service(self, name: str) -> None: ...
