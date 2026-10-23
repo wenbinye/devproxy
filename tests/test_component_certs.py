@@ -8,6 +8,7 @@ from devproxy.components import certs as certs_module
 from devproxy.components.certs import CertComponent
 from devproxy.config import Config
 from devproxy.paths import Paths
+from devproxy.platform.base import Action
 from devproxy.platform.fake import FakePlatform
 
 
@@ -351,6 +352,88 @@ def test_apply_raises_when_update_ca_certificates_fails(tmp_path, monkeypatch):
     _write_ca(paths)
     with pytest.raises(RuntimeError, match="update-ca-certificates"):
         comp.apply(comp.plan())
+
+
+# -- NSS 安装：必须复查，不能只信 certutil -A 的返回码 ----------------------
+#
+# 真机现象：NSS 按 (issuer, serial) 去重 —— 同一张证书换个昵称入库时，
+# `certutil -A` **静默无操作**（返回 0，条目并不新增）。只信返回码，
+# 工具就会一直以为装好了，而库里根本没有自己那条。
+
+
+class _NssFlagPlatform(FakePlatform):
+    """库里有这张 CA，但缺 SSL 信任标志 —— 只有 -M 能补上。"""
+
+    def __init__(self):
+        super().__init__()
+        self.flagged = False
+        self.entries: list[tuple[str, str]] = []
+
+    def nss_trusted(self, ca):
+        return self.flagged
+
+    def nss_entries(self, ca):
+        return self.entries
+
+    def run(self, argv):
+        result = super().run(argv)
+        if argv[:1] == ["certutil"] and "-M" in argv:
+            self.flagged = True
+        return result
+
+
+def test_apply_adds_trust_flag_to_existing_entry(tmp_path, monkeypatch):
+    """库里有这张 CA 但没信任标志 → 用 certutil -M 补上标志。"""
+    _certutil_installed(monkeypatch)
+    platform = _NssFlagPlatform()
+    platform.entries = [("Caddy Local Authority", ",,")]
+    comp, paths, _ = _injected(tmp_path, platform)
+    _write_ca(paths)
+    comp.apply(comp.plan())
+    mods = [c for c in platform.commands if c[:1] == ["certutil"] and "-M" in c]
+    assert mods, "缺信任标志时必须用 certutil -M 补标志"
+    assert "Caddy Local Authority" in mods[0], "补的是库里那条的昵称"
+    assert mods[0][mods[0].index("-t") + 1] == "C,,"
+
+
+def test_apply_raises_when_cert_never_becomes_trusted(tmp_path, monkeypatch):
+    """装完复查仍不是"已信任" → 必须报错，不能默默说成功。"""
+
+    class NeverTrusted(_NssFlagPlatform):
+        def run(self, argv):
+            FakePlatform.run(self, argv)
+            return 0, ""
+
+    _certutil_installed(monkeypatch)
+    platform = NeverTrusted()
+    platform.entries = [("Caddy Local Authority", ",,")]
+    comp, paths, _ = _injected(tmp_path, platform)
+    _write_ca(paths)
+    with pytest.raises(RuntimeError) as ei:
+        comp.apply(comp.plan())
+    assert "信任标志" in str(ei.value)
+
+
+def test_apply_skips_nss_install_when_already_trusted(tmp_path, monkeypatch):
+    """已经信任时不该再动用户的库 —— 一条 certutil 命令都不该发。"""
+    _certutil_installed(monkeypatch)
+    platform = FakePlatform()
+    comp, paths, _ = _injected(tmp_path, platform)
+    ca = _write_ca(paths)
+    platform.nss.add(ca)
+    comp.apply(
+        [
+            Action(
+                description="安装 CA 根证书到 NSS 库",
+                kind="run",
+                command=["install-nss-ca", str(ca), str(tmp_path / "nssdb")],
+                privileged=False,
+            )
+        ]
+    )
+    assert not [c for c in platform.commands if c[:1] == ["certutil"]], (
+        "已信任的库不该被反复重装"
+    )
 
 
 def test_verify_ok_after_trust(tmp_path, monkeypatch):

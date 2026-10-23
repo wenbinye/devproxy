@@ -8,6 +8,16 @@ from pathlib import Path
 from devproxy.platform.base import ElevatedSession
 
 
+def _certutil_opt(argv: list[str], name: str) -> str | None:
+    """取 certutil 的选项值（`-i <路径>` / `-n <昵称>`）。"""
+    if name not in argv:
+        return None
+    index = argv.index(name)
+    if index + 1 >= len(argv):
+        return None
+    return argv[index + 1]
+
+
 class FakeElevated:
     def __init__(self, platform: "FakePlatform") -> None:
         self.platform = platform
@@ -42,6 +52,8 @@ class FakePlatform:
         self.active: set[str] = set()
         self.trusted: set[Path] = set()
         self.nss: set[Path] = set()
+        # NSS 条目的昵称 → 证书路径（模拟 certutil 的 -A / -D）
+        self.nss_nicknames: dict[str, Path] = {}
         self.dns_backends: set[str] = set()
         self.commands: list[list[str]] = []
         self.written: dict[Path, str] = {}
@@ -68,7 +80,30 @@ class FakePlatform:
 
     def run(self, argv: list[str]) -> tuple[int, str]:
         self.commands.append(list(argv))
+        if argv[:1] == ["certutil"]:
+            self._apply_certutil(argv)
         return 0, ""
+
+    def _apply_certutil(self, argv: list[str]) -> None:
+        """把 certutil 的 -A / -D 映射到假平台的 NSS 状态上。
+
+        真机语义：`-A` 把证书装进 NSS 库，`-D` 删掉同名条目。
+        组件在安装之后会**复查**"这张 CA 到底进库了没" —— 假平台若不跟着变，
+        复查永远失败，安装这一步就永远报错。
+        """
+        if "-A" in argv:
+            src = _certutil_opt(argv, "-i")
+            nickname = _certutil_opt(argv, "-n")
+            if src:
+                path = Path(src)
+                self.nss.add(path)
+                if nickname:
+                    self.nss_nicknames[nickname] = path
+        elif "-D" in argv:
+            nickname = _certutil_opt(argv, "-n")
+            path = self.nss_nicknames.pop(nickname, None) if nickname else None
+            if path is not None and path not in self.nss_nicknames.values():
+                self.nss.discard(path)
 
     def binary_version(self, binary: Path) -> str:
         return "v2.11.7"

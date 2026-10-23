@@ -64,13 +64,35 @@ class CertComponent:
             return False
         return self._trusted(checker, self.ca_path)
 
-    def _nss_trusted(self) -> bool:
+    def _nss_trusted(self, ca: Path | None = None) -> bool:
         # 平台协议可能有变（Plan 3 的 macOS 实现）；属性访问本身也要在
         # try 之外兜住的话，缺方法会让 check() 抛异常 —— doctor 就炸了。
         checker = getattr(self.platform, "nss_trusted", None)
         if checker is None:
             return False
-        return self._trusted(checker, self.ca_path)
+        return self._trusted(checker, ca or self.ca_path)
+
+    def _nss_entries(self, ca: Path | None = None) -> list[tuple[str, str]]:
+        """库里与这张 CA 内容匹配的条目：[(昵称, 信任标志), ...]。
+
+        `nss_entries` 是**非协议方法**（macOS 没有 NSS 库）——
+        取不到就退化成"只按自己的昵称处理"。
+        """
+        getter = getattr(self.platform, "nss_entries", None)
+        if getter is None:
+            return []
+        try:
+            raw = getter(ca or self.ca_path)
+        except Exception:  # noqa: BLE001 —— 取不到就当没有
+            return []
+        entries: list[tuple[str, str]] = []
+        for item in raw or []:
+            try:
+                nickname, flags = item
+            except (TypeError, ValueError):
+                continue
+            entries.append((str(nickname), str(flags)))
+        return entries
 
     def fully_trusted(self) -> bool:
         """CA 是否已被系统信任库与 NSS 库**同时**信任。
@@ -227,6 +249,10 @@ class CertComponent:
                 raise RuntimeError(
                     "缺少 certutil（Chrome 信任需 NSS 库）：sudo apt install libnss3-tools"
                 )
+            # 库里已经有这张 CA 且带 SSL 信任标志 → 什么都不做。
+            # 尤其不能去动用户自己那条（比如老 devp 装的 "Caddy Local Authority"）。
+            if self._nss_trusted(src):
+                return
             nss.mkdir(parents=True, exist_ok=True)
             # 库还不存在时先建一个空库，否则 certutil -A 会失败
             if not (nss / "cert9.db").exists():
@@ -235,7 +261,7 @@ class CertComponent:
                 )
                 if code != 0:
                     raise RuntimeError(f"创建 NSS 库失败: {msg}")
-            # 先删同名再装，保证幂等
+            # 先删同名再装，保证幂等（删不存在的条目会失败，忽略即可）
             self.platform.run(["certutil", "-d", f"sql:{nss}", "-D", "-n", CA_NAME])
             code, msg = self.platform.run(
                 [
@@ -253,7 +279,22 @@ class CertComponent:
             )
             if code != 0:
                 raise RuntimeError(f"安装 NSS 证书失败: {msg}")
-            return
+            # 复查：**-A 返回 0 不代表真的装上了**。
+            # NSS 按 (issuer, serial) 去重 —— 同一张证书换个昵称入库时，
+            # certutil -A 会静默无操作（返回 0，条目并不新增）。
+            if self._nss_trusted(src):
+                return
+            # 库里有这张 CA，但缺 SSL 信任标志 → 给那条补上标志，再复查
+            for nickname, _flags in self._nss_entries(src):
+                self.platform.run(
+                    ["certutil", "-M", "-d", f"sql:{nss}", "-n", nickname, "-t", "C,,"]
+                )
+            if self._nss_trusted(src):
+                return
+            raise RuntimeError(
+                "安装 NSS 证书失败：NSS 库里找不到这张 CA 的 SSL 信任标志"
+                f"（certutil: {msg}）"
+            )
         raise RuntimeError(f"未知动作: {action.command}")
 
     # -- verify --------------------------------------------------------

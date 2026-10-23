@@ -530,21 +530,55 @@ def _nss_platform(tmp_path):
     return p
 
 
+def _nss_listing(*rows: tuple[str, str]) -> str:
+    """造一份 `certutil -L` 的表格输出（昵称, 信任标志）。
+
+    真实输出长这样（列宽 55，超长的昵称会溢出到标志列前，只隔一个空格）::
+
+        Certificate Nickname                    Trust Attributes
+                                                     SSL,S/MIME,JAR/XPI
+
+        devproxy Local CA                             C,,
+    """
+    lines = [
+        "",
+        "Certificate Nickname                                         Trust Attributes",
+        "                                                             SSL,S/MIME,JAR/XPI",
+        "",
+    ]
+    for nickname, flags in rows:
+        lines.append(f"{nickname:<55} {flags}  ")
+    return "\n".join(lines) + "\n"
+
+
+def _fake_certutil(listing: str, pem: str, calls: list | None = None):
+    """假 certutil：`-L` 给表格，`-L -n <昵称> -a` 给 PEM。"""
+
+    def fake_run(argv):
+        if calls is not None:
+            calls.append(list(argv))
+        if "-a" in argv:
+            return 0, pem
+        return 0, listing
+
+    return fake_run
+
+
 def test_linux_nss_trusted_true_when_stored_cert_matches(tmp_path, monkeypatch):
     """判定依据是库里的**证书内容**，不只是同名条目存在。"""
     p = _nss_platform(tmp_path)
     ca = tmp_path / "root.crt"
     ca.write_text(PEM_OLD, encoding="utf-8")
     calls = []
-
-    def fake_run(argv):
-        calls.append(argv)
-        return 0, PEM_OLD
-
-    monkeypatch.setattr(linux_mod, "_run", fake_run)
+    monkeypatch.setattr(
+        linux_mod,
+        "_run",
+        _fake_certutil(_nss_listing(("devproxy Local CA", "C,,")), PEM_OLD, calls),
+    )
     assert p.nss_trusted(ca) is True
-    assert calls[0][:2] == ["certutil", "-L"]
-    assert "-a" in calls[0], "必须让 certutil 打出 PEM 才能比对内容"
+    assert calls[0][:2] == ["certutil", "-L"], "要先列出库里的条目"
+    assert "-a" in calls[-1], "必须让 certutil 打出 PEM 才能比对内容"
+    assert "-n" in calls[-1]
 
 
 def test_linux_nss_trusted_false_when_stored_cert_differs(tmp_path, monkeypatch):
@@ -552,7 +586,11 @@ def test_linux_nss_trusted_false_when_stored_cert_differs(tmp_path, monkeypatch)
     p = _nss_platform(tmp_path)
     ca = tmp_path / "root.crt"
     ca.write_text(PEM_NEW, encoding="utf-8")
-    monkeypatch.setattr(linux_mod, "_run", lambda argv: (0, PEM_OLD))
+    monkeypatch.setattr(
+        linux_mod,
+        "_run",
+        _fake_certutil(_nss_listing(("devproxy Local CA", "C,,")), PEM_OLD),
+    )
     assert p.nss_trusted(ca) is False
 
 
@@ -560,8 +598,13 @@ def test_linux_nss_trusted_ignores_blank_lines_and_crlf(tmp_path, monkeypatch):
     p = _nss_platform(tmp_path)
     ca = tmp_path / "root.crt"
     ca.write_text(PEM_OLD, encoding="utf-8")
+    listing = _nss_listing(("devproxy Local CA", "C,,")).replace("\n", "\r\n")
     noisy = "\r\n" + PEM_OLD.replace("\n", "\r\n") + "\r\n\r\n"
-    monkeypatch.setattr(linux_mod, "_run", lambda argv: (0, noisy))
+    monkeypatch.setattr(
+        linux_mod,
+        "_run",
+        _fake_certutil(listing, noisy),
+    )
     assert p.nss_trusted(ca) is True
 
 
@@ -569,11 +612,13 @@ def test_linux_nss_trusted_false_when_entry_missing(tmp_path, monkeypatch):
     p = _nss_platform(tmp_path)
     ca = tmp_path / "root.crt"
     ca.write_text(PEM_OLD, encoding="utf-8")
-    monkeypatch.setattr(
-        linux_mod,
-        "_run",
-        lambda argv: (255, "certutil: could not find cert: devproxy Local CA"),
-    )
+
+    def fake_run(argv):
+        if "-a" in argv:
+            return 255, "certutil: could not find cert: devproxy Local CA"
+        return 0, _nss_listing(("devproxy Local CA", "C,,"))
+
+    monkeypatch.setattr(linux_mod, "_run", fake_run)
     assert p.nss_trusted(ca) is False
 
 
@@ -581,7 +626,11 @@ def test_linux_nss_trusted_false_when_ca_unreadable(tmp_path, monkeypatch):
     p = _nss_platform(tmp_path)
     ca = tmp_path / "root.crt"
     ca.write_bytes(b"\xff\xfe\x00binary")
-    monkeypatch.setattr(linux_mod, "_run", lambda argv: (0, PEM_OLD))
+    monkeypatch.setattr(
+        linux_mod,
+        "_run",
+        _fake_certutil(_nss_listing(("devproxy Local CA", "C,,")), PEM_OLD),
+    )
     assert p.nss_trusted(ca) is False
 
 
@@ -599,6 +648,97 @@ def test_linux_nss_trusted_false_when_certutil_missing(tmp_path, monkeypatch):
     ca.write_text(PEM_OLD, encoding="utf-8")
     monkeypatch.setattr(linux_mod, "_run", lambda argv: (127, "命令不存在: certutil"))
     assert p.nss_trusted(ca) is False
+
+
+# -- NSS 判定：按内容而不是按昵称（真机首跑暴露的缺陷）---------------------
+
+
+def test_linux_nss_trusted_true_when_cert_stored_under_other_nickname(
+    tmp_path, monkeypatch
+):
+    """同一张 CA 用别的昵称入库也算已信任。
+
+    真机现象：老 devp 装的 CA 昵称是 "Caddy Local Authority"，
+    而 NSS 按 (issuer, serial) 去重 —— 工具用 `certutil -A` 换个昵称
+    再装一次会**静默无操作**，条目永远不新增。只按自己的昵称查，
+    工具就永远查不到这张 CA。
+    """
+    p = _nss_platform(tmp_path)
+    ca = tmp_path / "root.crt"
+    ca.write_text(PEM_OLD, encoding="utf-8")
+    monkeypatch.setattr(
+        linux_mod,
+        "_run",
+        _fake_certutil(_nss_listing(("Caddy Local Authority", "C,,")), PEM_OLD),
+    )
+    assert p.nss_trusted(ca) is True
+
+
+def test_linux_nss_trusted_false_when_entry_has_no_trust_flag(tmp_path, monkeypatch):
+    """库里有这张 CA 但标成无信任（",,"）—— 不算已信任。"""
+    p = _nss_platform(tmp_path)
+    ca = tmp_path / "root.crt"
+    ca.write_text(PEM_OLD, encoding="utf-8")
+    monkeypatch.setattr(
+        linux_mod,
+        "_run",
+        _fake_certutil(_nss_listing(("Caddy Local Authority", ",,")), PEM_OLD),
+    )
+    assert p.nss_trusted(ca) is False
+
+
+def test_linux_nss_entries_reports_nickname_and_flags(tmp_path, monkeypatch):
+    """nss_entries 要给出"库里那条"的昵称与标志 —— 组件靠它补信任标志。"""
+    p = _nss_platform(tmp_path)
+    ca = tmp_path / "root.crt"
+    ca.write_text(PEM_OLD, encoding="utf-8")
+    monkeypatch.setattr(
+        linux_mod,
+        "_run",
+        _fake_certutil(_nss_listing(("Caddy Local Authority", ",,")), PEM_OLD),
+    )
+    assert p.nss_entries(ca) == [("Caddy Local Authority", ",,")]
+
+
+def test_linux_nss_entries_ignores_nickname_that_cannot_be_fetched(
+    tmp_path, monkeypatch
+):
+    """表格解析出来的昵称取不到证书时必须跳过 —— 宁可漏判也不能误判。"""
+    p = _nss_platform(tmp_path)
+    ca = tmp_path / "root.crt"
+    ca.write_text(PEM_OLD, encoding="utf-8")
+
+    def fake_run(argv):
+        if "-a" in argv:
+            if "取不到" in argv[argv.index("-n") + 1]:
+                return 255, "certutil: could not find cert"
+            return 0, PEM_OLD
+        return 0, _nss_listing(("取不到的那条", "C,,"), ("devproxy Local CA", "C,,"))
+
+    monkeypatch.setattr(linux_mod, "_run", fake_run)
+    assert p.nss_entries(ca) == [("devproxy Local CA", "C,,")]
+
+
+def test_linux_nss_entries_empty_without_db(tmp_path, monkeypatch):
+    p = LinuxPlatform(user_home=tmp_path)
+    monkeypatch.setattr(
+        linux_mod, "_run", lambda argv: pytest.fail("没有 NSS 库就不该跑 certutil")
+    )
+    assert p.nss_entries(tmp_path / "root.crt") == []
+
+
+def test_linux_nss_rows_parses_nickname_with_spaces_and_long_names():
+    """昵称可以含空格，也可以长到溢出列宽 —— 只能从行尾切标志。"""
+    listing = _nss_listing(
+        ("with space in it", "P,,"),
+        ("a-very-long-nickname-that-exceeds-the-column-width-by-quite-a-lot", "C,,"),
+    )
+    rows = linux_mod._nss_rows(listing)
+    assert ("with space in it", "P,,") in rows
+    assert (
+        "a-very-long-nickname-that-exceeds-the-column-width-by-quite-a-lot",
+        "C,,",
+    ) in rows
 
 
 def test_fake_platform_nss_trusted_tracks_its_own_set(tmp_path):
@@ -642,6 +782,97 @@ def test_linux_elevated_write_raises_when_mkdir_fails(
     )
     with pytest.raises(PermissionError, match="创建目录"):
         linux_mod.LinuxElevated().write(tmp_path / "etc" / "devproxy.conf", "x")
+
+
+# -- 免密机器上的提权（真机首跑暴露的缺陷）------------------------------------
+#
+# 真机 sudoers：
+#     (ALL : ALL) ALL
+#     (ALL) NOPASSWD: ALL
+# `sudo -v` 是"无命令"调用，不匹配 NOPASSWD 的命令规范 → 落到默认策略
+# → 需要认证 → 无 TTY 时报 "A terminal is required to authenticate"。
+# 这台机器根本不需要密码 —— 判成"提权失败"会让所有特权步骤瘫痪。
+
+
+def test_linux_elevated_falls_back_to_passwordless_sudo(
+    monkeypatch, tmp_path, allow_platform_mutation
+):
+    """sudo -v 失败但 sudo -n true 成功 → 提权可用，后续命令自带 -n。"""
+    calls = []
+
+    def fake_run(argv):
+        calls.append(list(argv))
+        if argv == ["sudo", "-v"]:
+            return 1, "sudo: A terminal is required to authenticate"
+        return 0, ""
+
+    monkeypatch.setattr(linux_mod, "_run", fake_run)
+    sess = linux_mod.LinuxElevated()
+    code, _ = sess.run(["install", "-d", "/etc/devproxy"])
+    assert code == 0
+    assert ["sudo", "-n", "true"] in calls, "免密能力必须靠 sudo -n true 探测"
+    assert ["sudo", "-n", "install", "-d", "/etc/devproxy"] in calls, (
+        "免密路径下的特权命令必须自带 -n，绝不能退化成会弹密码框的 sudo"
+    )
+    assert not [c for c in calls if c[:2] == ["sudo", "install"]], (
+        "免密路径下不允许出现会弹密码框的 sudo <cmd>"
+    )
+
+
+def test_linux_elevated_keeps_plain_sudo_when_pre_auth_succeeds(
+    monkeypatch, tmp_path, allow_platform_mutation
+):
+    """sudo -v 成功 → 维持现状：时间戳已预热，命令就是 sudo <cmd>。"""
+    calls = []
+
+    def fake_run(argv):
+        calls.append(list(argv))
+        return 0, ""
+
+    monkeypatch.setattr(linux_mod, "_run", fake_run)
+    sess = linux_mod.LinuxElevated()
+    sess.run(["install", "-d", "/etc/devproxy"])
+    assert ["sudo", "install", "-d", "/etc/devproxy"] in calls
+    assert not [c for c in calls if c[:2] == ["sudo", "-n", "true"]], (
+        "预热成功就不必再探免密"
+    )
+
+
+def test_linux_elevated_raises_when_both_sudo_probes_fail(
+    monkeypatch, tmp_path, allow_platform_mutation
+):
+    """两条路都走不通 → 抛 PermissionError，信息要带上两条命令的输出。"""
+    def fake_run(argv):
+        if argv == ["sudo", "-v"]:
+            return 1, "sudo: a terminal is required to authenticate"
+        if argv == ["sudo", "-n", "true"]:
+            return 1, "sudo: a password is required"
+        return 0, ""
+
+    monkeypatch.setattr(linux_mod, "_run", fake_run)
+    with pytest.raises(PermissionError) as ei:
+        linux_mod.LinuxElevated()
+    message = str(ei.value)
+    assert "sudo -v" in message and "a terminal is required" in message
+    assert "sudo -n true" in message and "a password is required" in message
+
+
+def test_linux_elevated_passwordless_path_survives_a_failing_command(
+    monkeypatch, tmp_path, allow_platform_mutation
+):
+    """免密路径下命令失败照常返回错误码 —— 不该因为 -n 就当成提权失败。"""
+    def fake_run(argv):
+        if argv == ["sudo", "-v"]:
+            return 1, "sudo: A terminal is required to authenticate"
+        if argv == ["sudo", "-n", "true"]:
+            return 0, ""
+        return 1, "install: cannot create directory"
+
+    monkeypatch.setattr(linux_mod, "_run", fake_run)
+    sess = linux_mod.LinuxElevated()
+    code, msg = sess.run(["install", "-d", "/etc/devproxy"])
+    assert code == 1
+    assert "cannot create directory" in msg
 
 
 # -- resolved 活跃探测 / dns_query / http_ok --------------------------------

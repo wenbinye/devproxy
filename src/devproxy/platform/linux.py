@@ -8,6 +8,7 @@ import getpass
 import hashlib
 import ipaddress
 import os
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -32,11 +33,19 @@ TRUST_BUNDLE_FILES = (
 )
 TRUST_HASH_DIR = Path("/etc/ssl/certs")
 
+# NSS 信任标志（`certutil -L` 的 Trust Attributes 列）。
+# 首字符是 **SSL 用途** 的标志：
+#   "C" / "T" = 受信任的 CA，"P" = 受信任的对端，
+#   "G" / "U" = 有效但不受信任，"," / "." / 空 = 完全没有信任。
+# 本工具装的是根 CA，标志形如 "C,,"。
+NSS_TRUSTED_FLAGS = ("C", "T", "P")
 
-def _pem_body(text: str) -> str:
-    """PEM 的规范化正文：去掉头尾标记、空行与所有空白。"""
-    lines = (line.strip() for line in text.splitlines())
-    return "".join(line for line in lines if line and not line.startswith("-----"))
+# `certutil -L` 的表格行：昵称列宽 55（超长会溢出，昵称与标志之间只剩一个空格），
+# 昵称**可以含空格** —— 所以只能从行尾切标志，绝不能按"第一个空格"切昵称。
+#
+# 正则只是**候选**：每个候选昵称都要再用 `certutil -L -n <昵称> -a` 实际取一次，
+# 取不到就跳过 —— 解析有偏差时宁可漏判也不能误判。
+_NSS_ROW_RE = re.compile(r"^(?P<name>.*?)[ ]+(?P<flags>[A-Za-z]*,{2,}[A-Za-z]*)$")
 
 
 def _pem_der_blocks(text: str) -> list[bytes]:
@@ -122,8 +131,30 @@ def ca_in_trust_store(ca: Path) -> bool:
     return False
 
 
-def _pem_digest(text: str) -> str:
-    return hashlib.sha256(_pem_body(text).encode("utf-8")).hexdigest()
+def _nss_rows(listing: str) -> list[tuple[str, str]]:
+    """解析 `certutil -L` 的表格 → [(昵称, 信任标志)]。
+
+    表头两行与空行会被自然过滤掉：表头里没有"连续两个逗号"，
+    匹配不上标志的形状。
+    """
+    rows: list[tuple[str, str]] = []
+    for raw in listing.splitlines():
+        line = raw.rstrip()
+        if not line:
+            continue
+        match = _NSS_ROW_RE.match(line)
+        if not match:
+            continue
+        name = match.group("name").rstrip()
+        if not name:
+            continue
+        rows.append((name, match.group("flags")))
+    return rows
+
+
+def _nss_flags_trusted(flags: str) -> bool:
+    """这条目的 SSL 信任标志是否表示"受信任"。"""
+    return bool(flags) and flags[0] in NSS_TRUSTED_FLAGS
 
 
 def _run(argv: list[str]) -> tuple[int, str]:
@@ -227,7 +258,22 @@ def render_systemd_unit(
 
 
 class LinuxElevated:
-    """提权会话。构造时执行一次 `sudo -v` 完成预认证。"""
+    """提权会话。构造时执行一次 `sudo -v` 完成预认证。
+
+    `sudo -v` 是"无命令"调用：不匹配 sudoers 里的命令规范，
+    于是落到默认的 `(ALL : ALL) ALL` —— 需要认证。而
+    `(ALL) NOPASSWD: ALL` 只对**具体命令**免密，管不到 `sudo -v`。
+    于是免密机器上 `sudo -v` 必然失败（无 TTY 时报
+    "A terminal is required to authenticate"），而那台机器根本不需要密码。
+
+    所以 `sudo -v` 失败**不能**直接判定"提权失败"：改用 `sudo -n true`
+    探测免密能力 —— 它成功就说明这台机器不需要密码，
+    后续特权命令一律自带 `-n`（绝不退化成会弹密码框的 `sudo <cmd>`）。
+    """
+
+    # 免密路径的标记。做成类属性：测试里用 __new__ 造出的会话
+    # 没有实例属性，也必须能正常跑。
+    _noninteractive = False
 
     def __init__(self) -> None:
         # 护栏也必须拦构造函数：直接 new 一个提权会话会真的跑 sudo -v。
@@ -237,11 +283,27 @@ class LinuxElevated:
 
     def _authenticate(self) -> None:
         code, msg = _run(["sudo", "-v"])
-        if code != 0:
-            raise PermissionError(f"提权失败：{msg}")
-        self._authenticated = True
+        if code == 0:
+            # 时间戳已预热，后续 `sudo <cmd>` 直接复用。
+            self._authenticated = True
+            return
+        # 免密探测：`-n` 保证绝不等待输入（非交互环境会直接失败而不是挂住）。
+        code_nopasswd, msg_nopasswd = _run(["sudo", "-n", "true"])
+        if code_nopasswd == 0:
+            # 免密可用。`sudo -v` 的预热在这台机器上不可用，
+            # 后续命令必须自带 `-n` 才不会弹密码框。
+            self._authenticated = True
+            self._noninteractive = True
+            return
+        # 两条路都走不通 —— 错误信息要同时带上两条命令的输出，
+        # 用户才能分辨"这台机器没免密"和"sudo 本身坏了"。
+        raise PermissionError(
+            f"提权失败：sudo -v: {msg}；sudo -n true: {msg_nopasswd}"
+        )
 
     def run(self, argv: list[str]) -> tuple[int, str]:
+        if self._noninteractive:
+            return _run(["sudo", "-n", *argv])
         return _run(["sudo", *argv])
 
     def write(self, path: Path, content: str) -> None:
@@ -478,26 +540,62 @@ class LinuxPlatform:
         )
         return code == 0
 
-    def nss_trusted(self, ca: Path) -> bool:
-        """NSS 库里存的证书是否**就是这一份** CA。只读、非特权。
+    def nss_entries(self, ca: Path) -> list[tuple[str, str]]:
+        """NSS 库里与这张 CA **内容相同**的条目：[(昵称, 信任标志), ...]。
 
-        只按 nickname 判"条目存在"是不够的：Caddy 重新生成内部 CA（删
-        pki/、换 storage、迁移）后旧条目仍在，Chrome 会拒绝新 CA，而工具
-        却以为已就绪、连修复路径都不给。所以让 certutil 打出 PEM 比对内容。
+        按**内容**找，不按昵称找 —— NSS 按 (issuer, serial) 去重：
+        同一张证书换个昵称再 `certutil -A`，会**静默无操作**（返回 0，
+        但条目并不新增）。所以"这张 CA 装了没有"只能靠指纹比对。
+
+        这是**非协议方法**（组件层用 getattr 探测）：macOS 没有 NSS 库，
+        不实现也不影响。
         """
         nss = self.user_home / ".pki" / "nssdb"
         if not (nss / "cert9.db").exists():
-            return False
+            return []
         try:
-            expected = ca.read_text(encoding="utf-8")
+            expected = _pem_fingerprints(ca.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError):
-            return False
-        code, stored = _run(
-            ["certutil", "-L", "-d", f"sql:{nss}", "-n", CA_NICKNAME, "-a"]
-        )
+            return []
+        if not expected:
+            return []
+        code, listing = _run(["certutil", "-L", "-d", f"sql:{nss}"])
         if code != 0:
+            return []
+        rows = _nss_rows(listing)
+        # 快路径：工具自己的昵称先查（它的行号排在最前）。
+        rows.sort(key=lambda row: row[0] != CA_NICKNAME)
+        entries: list[tuple[str, str]] = []
+        for nickname, flags in rows:
+            # 表格解析只是候选 —— 每个候选都要实际取一次，取不到就跳过。
+            code, pem = _run(
+                ["certutil", "-L", "-d", f"sql:{nss}", "-n", nickname, "-a"]
+            )
+            if code != 0:
+                continue
+            try:
+                stored = _pem_fingerprints(pem)
+            except Exception:  # noqa: BLE001 —— 单个条目读坏了不影响其余
+                continue
+            if expected & stored:
+                entries.append((nickname, flags))
+        return entries
+
+    def nss_trusted(self, ca: Path) -> bool:
+        """这张 CA 是否在 NSS 库里**且带 SSL 信任标志**。只读、非特权。
+
+        两个要点：
+        - 判据是**证书内容**，不是昵称。Caddy 重新生成内部 CA 后旧条目仍在，
+          只按 nickname 判定会误报"已信任"；反过来，老工具（devp）装的
+          "Caddy Local Authority"与本工具的昵称不同，只按自己的昵称查
+          又会永远查不到 —— 工具因此永远认为 CA 没装上。
+        - 光有证书**不算**信任：标志是 ",,"（无信任）时 Chrome 照样不认。
+        """
+        try:
+            entries = self.nss_entries(ca)
+        except Exception:  # noqa: BLE001 —— 判定异常一律按"未信任"
             return False
-        return _pem_digest(stored) == _pem_digest(expected)
+        return any(_nss_flags_trusted(flags) for _nickname, flags in entries)
 
     def dns_route_installed(self, backend: str, suffix: str) -> bool:
         """Linux 的两个后端都是固定路径，不看域名后缀（macOS 才按后缀分文件）。"""

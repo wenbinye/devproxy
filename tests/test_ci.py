@@ -28,3 +28,12 @@ def test_ci_workflow_installs_runtime_dependencies():
     assert "typer" in text
     assert "rich" in text
     assert "pytest" in text
+
+
+def test_ci_workflow_installs_certutil():
+    """NSS 库的用例要在**真的** certutil 上跑（去重规则只有真 certutil 才有）。
+
+    CI 不装 libnss3-tools 的话，那组用例会整组 skip —— 等于没有回归护栏。
+    """
+    text = WORKFLOW.read_text(encoding="utf-8")
+    assert "libnss3-tools" in text

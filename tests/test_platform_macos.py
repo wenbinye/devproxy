@@ -181,6 +181,68 @@ def test_privilege_raises_when_pre_auth_fails(tmp_path, monkeypatch, allow_platf
         p.privilege()
 
 
+# -- 免密机器上的提权（与 Linux 同一套语义）----------------------------------
+
+
+def test_macos_elevated_falls_back_to_passwordless_sudo(
+    tmp_path, monkeypatch, allow_platform_mutation
+):
+    """`sudo -v` 失败但 `sudo -n true` 成功 → 提权可用，命令自带 -n。
+
+    `sudo -v` 是"无命令"调用，不匹配 sudoers 里的 NOPASSWD 规范 →
+    落到默认的密码策略 → 无 TTY 时必然失败。那台机器根本不需要密码，
+    判成"提权失败"会让所有特权步骤瘫痪。
+    """
+    calls = []
+
+    def fake_run(argv, timeout=None):
+        calls.append(list(argv))
+        if argv == ["sudo", "-v"]:
+            return 1, "sudo: A terminal is required to authenticate"
+        return 0, ""
+
+    monkeypatch.setattr(macos_mod, "_run", fake_run)
+    sess = MacOSElevated()
+    sess.run(["install", "-d", "/etc/resolver"])
+    assert ["sudo", "-n", "true"] in calls
+    assert ["sudo", "-n", "install", "-d", "/etc/resolver"] in calls
+
+
+def test_macos_elevated_keeps_plain_sudo_when_pre_auth_succeeds(
+    tmp_path, monkeypatch, allow_platform_mutation
+):
+    """预热成功 → 维持现状：sudo <cmd>，不带 -n。"""
+    calls = []
+
+    def fake_run(argv, timeout=None):
+        calls.append(list(argv))
+        return 0, ""
+
+    monkeypatch.setattr(macos_mod, "_run", fake_run)
+    MacOSElevated().run(["install", "-d", "/etc/resolver"])
+    assert ["sudo", "install", "-d", "/etc/resolver"] in calls
+    assert not [c for c in calls if c[:2] == ["sudo", "-n", "true"]]
+
+
+def test_macos_elevated_raises_when_both_sudo_probes_fail(
+    tmp_path, monkeypatch, allow_platform_mutation
+):
+    """两条路都走不通 → PermissionError，信息要带上两条命令的输出。"""
+    def fake_run(argv, timeout=None):
+        if argv == ["sudo", "-v"]:
+            return 1, "sudo: a terminal is required to authenticate"
+        if argv == ["sudo", "-n", "true"]:
+            return 1, "sudo: a password is required"
+        return 0, ""
+
+    monkeypatch.setattr(macos_mod, "_run", fake_run)
+    with pytest.raises(PermissionError) as ei:
+        MacOSElevated()
+    message = str(ei.value)
+    assert "sudo -v" in message and "a terminal is required" in message
+    assert "sudo -n true" in message and "a password is required" in message
+
+
 def test_elevated_write_creates_parent_dir_before_cp(monkeypatch, tmp_path):
     """/etc/resolver 可能压根不存在 —— 先建目录再 cp。"""
     calls = []

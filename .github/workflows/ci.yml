@@ -1,7 +1,9 @@
 name: CI
 
-# 单元测试是**封闭的**：不碰真实系统、不需要 caddy 二进制、不需要网络。
-# 因此 CI 只需要装 typer / rich / pytest 就能跑完。
+# 单元测试是**封闭的**：不碰真实系统、不需要 caddy 二进制。
+# certutil（libnss3-tools）是例外但不是必需：NSS 库的用例要在**真的**
+# NSS 库上跑，缺了 certutil 就整组跳过 —— 不装它测试仍然全绿，
+# 只是那组用例在 CI 上不执行。
 on:
   push:
     branches: [main]
@@ -21,6 +23,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+
+      - name: 安装 NSS 工具（certutil）
+        # NSS 库判定的用例（tests/test_nss_real_certutil.py）要在真库上跑：
+        # NSS 按 (issuer, serial) 去重这条规则只有真 certutil 才有。
+        run: sudo apt-get update && sudo apt-get install -y libnss3-tools
 
       - name: 安装依赖
         run: |

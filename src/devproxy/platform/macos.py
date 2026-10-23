@@ -144,17 +144,52 @@ def render_resolver_file(port: int) -> str:
 
 
 class MacOSElevated:
-    """提权会话。构造时执行一次 `sudo -v` 完成预认证。"""
+    """提权会话。构造时执行一次 `sudo -v` 完成预认证。
+
+    `sudo -v` 是"无命令"调用，不匹配 sudoers 里的命令规范 —— 免密
+    （`NOPASSWD: ALL`）只对具体命令生效，管不到它。于是免密机器上
+    `sudo -v` 必然失败，而那台机器根本不需要密码。
+
+    所以 `sudo -v` 失败**不能**直接判定"提权失败"：改用 `sudo -n true`
+    探测免密能力 —— 它成功就说明这台机器不需要密码，后续特权命令一律
+    自带 `-n`（绝不退化成会弹密码框的 `sudo <cmd>`）。
+    与 Linux 平台保持同一套语义。
+    """
+
+    # 免密路径的标记。做成类属性：测试里用 __new__ 造出的会话
+    # 没有实例属性，也必须能正常跑。
+    _noninteractive = False
 
     def __init__(self) -> None:
         # 护栏也必须拦构造函数：直接 new 一个提权会话会真的跑 sudo -v，
         # 后面还可能往系统钥匙串里写东西。
         _assert_may_mutate()
+        self._authenticated = False
+        self._authenticate()
+
+    def _authenticate(self) -> None:
         code, msg = _run(["sudo", "-v"])
-        if code != 0:
-            raise PermissionError(f"提权失败：{msg}")
+        if code == 0:
+            # 时间戳已预热，后续 `sudo <cmd>` 直接复用。
+            self._authenticated = True
+            return
+        # 免密探测：`-n` 保证绝不等待输入（非交互环境会直接失败而不是挂住）。
+        code_nopasswd, msg_nopasswd = _run(["sudo", "-n", "true"])
+        if code_nopasswd == 0:
+            # 免密可用。`sudo -v` 的预热在这台机器上不可用，
+            # 后续命令必须自带 `-n` 才不会弹密码框。
+            self._authenticated = True
+            self._noninteractive = True
+            return
+        # 两条路都走不通 —— 错误信息要同时带上两条命令的输出，
+        # 用户才能分辨"这台机器没免密"和"sudo 本身坏了"。
+        raise PermissionError(
+            f"提权失败：sudo -v: {msg}；sudo -n true: {msg_nopasswd}"
+        )
 
     def run(self, argv: list[str]) -> tuple[int, str]:
+        if self._noninteractive:
+            return _run(["sudo", "-n", *argv])
         return _run(["sudo", *argv])
 
     def write(self, path: Path, content: str) -> None:
