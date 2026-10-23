@@ -598,6 +598,34 @@ tail -f ~/.local/state/devproxy/logs/routes/web.log
 `sync` 建的路由和手工 `up` 的路由没有区别，`devproxy ls` 一样能列出来，
 `devproxy down <name>` 一样能注销。
 
+### 真实案例：codeup-manager
+
+`codeup-manager`（`git@codeup.aliyun.com:msy/tools/codeup-manager.git`，资产清单管理工具，
+FastAPI + Vite 前后端分离）原本靠一个已被删除的旧脚本 `devp` 起动态域名。
+现在它的 `devproxy.toml` 长这样：
+
+```toml
+[[routes]]
+name = "codeup-api"
+command = ["sh", "-c", "uv run uvicorn codeup_manager.web.app:create_app --factory --reload --host 127.0.0.1 --port $PORT"]
+
+[[routes]]
+name = "codeup-web"
+command = ["sh", "-c", "cd frontend && API_TARGET=https://codeup-api.test NODE_EXTRA_CA_CERTS=$HOME/.local/share/caddy/pki/authorities/local/root.crt __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=codeup-web.test ./node_modules/.bin/vite --host 127.0.0.1 --port $PORT"]
+```
+
+一次 `devproxy sync` 得到 `https://codeup-web.test` 与 `https://codeup-api.test/docs`，
+**两个端口都是自动分配的**。这里有三个值得抄的点：
+
+1. **前端要代理到后端时，代理到后端的「域名」而不是端口**（`API_TARGET`）——
+   这样后端也能用动态端口，不必牺牲动态分配换静态端口；
+2. **node 不读系统信任库**，得用 `NODE_EXTRA_CA_CERTS` 把 devproxy 的根证书喂给它
+   （浏览器、curl 走系统信任库，不需要这一步）；
+3. **Vite 6 有 Host 校验**，要用自定义域名访问得传
+   `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS`。
+
+该仓库的完整说明见它的 `docs/devproxy-quickstart.md`。
+
 ---
 
 ## 目录与文件
