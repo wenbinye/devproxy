@@ -157,12 +157,12 @@ Caddy 的内部 CA **在第一次加载 `tls internal` 站点时**才生成 —�
 | 码 | 含义 |
 |---|---|
 | 0 | 成功 |
-| 1 | 运行失败（子进程退出、reload 失败、路由表损坏、参数缺失……） |
-| 2 | 参数错误（未知日志服务名、非法 `dns_backend`、非法 `--domain-suffix`） |
+| 1 | 运行失败（子进程退出、reload 失败、路由表损坏、迁移被拒绝……） |
+| 2 | 参数错误（非法路由名 / 非法端口、缺少 `--`、未知日志服务名、非法 `dns_backend`、非法 `--domain-suffix`） |
 | 3 | 前置条件不满足（Caddy 未运行、主 Caddyfile 不存在、`doctor` 体检不通过） |
 | 4 | 需要提权但当前非交互（未加 `--yes`），**或用户在确认提示上选择了「否」** |
 
-注意两个特例：`up` 缺少 `--` 或 `--` 后没有命令，按「运行失败」退出 **1**；
+注意两个特例：`up` 缺少 `--` 或 `--` 后没有命令，按「参数错误」退出 **2**；
 `up` 的退出码在命令正常结束时**就是子进程的退出码**。
 
 退出码 4 表示「**需要人来拍板，但这次没有人拍**」——要么环境非交互且没加 `--yes`，
@@ -201,7 +201,7 @@ devproxy up codeup-api -- sh -c 'gunicorn app:app --bind 127.0.0.1:$PORT'
 
 **`--` 是必须的**：`--` 之前是 devproxy 自己的参数（`name`、`--port`、`--ready-timeout`），
 `--` 之后的一切**原样**交给子进程，devproxy 不解析。这样应用自己的 `--port`
-不会被 devproxy 抢走。缺少 `--` 时工具直接报错退出（码 1）。
+不会被 devproxy 抢走。缺少 `--` 时工具直接报错退出（码 2）。
 
 ### 应用侧的其它注意点
 
@@ -340,7 +340,7 @@ caddy_bin = "~/.local/bin/caddy"
 | 键 | 默认 | 说明 |
 |---|---|---|
 | `domain_suffix` | `test` | 单个 DNS 标签（小写字母/数字开头结尾，中间可含连字符，不含点，≤ 63 字符）。非法值在加载配置时就报错 |
-| `dns_backend` | `auto` | `auto` = resolved 真的在跑就用 resolved，否则用 system；也可显式指定 |
+| `dns_backend` | `auto` | `auto` = resolved 真的在跑就用 resolved，否则用 system。Linux 上可显式指定 `resolved` / `system`；**macOS 没有 systemd-resolved，显式写 `resolved` 会被当成参数错误拒绝（退出码 2）**，`auto` 在 macOS 上静默走每域解析器 |
 | `admin_addr` | `127.0.0.1:2019` | `host:port` 形式。既是 Caddy 的 admin 监听地址，也是 reload 时的目标地址 |
 | `http_port` / `https_port` | `80` / `443` | Caddy 的**全局选项**，写进主 Caddyfile 的全局块，改了就真的换监听端口 |
 | `storage` | `~/.local/share/caddy` | Caddy 的存储目录，CA 与已签发证书都在这里。改了它 = Caddy 重新生成 CA = 浏览器信任全部失效 |
@@ -417,6 +417,15 @@ reload 失败会把落盘内容回滚。
 4. 用 `caddy validate` 校验新配置（校验不过就不换单元）；
 5. 改写服务单元、重启 caddy。
 
+**有两种遗留环境会被工具直接拒绝迁移**，而不是无备份地硬来 —— 两种情况都以退出码 1 中止，
+**一个文件都不改**：
+
+- **`ExecStart=` 里解析不出 `--config`** —— 无法确认它用的是哪个 Caddyfile，猜错就会改错文件；
+- **单元使用 `EnvironmentFile=`** —— 变量不在单元里，迁移无法把它们安全带到新单元。
+
+修好单元后重跑 `setup` 即可：`--config` 写成 `--config <路径>` 或 `--config=<路径>` 都认；
+`EnvironmentFile` 里的变量需要内联到 `Environment=`，或直接移除 `EnvironmentFile=`。
+
 回滚：
 
 ```bash
@@ -450,9 +459,10 @@ devproxy setup --rollback ~/.local/state/devproxy/backups/2026-10-22T12-00-00Z
 上游 release 的 `checksums.txt` 与实际托管的资产对不上（实测 tar.gz 与 deb 均不符），
 所以工具**不信任**那个文件。
 
-`devproxy selftest` 起一个**隔离的 Caddy 实例**（admin `20191` / https `14443` /
-http `14480`，独立 storage 与独立配置目录），完整跑一遍注册 → 转发 → 跳转 → 注销 →
-证书策略，**不碰生产的 443/2019**，也不会把沙箱 CA 装进宿主的信任库。
+`devproxy selftest` 起一个**隔离的 Caddy 实例**：admin / HTTPS / HTTP 三个端口都在运行时
+**动态取空闲端口**（固定端口会和并发自检、或你机器上已有的服务抢同一个实例），
+配独立 storage 与独立配置目录。完整跑一遍注册 → 转发 → 跳转 → 注销 → 证书策略，
+**不碰生产的 443/2019**，也不会把沙箱 CA 装进宿主的信任库。
 
 ---
 
@@ -487,15 +497,19 @@ http `14480`，独立 storage 与独立配置目录），完整跑一遍注册 �
 
 ## 开发与 CI
 
-单元测试是**封闭的**：不碰真实系统、不需要 caddy 二进制、不需要网络，
+单元测试基本上是**封闭的**：不碰真实系统、不需要 caddy 二进制、不需要网络，
 也不会写进你的家目录（`HOME` 在测试里被指向临时目录）。
+
+唯一的例外是 NSS 那组用例：它需要用**真实的 `certutil`**（`libnss3-tools`）在临时目录里
+建一个真的 NSS 库，验证「按证书内容判定信任」这类只有真工具才验得了的行为。
+机器上没有 `certutil` 时整组自动跳过，不影响其余用例；CI 因此专门装了 `libnss3-tools`。
 
 ```bash
 python3 -m pytest -q --ignore=tests/test_integration.py   # 单元套件
 python3 -m pytest -q tests/test_integration.py             # 真机集成（需要真实 caddy）
 ```
 
-CI 在 `.github/workflows/ci.yml`：push 到 `main`、提 PR 或手动触发时，
+CI 在 `.github/workflows/ci.yml`：push 到 `master`、提 PR 或手动触发时，
 在 Python 3.11 / 3.12 / 3.13 上跑**单元套件**（真机集成测试不进 CI ——
 它依赖真实 caddy 二进制与真实网络）。
 
