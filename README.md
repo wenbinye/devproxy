@@ -179,7 +179,7 @@ Caddy 的内部 CA **在第一次加载 `tls internal` 站点时**才生成 —�
 | `--dns-backend auto\|resolved\|system` | `setup` / `doctor` | 强制 DNS 后端（默认取 `config.toml` 的 `dns_backend`） |
 | `--domain-suffix <后缀>` | `setup` | 临时覆盖域名后缀（会过校验，非法值退出码 2） |
 | `--no-trust` | `setup` | 跳过证书信任 |
-| `--yes` | `setup` / `trust` | 非交互模式，不询问（需要提权的场景必须加） |
+| `--yes` | `setup` / `trust` / `sync` / `uninstall` | 非交互模式，不询问（需要提权、或要跳过确认的场景必须加） |
 | `--rollback <目录>` | `setup` | 从指定备份目录回滚 |
 | `--dry-run` | `uninstall` | 只打印将要执行的步骤，不做任何变更、不需要 sudo |
 | `--purge` | `uninstall` | 直接删除 Caddy 存储、备份目录与下载的 caddy 二进制（不给就在交互时问） |
@@ -187,6 +187,7 @@ Caddy 的内部 CA **在第一次加载 `tls internal` 站点时**才生成 —�
 | `--port N` | `up` | 显式指定端口（默认自动分配）；被占用时直接失败 |
 | `--port N` | `expose` | **必填**：上游已在监听的端口 |
 | `--ready-timeout S` | `up` | 就绪等待秒数（默认取 `config.toml` 的 `ready_timeout`） |
+| `--list` | `logs` | 列出能跟的日志目标，不跟随（项目里只列本项目的） |
 | `--file <路径>` | `sync` | 显式指定 `devproxy.toml`（默认从当前目录逐级向上查找） |
 | `--prune` | `sync` | 移除本文件里已删掉的路由（只动本文件声明过的；非交互时须加 `--yes`） |
 | `--config <路径>` | `run` | 要加载的 Caddyfile（默认主 Caddyfile） |
@@ -218,6 +219,33 @@ Caddy 的内部 CA **在第一次加载 `tls internal` 站点时**才生成 —�
 ---
 
 ## 应用接入
+
+### 服务已经在跑？给它开域名就行
+
+不是所有服务都由 devproxy 启动 —— 数据库管理台、mock 服务、docker 里的东西，
+往往早就在跑了。这类用 `expose`：
+
+```bash
+devproxy expose datahub --port 9002
+# ✅ https://datahub.test  (上游 127.0.0.1:9002)
+#    移除: devproxy down datahub
+```
+
+要点：
+
+- **上游写 `127.0.0.1`**：devproxy 代理到**本机**端口。容器里的 `localhost`
+  是容器自己 —— 那种情况要用宿主 IP 或 `host.docker.internal`；
+- **上游没起也能注册**：会提示「上游无响应」，但路由照样写进 `routes.json`
+  （路由常驻，等服务起来就通）；
+- **路由是常驻的**：Caddy 重启、机器重启都还在（"文件即真相"）；
+- 想让它进版本库共享，写进 `devproxy.toml`（见「项目级配置」一节）：
+
+  ```toml
+  [[routes]]
+  name = "datahub"
+  mode = "expose"     # 不起进程，只给已在跑的服务开域名
+  port = 9002
+  ```
 
 ### 两种应用，两种写法
 
@@ -1054,4 +1082,4 @@ cli → lifecycle / gateway / components → platform / core
 根目录的 `devp` 脚本**已删除** —— 它是 `devproxy` 的 1.0 前身：直接 PATCH 现役
 Caddy 的 Admin API 注册路由，注册的东西新工具既看不见也删不掉。它的来龙去脉
 记在 [docs/legacy-devp.md](docs/legacy-devp.md)。`Justfile` 现在只是转发到
-`devproxy` 的兼容壳。
+`uv run devproxy` 的兼容壳（跑的是**当前源码**，不是已安装的那份）。
