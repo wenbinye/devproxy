@@ -56,7 +56,8 @@ def test_suggest_command_from_package_json(tmp_path):
         json.dumps({"scripts": {"dev": "vite"}}), encoding="utf-8"
     )
     argv, reason = suggest_command(tmp_path)
-    assert argv == ["npm", "run", "dev"]
+    # 端口必须可控：应用不监听 $PORT，devproxy 的就绪判定永远过不了
+    assert argv == ["sh", "-c", "npm run dev -- --port $PORT"]
     assert "dev 脚本" in reason
 
 
@@ -65,7 +66,7 @@ def test_suggest_command_falls_back_to_start(tmp_path):
         json.dumps({"scripts": {"start": "node ."}}), encoding="utf-8"
     )
     argv, _ = suggest_command(tmp_path)
-    assert argv == ["npm", "run", "start"]
+    assert argv == ["sh", "-c", "npm run start -- --port $PORT"]
 
 
 def test_suggest_command_without_evidence_returns_none(tmp_path):
@@ -130,7 +131,7 @@ def test_init_guesses_command_from_project_type(project):
     result = _invoke(["init", "--name", "web"])
     assert result.exit_code == 0, result.output
     project_file = load_project_file(project / "devproxy.toml")
-    assert project_file.routes[0].command == ["npm", "run", "dev"]
+    assert project_file.routes[0].command == ["sh", "-c", "npm run dev -- --port $PORT"]
 
 
 def test_init_refuses_to_overwrite_without_force(project):
@@ -226,3 +227,84 @@ def test_init_generated_file_parses_back(project):
     assert result.exit_code == 0, result.output
     project_file = load_project_file(project / "devproxy.toml")
     assert project_file.routes[0].name == "web"
+
+
+# -- PHP 项目 ------------------------------------------------------------
+
+
+def test_suggest_command_laravel(tmp_path):
+    """有 artisan → Laravel 的官方起法，端口可控。"""
+    (tmp_path / "composer.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "artisan").write_text("#!/usr/bin/env php\n", encoding="utf-8")
+    argv, reason = suggest_command(tmp_path)
+    assert argv == ["sh", "-c", "php artisan serve --port=$PORT"]
+    assert "artisan" in reason
+
+
+def test_suggest_command_php_public_docroot(tmp_path):
+    """有 public/index.php → 内置服务器起在 public 下（Symfony 等）。"""
+    (tmp_path / "composer.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "public").mkdir()
+    (tmp_path / "public" / "index.php").write_text("<?php\n", encoding="utf-8")
+    argv, _ = suggest_command(tmp_path)
+    assert argv == ["sh", "-c", "php -S 127.0.0.1:$PORT -t public"]
+
+
+def test_suggest_command_php_root_index(tmp_path):
+    """根目录有 index.php → 内置服务器起在项目根。"""
+    (tmp_path / "composer.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "index.php").write_text("<?php\n", encoding="utf-8")
+    argv, _ = suggest_command(tmp_path)
+    assert argv == ["sh", "-c", "php -S 127.0.0.1:$PORT"]
+
+
+def test_suggest_command_php_composer_script(tmp_path):
+    """composer.json 里有 serve 脚本 → 给它，但明说端口不可控。"""
+    (tmp_path / "composer.json").write_text(
+        json.dumps({"scripts": {"serve": "php src/index.php start"}}), encoding="utf-8"
+    )
+    argv, reason = suggest_command(tmp_path)
+    assert argv == ["sh", "-c", "composer serve"]
+    assert "端口不可控" in reason
+
+
+def test_suggest_command_php_names_env_port_vars(tmp_path):
+    """.env 里的端口变量要点名 —— 用户得知道该改哪个。"""
+    (tmp_path / "composer.json").write_text(
+        json.dumps({"scripts": {"serve": "x"}}), encoding="utf-8"
+    )
+    (tmp_path / ".env").write_text(
+        "APP_WEB_PORT=18130\nAPP_JSONRPC_PORT=10130\nDB_PORT=3306\n", encoding="utf-8"
+    )
+    _, reason = suggest_command(tmp_path)
+    assert "APP_WEB_PORT" in reason
+    assert "DB_PORT" not in reason, "数据库端口跟 devproxy 无关，别添乱"
+
+
+def test_suggest_command_php_unknown_does_not_guess(tmp_path):
+    """认不出来的 PHP 项目不猜 —— 只给提示。"""
+    (tmp_path / "composer.json").write_text("{}", encoding="utf-8")
+    argv, reason = suggest_command(tmp_path)
+    assert argv is None
+    assert "composer.json" in reason
+
+
+def test_suggest_command_makefile_requires_real_target(tmp_path):
+    """Makefile 里真要有 dev 目标才猜（原来只看文件存在 → 猜错）。"""
+    (tmp_path / "Makefile").write_text("build:\n\techo hi\n", encoding="utf-8")
+    argv, reason = suggest_command(tmp_path)
+    assert argv is None
+    assert "Makefile" in reason
+
+    (tmp_path / "Makefile").write_text("dev:\n\techo hi\n", encoding="utf-8")
+    argv, _ = suggest_command(tmp_path)
+    assert argv == ["make", "dev"]
+
+
+def test_suggest_command_php_wins_over_makefile(tmp_path):
+    """既有 composer.json 又有 Makefile —— 按 PHP 处理。"""
+    (tmp_path / "composer.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "Makefile").write_text("dev:\n\techo hi\n", encoding="utf-8")
+    argv, reason = suggest_command(tmp_path)
+    assert argv is None
+    assert "PHP" in reason

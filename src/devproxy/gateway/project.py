@@ -280,21 +280,134 @@ def suggest_command(root: Path) -> tuple[list[str] | None, str]:
     """按项目类型猜一条启动命令。返回 (命令, 判断依据)。
 
     猜错比不猜更糟 —— 但完全不猜等于让用户从零写 TOML。所以只在
-    **有明确证据**时给建议（package.json 里有 dev 脚本、pyproject.toml
-    存在且能推出入口点），否则返回 None 让用户自己写。
+    **有明确证据**时给建议（package.json 里有 dev 脚本、composer.json
+    里有 serve 脚本、artisan 存在……），否则返回 None 让用户自己写。
+
+    **硬性要求**：猜出来的命令必须让应用监听 devproxy 分配的 `$PORT`。
+    devproxy 的就绪判定就是「应用在 $PORT 上可连接」—— 命令若把应用
+    起在固定端口上，sync 永远等不到就绪，报「就绪超时」，而原因很难猜。
+    所以端口可控的猜法（`--port` / `-S ...:$PORT`）才敢给；
+    端口不可控的（`composer serve` 之类）只给命令 + 明确提醒。
     """
     package_json = root / "package.json"
     if package_json.is_file():
         scripts = _read_json_field(package_json, "scripts")
-        if isinstance(scripts, dict) and "dev" in scripts:
-            return ["npm", "run", "dev"], "package.json 里有 dev 脚本"
-        if isinstance(scripts, dict) and "start" in scripts:
-            return ["npm", "run", "start"], "package.json 里有 start 脚本"
+        if isinstance(scripts, dict):
+            for name in ("dev", "start"):
+                if name in scripts:
+                    # --port 透传给脚本里的 dev server（vite/next 都认）
+                    return (
+                        ["sh", "-c", f"npm run {name} -- --port $PORT"],
+                        f"package.json 里有 {name} 脚本",
+                    )
+
+    composer_json = root / "composer.json"
+    if composer_json.is_file():
+        ports = _port_env_names(root)
+        php = _suggest_php_command(root, composer_json, ports)
+        if php is not None:
+            return php
+        return None, (
+            "检测到 composer.json（PHP 项目）—— 请填上实际启动命令"
+            f"，应用必须监听 $PORT{_ports_hint(ports)}"
+        )
+
     if (root / "pyproject.toml").is_file():
-        return None, "检测到 pyproject.toml —— 请填上实际启动命令"
+        return None, "检测到 pyproject.toml —— 请填上实际启动命令（应用必须监听 $PORT）"
     if (root / "Makefile").is_file():
-        return ["make", "dev"], "检测到 Makefile（若有 dev 目标）"
-    return None, "没有检测到常见的项目类型 —— 请填上实际启动命令"
+        if _makefile_has_target(root / "Makefile", "dev"):
+            return ["make", "dev"], "Makefile 里有 dev 目标"
+        return None, "检测到 Makefile 但没有 dev 目标 —— 请填上实际启动命令"
+    return None, (
+        "没有检测到常见的项目类型 —— 请填上实际启动命令（应用必须监听 $PORT）"
+    )
+
+
+def _ports_hint(ports: list[str]) -> str:
+    """.env 里定义的端口变量 —— 提示里要点名，用户才知道改哪个。"""
+    if not ports:
+        return ""
+    return f"（.env 里定义了端口：{'、'.join(ports)} —— 改成 $PORT 或改用 expose 模式）"
+
+
+def _suggest_php_command(
+    root: Path, composer_json: Path, ports: list[str]
+) -> tuple[list[str] | None, str] | None:
+    """PHP 项目的启动命令。按证据强度从高到低：
+
+    1. `artisan` → Laravel 的官方起法；
+    2. `public/index.php` → 绝大多数框架的 front controller；
+    3. 根目录 `index.php` → 同样是 front controller；
+    4. composer.json 里的 serve/start/dev 脚本 → 端口不可控，只给命令 + 提醒。
+
+    认不出来时返回 None（由调用方给提示）。
+    """
+    if (root / "artisan").is_file():
+        return ["sh", "-c", "php artisan serve --port=$PORT"], "有 artisan（Laravel）"
+    if (root / "public" / "index.php").is_file():
+        return (
+            ["sh", "-c", "php -S 127.0.0.1:$PORT -t public"],
+            "有 public/index.php",
+        )
+    if (root / "index.php").is_file():
+        return ["sh", "-c", "php -S 127.0.0.1:$PORT"], "根目录有 index.php"
+    scripts = _read_json_field(composer_json, "scripts")
+    if isinstance(scripts, dict):
+        for name in ("serve", "start", "dev"):
+            if name in scripts:
+                return (
+                    ["sh", "-c", f"composer {name}"],
+                    f"composer.json 里有 {name} 脚本；端口不可控"
+                    f"—— 应用必须监听 $PORT 才会被接管{_ports_hint(ports)}",
+                )
+    return None
+
+
+# 这些端口跟 devproxy 无关（应用不会因为它们被接管）
+_NON_WEB_PORT_WORDS = (
+    "DB", "DATABASE", "MYSQL", "POSTGRES", "REDIS", "MEMCACHE",
+    "LDAP", "MONGO", "KAFKA", "RABBIT", "DEFAULT", "ADMIN", "DEBUG",
+)
+
+
+def _port_env_names(root: Path) -> list[str]:
+    """.env 里定义了端口的变量名（给提示用）。"""
+    env_file = root / ".env"
+    if not env_file.is_file():
+        return []
+    names: list[str] = []
+    try:
+        for raw in env_file.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key = line.split("=", 1)[0].strip()
+            if key != "PORT" and not key.endswith("_PORT"):
+                continue
+            # 只留"可能是 Web 监听端口"的：数据库/缓存/LDAP 那些跟 devproxy 无关
+            upper = key.upper()
+            if any(word in upper for word in _NON_WEB_PORT_WORDS):
+                continue
+            names.append(key)
+    except OSError:
+        return []
+    return names
+
+
+def _makefile_has_target(path: Path, target: str) -> bool:
+    """Makefile 里真的有这个目标吗（只看 `名字:` 开头的行）。"""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        if not line or line.startswith(("\t", " ", "	")) or line.startswith("#"):
+            continue
+        name = line.split(":", 1)[0].strip()
+        if name == target:
+            return True
+    return False
 
 
 def _read_json_field(path: Path, field_name: str) -> object:

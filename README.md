@@ -562,9 +562,7 @@ devproxy init --from my-running-svc # 从已在跑的路由导入它的启动命
    - `--command` 显式给的（按 shell 的词法拆，引号和空格都认）；
    - `--from <路由名>` —— 从**已注册的同名路由**导入它的启动命令
      （路由表是全局的，所以必须指名，不能"把当前所有路由都导进来"）；
-   - 都没有的话，**看项目类型猜**：`package.json` 里有 `dev` 脚本就猜
-     `npm run dev`，有 `start` 就猜 `npm run start`，有 `Makefile` 就猜 `make dev`。
-     **没有明确证据就不猜**（`pyproject.toml` 存在但看不出入口点时只给提示），
+   - 都没有的话，**看项目类型猜**（下表）。**没有明确证据就不猜**，
      猜错比不猜更糟；
 4. 写好的文件**能被自己解析**（生成后会用同一套解析器读回来验证）。
 
@@ -582,6 +580,25 @@ $ devproxy init
 ```
 
 文件已存在时会拒绝（退出码 2），要覆盖加 `--force`。
+
+#### 能认出的项目类型
+
+| 依据 | 猜出来的命令 |
+|---|---|
+| `package.json` 有 `dev` / `start` 脚本 | `sh -c "npm run dev -- --port $PORT"` |
+| `composer.json` + `artisan`（Laravel） | `sh -c "php artisan serve --port=$PORT"` |
+| `composer.json` + `public/index.php`（Symfony 等） | `sh -c "php -S 127.0.0.1:$PORT -t public"` |
+| `composer.json` + 根目录 `index.php` | `sh -c "php -S 127.0.0.1:$PORT"` |
+| `composer.json` 有 `serve` / `start` / `dev` 脚本 | `sh -c "composer serve"` ⚠ **端口不可控** |
+| `Makefile` 里真有 `dev` 目标 | `make dev` |
+| `pyproject.toml`（Python） | 不猜 —— 入口点看不出来 |
+
+> **猜出来的命令必须让应用监听 `$PORT`** —— devproxy 的就绪判定就是
+> 「应用在 `$PORT` 上可连接」。命令若把应用起在固定端口上，`sync` 会一直等到
+> 「就绪超时」，而原因很难猜。所以端口可控的才敢给；端口不可控的（`composer serve`
+> 之类）只给命令 + 明确提醒，并会把 `.env` 里定义的端口变量点名
+> （`APP_WEB_PORT` 之类），让你知道该改哪个 —— 或者改用 `mode = "expose"`
+> 让应用自己起、devproxy 只开域名。
 
 ### 手写
 
