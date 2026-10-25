@@ -164,3 +164,48 @@ def test_logs_service_unknown_still_exits_2(monkeypatch):
 def test_max_log_bytes_is_sane():
     """上限必须是「有意义的大小」—— 太小会截断正常日志，太大没意义。"""
     assert 1 * 1024 * 1024 <= MAX_LOG_BYTES <= 100 * 1024 * 1024
+
+
+def test_logs_list_shows_services_and_routes(log_dir):
+    """--list：列出所有能跟的目标，不跟随。"""
+    result = _invoke(["logs", "--list"])
+    assert result.exit_code == 0, result.output
+    assert "caddy" in result.output
+    assert "dnsmasq" in result.output
+    assert "myapp" in result.output
+    assert "路由日志" in result.output
+
+
+def test_logs_list_does_not_follow(log_dir, monkeypatch):
+    """--list 不能去跟随日志。"""
+    called: list[str] = []
+
+    class _FakePlatform:
+        def tail_service_log(self, name: str) -> None:
+            called.append(name)
+
+    monkeypatch.setattr("devproxy.cli._shared._platform", lambda: _FakePlatform())
+    result = _invoke(["logs", "--list"])
+    assert result.exit_code == 0, result.output
+    assert not called
+
+
+def test_logs_list_shows_size(log_dir):
+    """每个路由日志带大小 —— 挑哪个看时有用。"""
+    result = _invoke(["logs", "--list"])
+    assert "B" in result.output or "KB" in result.output
+
+
+def test_logs_list_without_any_route_log(tmp_path, monkeypatch):
+    """一个路由日志都没有时也给得出结论，不报错。"""
+    from devproxy.core.paths import Paths
+
+    paths = Paths(tmp_path / "cfg", tmp_path / "state", tmp_path / "data")
+    paths.ensure_files()
+    monkeypatch.setattr(
+        "devproxy.cli._shared.build_context",
+        lambda *a, **k: (paths, None, None, None),
+    )
+    result = _invoke(["logs", "--list"])
+    assert result.exit_code == 0, result.output
+    assert "没有" in result.output

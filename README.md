@@ -646,7 +646,21 @@ tail -f ~/.local/state/devproxy/logs/routes/web.log   # 等价写法
 | `caddy` / `dnsmasq` | **服务本身**的日志（Linux 走 journalctl，macOS 是文件） |
 | `<路由名>` | **sync 起的应用**的日志 |
 
-参数不认识时退 2，并把当前可用的路由日志名列出来。
+参数不认识时退 2，并把当前可用的路由日志名列出来。想知道有哪些可看：
+
+```bash
+devproxy logs --list
+```
+
+```
+服务日志：
+  caddy
+  dnsmasq
+路由日志（/home/me/.local/state/devproxy/logs/routes/）：
+  codeup-api              18 KB
+  codeup-web               5 KB
+  xxl-job-admin            8 MB
+```
 
 **日志会轮转**：单个文件超过 **10 MB** 就改名成 `.log.1`（覆盖上一份），当前文件从头写。
 所以每条路由的日志最多占 20 MB，不会无限涨 —— Spring Boot 这类应用在开发时
