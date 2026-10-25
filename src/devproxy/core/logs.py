@@ -167,29 +167,43 @@ def follow_many(
     def watch(tag: str, path: Path) -> None:
         handle = None
         inode = None
+        carry = b""  # 还没等到换行的残行
         # 等文件出现（应用还没写过日志时它不存在）
         while handle is None:
             try:
                 handle = path.open("rb")
             except OSError:
                 time.sleep(poll)
+        # **已有文件从末尾跟** —— 不倒历史。xxl-job-admin 这类日志能到 9MB，
+        # 从头读会让用户以为"日志一直在刷"，其实是把历史全倒了一遍。
+        handle.seek(0, os.SEEK_END)
         inode = os.fstat(handle.fileno()).st_ino
         try:
             while True:
-                chunk = handle.readline()
-                if chunk:
-                    queue_.put((tag, chunk.decode("utf-8", "replace")))
+                data = handle.read(65536)
+                if data:
+                    carry += data
+                    # 只产出**完整的行**：残行留着等下一个换行，
+                    # 否则同一条日志会被拆成几段、每段各带一个前缀
+                    *complete, carry = carry.split(b"\n")
+                    for line in complete:
+                        queue_.put((tag, line.decode("utf-8", "replace") + "\n"))
                     continue
                 time.sleep(poll)
                 try:
-                    current = os.stat(path).st_ino
+                    stat = os.stat(path)
                 except OSError:
-                    current = None
-                if current is not None and current != inode:
-                    # 被轮转了：重开新文件，从头读
+                    continue
+                if stat.st_ino != inode:
+                    # 被轮转了：重开新文件，从头读（新文件是新会话的输出）
                     handle.close()
                     handle = path.open("rb")
                     inode = os.fstat(handle.fileno()).st_ino
+                    carry = b""
+                elif stat.st_size < handle.tell():
+                    # 被截断了（`: > 文件`）：回到开头
+                    handle.seek(0)
+                    carry = b""
         finally:
             if handle is not None:
                 handle.close()
