@@ -40,6 +40,7 @@ from devproxy.cli import (  # noqa: E402,F401
     sync,
     run,
     init,
+    stop,
 )
 
 

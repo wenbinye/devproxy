@@ -170,6 +170,7 @@ Caddy 的内部 CA **在第一次加载 `tls internal` 站点时**才生成 —�
 | `devproxy sync` | 按项目根目录的 `devproxy.toml` 同步路由声明（全组共享一份） |
 | `devproxy run` | **前台**托管 Caddy（不装服务、不留状态，Ctrl-C 退出）。没有 systemd 的环境（容器 / WSL）用它替代服务 |
 | `devproxy init` | 在项目里生成 `devproxy.toml`（路由名取目录名，启动命令按项目类型猜或用 `--command` / `--from` 指定） |
+| `devproxy stop` | 停掉本项目（`devproxy.toml`）声明的**所有**应用。重新启动：`devproxy sync` |
 
 常用选项：
 
@@ -603,6 +604,7 @@ command = ["sh", "-c", "npx vite --port $PORT --host 127.0.0.1"]
 devproxy sync                # 从当前目录逐级向上找 devproxy.toml 并同步
 devproxy sync --file <路径>  # 显式指定
 devproxy sync --prune        # 顺带移除本文件里已删掉的路由
+devproxy stop                # 停掉本项目的所有应用（重新启动：devproxy sync）
 ```
 
 **文件发现**：从当前工作目录逐级向上找 `devproxy.toml`，找到第一个就用
@@ -694,6 +696,18 @@ devproxy logs codeup-api --list
 
 轮转在**写入端**做（devproxy 自己收应用的输出、自己写文件），不是靠 logrotate ——
 这些日志是 devproxy 拉起的进程写的，只有写它的人能保证文件不会无限大。
+
+### 停掉本项目全部应用
+
+```bash
+devproxy stop
+```
+
+一条命令停掉 `devproxy.toml` 声明的**所有**应用（进程 + 路由一起清）。
+只动本文件声明的路由 —— 手工 `up` 的、别的项目的不受影响。
+全部停了之后 `devproxy sync` 一条命令再拉起来。
+
+单条路由的操作仍是 `devproxy down <名字>`。
 
 ### 与 `up` / `expose` 的关系
 

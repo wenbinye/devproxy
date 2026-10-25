@@ -71,6 +71,7 @@ from devproxy.components.dnsmasq import DnsmasqComponent  # noqa: F401
 from devproxy.gateway.caddy import CaddyConfig  # noqa: F401
 from devproxy.gateway.runner import UpRunner  # noqa: F401
 from devproxy.gateway.runner import kill_pid_group  # noqa: F401
+from devproxy.gateway.project import find_project_file  # noqa: F401
 from devproxy.gateway.sync import build_sync_plan  # noqa: F401
 from devproxy.gateway.sync import execute_sync_plan  # noqa: F401
 from devproxy.lifecycle.migrate import default_dns_route  # noqa: F401
