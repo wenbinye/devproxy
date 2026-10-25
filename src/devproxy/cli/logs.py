@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from rich.markup import escape
+from rich.text import Text
+import string
 import typer
 
 from devproxy.cli import app
@@ -10,6 +12,7 @@ from devproxy.cli._shared import EXIT_FAIL
 from devproxy.cli._shared import EXIT_SUDO
 from devproxy.cli._shared import EXIT_USAGE
 from devproxy.core.logs import follow_log
+from devproxy.core.logs import follow_many
 from devproxy.gateway.project import ProjectFileError
 from devproxy.gateway.project import find_project_file
 from devproxy.gateway.project import load_project_file
@@ -68,6 +71,62 @@ def _log_line(path: Path) -> str:
     except OSError:
         return f"{path.stem:<20} （还没有日志）"
     return f"{path.stem:<20} {size:>8}"
+
+
+_PALETTE = ("cyan", "magenta", "yellow", "green", "blue", "bright_red",
+            "bright_cyan", "bright_magenta", "bright_yellow", "bright_green")
+
+
+def _tag_letters(count: int) -> list[str]:
+    """给每个应用一个短标签：a b c … z aa bb（声明顺序即标签顺序）。"""
+    letters = string.ascii_lowercase
+    return [letters[i % 26] * (i // 26 + 1) for i in range(count)]
+
+
+def _follow_project(project_path: Path, names: list[str]) -> None:
+    """跟随本项目所有应用的日志。一个就是 tail -f；多个带彩色标签。"""
+    paths, _, _, _ = s.build_context()
+    targets: list[tuple[str, Path]] = []
+    missing: list[str] = []
+    for tag, name in zip(_tag_letters(len(names)), names):
+        path = route_log_path(paths, name)
+        if path.exists():
+            targets.append((tag, path))
+        else:
+            missing.append(name)
+
+    if not targets:
+        s.err_console.print(
+            f"devproxy: 本项目声明了 {'、'.join(names)}，但还没有日志 —— 跑一次 devproxy sync"
+        )
+        raise typer.Exit(EXIT_USAGE)
+    if missing:
+        s.err_console.print(
+            f"   已声明但还没有日志（跳过）：{'、'.join(missing)}"
+        )
+
+    try:
+        if len(targets) == 1:
+            follow_log(targets[0][1])
+        else:
+            colors = {
+                tag: _PALETTE[i % len(_PALETTE)] for i, (tag, _) in enumerate(targets)
+            }
+            s.console.print("跟随中（Ctrl-C 退出）：")
+            for tag, path in targets:
+                # [a]/[b] 必须转义：rich 会把 [b] 当成"粗体"标记吃掉
+                s.console.print(
+                    f"  {escape(f'[{tag}]')} {escape(str(path))}",
+                    style=colors[tag],
+                )
+            for tag, line in follow_many(targets):
+                text = Text()
+                text.append(f"[{tag}] ", style=colors[tag])
+                text.append(line.rstrip("\n"))
+                s.console.print(text)
+    except KeyboardInterrupt:
+        # Ctrl-C：正常退出方式，不是错误
+        raise typer.Exit(0)
 
 
 def _print_one(service: str) -> None:
@@ -160,7 +219,18 @@ def logs(
         raise typer.Exit(0)
 
     if service is None:
-        service = "caddy"  # 裸 `devproxy logs` 的老行为
+        # 裸 `devproxy logs`：项目里跟本项目的**所有应用**；项目外跟 caddy（老行为）
+        found = find_project_file()
+        if found is not None:
+            try:
+                project = load_project_file(found)
+            except ProjectFileError as e:
+                s.err_console.print(f"⚠️  {escape(str(e))} —— 改为跟随 caddy")
+            else:
+                names = [route.name for route in project.routes]
+                _follow_project(found, names)
+                raise typer.Exit(0)
+        service = "caddy"
 
     if service in _SERVICE_LOGS:
         try:

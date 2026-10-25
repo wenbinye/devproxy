@@ -270,8 +270,24 @@ def test_logs_one_target_shows_path_and_follow_hint(project_scope):
     assert "devproxy logs web" in result.output
 
 
-def test_logs_bare_still_defaults_to_caddy(project_scope, monkeypatch):
-    """裸 `devproxy logs` 的默认行为（跟 caddy）不变。"""
+def test_logs_bare_in_project_follows_project_apps(project_scope, monkeypatch):
+    """裸 `devproxy logs` 在项目里 = 跟本项目所有应用（一个时就是 tail -f）。"""
+    followed: list[Path] = []
+    monkeypatch.setattr(
+        "devproxy.cli.logs.follow_log", lambda path: followed.append(path)
+    )
+    result = _invoke(["logs"])
+    assert result.exit_code == 0, result.output
+    assert followed == [project_scope[1].log_dir / "routes" / "web.log"]
+
+
+def test_logs_bare_outside_project_still_defaults_to_caddy(tmp_path, monkeypatch):
+    """项目外裸 `devproxy logs` 仍跟 caddy（老行为）。"""
+    from devproxy.core.paths import Paths
+
+    paths = Paths(tmp_path / "cfg", tmp_path / "state", tmp_path / "data")
+    paths.ensure_files()
+    monkeypatch.chdir(tmp_path)  # 没有 devproxy.toml
     called: list[str] = []
 
     class _FakePlatform:
@@ -282,6 +298,31 @@ def test_logs_bare_still_defaults_to_caddy(project_scope, monkeypatch):
     result = _invoke(["logs"])
     assert result.exit_code == 0, result.output
     assert called == ["caddy"]
+
+
+def test_logs_bare_multi_app_uses_colored_tags(project_scope, monkeypatch):
+    """多个应用：加标签 + 图例，走 follow_many。"""
+    toml = project_scope[0] / "devproxy.toml"
+    toml.write_text(
+        '[[routes]]\nname = "web"\ncommand = ["npm", "run", "dev"]\n'
+        '[[routes]]\nname = "api"\ncommand = ["npm", "run", "serve"]\n',
+        encoding="utf-8",
+    )
+    routes = project_scope[1].log_dir / "routes"
+    (routes / "api.log").write_text("a\n", encoding="utf-8")
+
+    seen: list[list[tuple[str, Path]]] = []
+    monkeypatch.setattr(
+        "devproxy.cli.logs.follow_many",
+        lambda targets: seen.append(list(targets)) or iter([]),
+    )
+    result = _invoke(["logs"])
+    assert result.exit_code == 0, result.output
+    assert len(seen) == 1
+    tags = [t for t, _ in seen[0]]
+    assert tags == ["a", "b"], "标签按声明顺序 a/b"
+    assert "跟随中" in result.output
+    assert "[a]" in result.output and "[b]" in result.output
 
 
 def test_logs_list_with_broken_project_file_falls_back(tmp_path, monkeypatch):

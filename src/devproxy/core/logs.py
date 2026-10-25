@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import time
+from collections.abc import Iterator
 from pathlib import Path
 
 # 单个日志文件的上限。超过就轮转：当前文件改名成 .1（覆盖旧的 .1），
@@ -144,3 +145,58 @@ def follow_log(path: Path) -> None:
                 handle.close()
                 handle = path.open("rb")
                 inode = os.fstat(handle.fileno()).st_ino
+
+
+def follow_many(
+    targets: list[tuple[str, Path]], poll: float = 0.3
+) -> Iterator[tuple[str, str]]:
+    """同时跟随多个日志文件，产出 (标签, 一行文本)。
+
+    - 已存在的文件从**末尾**开始跟（不倒历史）；
+    - 还不存在的文件**等它出现**，出现后从头读（那是应用刚启动的输出，
+      正是你想看的）；轮转（inode 变了）会自动重开接着跟。
+    - 产出顺序即到达顺序，不保证跨文件的行序。
+
+    永不主动结束 —— 跟随是 Ctrl-C 打断的（KeyboardInterrupt 从 get() 冒出）。
+    """
+    import queue
+    import threading
+
+    queue_: "queue.Queue[tuple[str, str]]" = queue.Queue()
+
+    def watch(tag: str, path: Path) -> None:
+        handle = None
+        inode = None
+        # 等文件出现（应用还没写过日志时它不存在）
+        while handle is None:
+            try:
+                handle = path.open("rb")
+            except OSError:
+                time.sleep(poll)
+        inode = os.fstat(handle.fileno()).st_ino
+        try:
+            while True:
+                chunk = handle.readline()
+                if chunk:
+                    queue_.put((tag, chunk.decode("utf-8", "replace")))
+                    continue
+                time.sleep(poll)
+                try:
+                    current = os.stat(path).st_ino
+                except OSError:
+                    current = None
+                if current is not None and current != inode:
+                    # 被轮转了：重开新文件，从头读
+                    handle.close()
+                    handle = path.open("rb")
+                    inode = os.fstat(handle.fileno()).st_ino
+        finally:
+            if handle is not None:
+                handle.close()
+
+    for tag, path in targets:
+        threading.Thread(
+            target=watch, args=(tag, path), name=f"devproxy-follow-{tag}", daemon=True
+        ).start()
+    while True:
+        yield queue_.get()

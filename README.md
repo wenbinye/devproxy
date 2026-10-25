@@ -632,6 +632,23 @@ devproxy sync --prune        # 顺带移除本文件里已删掉的路由
 `up` 模式在 sync 里启动的应用是**后台进程**（sync 退出后应用继续跑，独立会话），
 标准输出与错误收进 `~/.local/state/devproxy/logs/routes/<name>.log`。
 
+**裸 `devproxy logs` 的行为取决于你在哪**：
+
+- **项目目录里**（有 `devproxy.toml`）→ 跟随**本项目所有应用**的日志；
+  只有一个应用时就是 `tail -f`；多个时每行前面加彩色标签区分：
+
+  ```
+  $ devproxy logs
+  跟随中（Ctrl-C 退出）：
+    [a] ~/.local/state/devproxy/logs/routes/codeup-api.log
+    [b] ~/.local/state/devproxy/logs/routes/codeup-web.log
+  [a] INFO:     Uvicorn running on http://127.0.0.1:39743
+  [b] VITE v6.4.4  ready in 329 ms
+  ```
+
+  标签按 `devproxy.toml` 里的声明顺序分配（a / b / c…），图例先打出来。
+- **项目外** → 跟 caddy（老行为）。
+
 看某个应用的输出：
 
 ```bash
