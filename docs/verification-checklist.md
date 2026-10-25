@@ -465,6 +465,9 @@ devproxy: 1 个步骤失败：把 CA 根证书加入系统钥匙串（…）
 
 ### F10. `run` 在**没有 systemd** 的环境可用（容器 / WSL）—— ✔ 已验证（2026-10-25）
 
+**可复现**：`just verify-clean`（即 `scripts/verify-clean-machine.sh`，19 项检查一键跑完，
+失败时保留容器供排查）。
+
 **环境**：Docker 容器 `ubuntu:24.04`，非 root 用户 `dev` + 免密 sudo，
 **无 systemd**（`/run/systemd/system` 不存在，`systemctl` 不存在）。
 从 `git archive HEAD` 的干净源码 `pip install`，运行时依赖只有 typer/rich。
@@ -483,7 +486,16 @@ devproxy: 1 个步骤失败：把 CA 根证书加入系统钥匙串（…）
 | 10 | `curl https://demo.test` | ✔ **HTTP 200，无 `-k`** —— DNS 走工具的 dnsmasq，证书是本机 CA 签的 |
 | 11 | `devproxy down demo` | ✔ 注销后握手失败（路由真的没了） |
 
-**过程中的两个真实发现**：
+**过程中的真实发现（2026-10-25 复现脚本又补两条，共四条）**：
+
+- **Caddy 自己也会装信任**：caddy 启动生成根 CA 后会**借 sudo** 把它装进系统信任库
+  （`dev` 用户有免密 sudo 就能成）。等 `devproxy trust` 跑时，系统步骤发现"已信任"
+  就跳过了 —— 所以**不能**用「`devproxy-local.crt` 存在与否」判断信任是否就位，
+  要用 `openssl verify -CApath /etc/ssl/certs <ca>` 这类性质断言。
+- **`sync` 返回时 443 还没完成重绑**：实测 sync 返回后立即连 443 会被拒，
+  ~2 秒后才通（reload 的监听器重绑是异步尾巴）。脚本用重试容忍；
+  产品侧是已知竞态 —— `sync && curl` 的用户可能撞上，修复需要让
+  mutate 在 reload 后等待端口真正就绪，暂记不改。
 
 - 验证者自己踩了「`$PORT` 没包 `sh -c`」的坑 —— 报错清晰（python 的
   `invalid int value: '$PORT'`），改法与文档一致。这正是 `init` 生成的

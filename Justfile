@@ -58,3 +58,7 @@ install:
 
 # 旧名保留：过去装的是 devp 脚本，现在装的是 devproxy 包
 install-devp: install
+
+# 干净 ubuntu 容器里的端到端验证（验证清单 F10；需要 docker 与网络）
+verify-clean:
+    bash scripts/verify-clean-machine.sh
