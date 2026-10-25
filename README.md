@@ -652,14 +652,23 @@ tail -f ~/.local/state/devproxy/logs/routes/web.log   # 等价写法
 devproxy logs --list
 ```
 
+**在项目目录里只列本项目声明的路由**（按 `devproxy.toml` 过滤，别的项目的不混进来）；
+不在项目里则列出全部。声明了但还没起过的路由也会提示：
+
 ```
 服务日志：
   caddy
   dnsmasq
-路由日志（/home/me/.local/state/devproxy/logs/routes/）：
-  codeup-api              18 KB
-  codeup-web               5 KB
+本项目（devproxy.toml：/home/me/work/xxl-job/devproxy.toml）：
   xxl-job-admin            8 MB
+  xxl-job-executor        13 KB
+已声明但还没有日志：xxl-job-executor（跑一次 devproxy sync）
+```
+
+看**单个**日志的信息（路径、大小、跟随命令）：
+
+```bash
+devproxy logs codeup-api --list
 ```
 
 **日志会轮转**：单个文件超过 **10 MB** 就改名成 `.log.1`（覆盖上一份），当前文件从头写。

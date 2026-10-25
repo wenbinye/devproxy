@@ -209,3 +209,100 @@ def test_logs_list_without_any_route_log(tmp_path, monkeypatch):
     result = _invoke(["logs", "--list"])
     assert result.exit_code == 0, result.output
     assert "没有" in result.output
+
+
+# -- --list 的项目作用域 -------------------------------------------------
+
+
+@pytest.fixture
+def project_scope(tmp_path, monkeypatch):
+    """项目目录：devproxy.toml 声明 web；日志目录里有 web 和 other 的。"""
+    from devproxy.core.paths import Paths
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "devproxy.toml").write_text(
+        '[[routes]]\nname = "web"\ncommand = ["npm", "run", "dev"]\n',
+        encoding="utf-8",
+    )
+    (project / ".git").mkdir()  # 让项目根 = 这个目录
+    paths = Paths(tmp_path / "cfg", tmp_path / "state", tmp_path / "data")
+    routes = paths.log_dir / "routes"
+    routes.mkdir(parents=True, exist_ok=True)
+    (routes / "web.log").write_text("w\n", encoding="utf-8")
+    (routes / "other.log").write_text("o\n", encoding="utf-8")  # 别的项目的
+
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(
+        "devproxy.cli._shared.build_context",
+        lambda *a, **k: (paths, None, None, None),
+    )
+    return project, paths
+
+
+def test_logs_list_in_project_shows_only_project_routes(project_scope):
+    """项目里 --list 只列本项目声明的路由，别的项目的不混进来。"""
+    result = _invoke(["logs", "--list"])
+    assert result.exit_code == 0, result.output
+    assert "web" in result.output
+    assert "other" not in result.output, "别的项目的路由不该混进来"
+    assert "本项目" in result.output
+
+
+def test_logs_list_in_project_mentions_undeclared(project_scope):
+    """声明了但还没起过（没有日志文件）的路由也要提示。"""
+    toml = project_scope[0] / "devproxy.toml"
+    toml.write_text(
+        '[[routes]]\nname = "web"\ncommand = ["npm", "run", "dev"]\n'
+        '[[routes]]\nname = "ghost"\ncommand = ["npm", "run", "dev"]\n',
+        encoding="utf-8",
+    )
+    result = _invoke(["logs", "--list"])
+    assert result.exit_code == 0, result.output
+    assert "ghost" in result.output
+    assert "还没有日志" in result.output
+
+
+def test_logs_one_target_shows_path_and_follow_hint(project_scope):
+    result = _invoke(["logs", "web", "--list"])
+    assert result.exit_code == 0, result.output
+    assert "web.log" in result.output
+    assert "devproxy logs web" in result.output
+
+
+def test_logs_bare_still_defaults_to_caddy(project_scope, monkeypatch):
+    """裸 `devproxy logs` 的默认行为（跟 caddy）不变。"""
+    called: list[str] = []
+
+    class _FakePlatform:
+        def tail_service_log(self, name: str) -> None:
+            called.append(name)
+
+    monkeypatch.setattr("devproxy.cli._shared._platform", lambda: _FakePlatform())
+    result = _invoke(["logs"])
+    assert result.exit_code == 0, result.output
+    assert called == ["caddy"]
+
+
+def test_logs_list_with_broken_project_file_falls_back(tmp_path, monkeypatch):
+    """devproxy.toml 坏了：提示一声，按全部路由列出（而不是拒绝服务）。"""
+    from devproxy.core.paths import Paths
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "devproxy.toml").write_text("[[routes]\nbroken", encoding="utf-8")
+    (project / ".git").mkdir()
+    paths = Paths(tmp_path / "cfg", tmp_path / "state", tmp_path / "data")
+    routes = paths.log_dir / "routes"
+    routes.mkdir(parents=True, exist_ok=True)
+    (routes / "web.log").write_text("w\n", encoding="utf-8")
+
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(
+        "devproxy.cli._shared.build_context",
+        lambda *a, **k: (paths, None, None, None),
+    )
+    result = _invoke(["logs", "--list"])
+    assert result.exit_code == 0, result.output
+    assert "按全部路由列出" in result.output
+    assert "web" in result.output
