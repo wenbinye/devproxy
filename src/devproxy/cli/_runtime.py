@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import sys
+from typing import NoReturn
 
 from rich.console import Console
 from rich.markup import escape
@@ -30,8 +31,13 @@ EXIT_SUDO = 4
 EXIT_DECLINED = 4
 
 
-def fail(msg: str, code: int = EXIT_FAIL) -> None:
-    """以统一形态输出错误并退出（Rich 渲染的一行错误，而非 traceback）。"""
+def fail(msg: str, code: int = EXIT_FAIL) -> NoReturn:
+    """以统一形态输出错误并退出（Rich 渲染的一行错误，而非 traceback）。
+
+    标成 NoReturn 而不是 None：它永远抛 typer.Exit，类型检查器据此
+    知道"这行之后不会继续" —— 否则每个 `s.fail(...)` 之后的代码都会被
+    误报成"可能未绑定变量"。
+    """
     # escape：错误消息里可能带 [a-z0-9-] 这类字符集或用户输入，
     # 不转义会被 Rich 当成标记吞掉
     err_console.print(f"devproxy: {escape(msg)}")

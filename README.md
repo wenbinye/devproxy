@@ -169,6 +169,7 @@ Caddy 的内部 CA **在第一次加载 `tls internal` 站点时**才生成 —�
 | `devproxy uninstall` | 卸载：停服务、移除单元、DNS 路由与（可选）CA。默认保守保留你的配置、个人站点、Caddy 存储与备份 |
 | `devproxy sync` | 按项目根目录的 `devproxy.toml` 同步路由声明（全组共享一份） |
 | `devproxy run` | **前台**托管 Caddy（不装服务、不留状态，Ctrl-C 退出）。没有 systemd 的环境（容器 / WSL）用它替代服务 |
+| `devproxy init` | 在项目里生成 `devproxy.toml`（路由名取目录名，启动命令按项目类型猜或用 `--command` / `--from` 指定） |
 
 常用选项：
 
@@ -188,6 +189,10 @@ Caddy 的内部 CA **在第一次加载 `tls internal` 站点时**才生成 —�
 | `--file <路径>` | `sync` | 显式指定 `devproxy.toml`（默认从当前目录逐级向上查找） |
 | `--prune` | `sync` | 移除本文件里已删掉的路由（只动本文件声明过的；非交互时须加 `--yes`） |
 | `--config <路径>` | `run` | 要加载的 Caddyfile（默认主 Caddyfile） |
+| `--name <名字>` | `init` | 路由名（默认取项目目录名） |
+| `--command <命令>` | `init` | 启动命令，如 `"npm run dev"`（不给就按项目类型猜） |
+| `--from <路由名>` | `init` | 从已注册的同名路由导入它的启动命令 |
+| `--force` | `init` | 覆盖已存在的 `devproxy.toml` |
 
 ### 退出码
 
@@ -510,6 +515,46 @@ devproxy up <name> -- <原来的启动命令>
 `config.toml` 是**你机器的**配置（存 `~/.config/devproxy/`，不进版本库）。
 `devproxy.toml` 是**项目的**配置 —— 放在项目仓库根目录、**提交进版本库**，
 全组每个人 clone 下来跑一次 `devproxy sync`，就得到同一套路由。
+
+### 快速创建：`devproxy init`
+
+```bash
+cd ~/work/tasks/我的项目
+devproxy init                       # 生成 devproxy.toml
+devproxy init --name web --command "npm run dev"
+devproxy init --from my-running-svc # 从已在跑的路由导入它的启动命令
+```
+
+它会：
+
+1. 找到**项目根**（向上找 `.git`；没有就用当前目录），在那里写 `devproxy.toml`；
+2. 路由名默认取**目录名**（`My App` → `my-app`），可用 `--name` 改；
+3. 启动命令按这个顺序来：
+   - `--command` 显式给的（按 shell 的词法拆，引号和空格都认）；
+   - `--from <路由名>` —— 从**已注册的同名路由**导入它的启动命令
+     （路由表是全局的，所以必须指名，不能"把当前所有路由都导进来"）；
+   - 都没有的话，**看项目类型猜**：`package.json` 里有 `dev` 脚本就猜
+     `npm run dev`，有 `start` 就猜 `npm run start`，有 `Makefile` 就猜 `make dev`。
+     **没有明确证据就不猜**（`pyproject.toml` 存在但看不出入口点时只给提示），
+     猜错比不猜更糟；
+4. 写好的文件**能被自己解析**（生成后会用同一套解析器读回来验证）。
+
+```bash
+$ devproxy init
+✔ 已生成 /home/me/work/my-app/devproxy.toml
+  路由名: my-app  →  https://my-app.test
+  启动命令: npm run dev
+  package.json 里有 dev 脚本 —— 请确认它就是你要的启动命令
+
+下一步：
+  1. 检查上面的启动命令对不对（多半要改）
+  2. devproxy setup    # 只需一次：装 Caddy、写 DNS 路由、装 CA 信任
+  3. devproxy sync     # 起服务
+```
+
+文件已存在时会拒绝（退出码 2），要覆盖加 `--force`。
+
+### 手写
 
 ```toml
 # devproxy.toml —— 项目根目录，提交进仓库

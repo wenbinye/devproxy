@@ -39,6 +39,7 @@ from devproxy.cli import (  # noqa: E402,F401
     uninstall,
     sync,
     run,
+    init,
 )
 
 

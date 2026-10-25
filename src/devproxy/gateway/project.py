@@ -255,3 +255,114 @@ def _parse_ready_timeout(where: str, name: str, item: dict) -> int | None:
             f"{READY_TIMEOUT_MIN}..{READY_TIMEOUT_MAX} 秒之间"
         )
     return raw
+
+
+# -- 脚手架：生成一份可用的 devproxy.toml --------------------------------
+
+
+def detect_project_root(start: Path | None = None) -> Path:
+    """项目文件该放在哪：git 仓库根，没有 git 就用当前目录。
+
+    向上找 `.git`（文件或目录都行 —— worktree 里 `.git` 是文件），
+    找到的那一层就是仓库根，项目文件该和 `pyproject.toml` 放一起。
+    """
+    try:
+        current = (start or Path.cwd()).resolve()
+    except OSError:
+        return Path.cwd()
+    for directory in (current, *current.parents):
+        if (directory / ".git").exists():
+            return directory
+    return current
+
+
+def suggest_command(root: Path) -> tuple[list[str] | None, str]:
+    """按项目类型猜一条启动命令。返回 (命令, 判断依据)。
+
+    猜错比不猜更糟 —— 但完全不猜等于让用户从零写 TOML。所以只在
+    **有明确证据**时给建议（package.json 里有 dev 脚本、pyproject.toml
+    存在且能推出入口点），否则返回 None 让用户自己写。
+    """
+    package_json = root / "package.json"
+    if package_json.is_file():
+        scripts = _read_json_field(package_json, "scripts")
+        if isinstance(scripts, dict) and "dev" in scripts:
+            return ["npm", "run", "dev"], "package.json 里有 dev 脚本"
+        if isinstance(scripts, dict) and "start" in scripts:
+            return ["npm", "run", "start"], "package.json 里有 start 脚本"
+    if (root / "pyproject.toml").is_file():
+        return None, "检测到 pyproject.toml —— 请填上实际启动命令"
+    if (root / "Makefile").is_file():
+        return ["make", "dev"], "检测到 Makefile（若有 dev 目标）"
+    return None, "没有检测到常见的项目类型 —— 请填上实际启动命令"
+
+
+def _read_json_field(path: Path, field_name: str) -> object:
+    """读 JSON 的一个顶层字段；解析不了就返回 None（不抛）。"""
+    import json
+
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return data.get(field_name)
+
+
+def route_name_from_dir(root: Path) -> str:
+    """用目录名推一个合法的路由名（`[a-z0-9-]`，首尾字母数字）。"""
+    raw = root.name.lower()
+    cleaned = "".join(c if c.isalnum() or c == "-" else "-" for c in raw)
+    cleaned = cleaned.strip("-")
+    while "--" in cleaned:
+        cleaned = cleaned.replace("--", "-")
+    if not cleaned or not cleaned[0].isalnum():
+        cleaned = f"app-{cleaned}".strip("-")
+    if not cleaned:
+        return "app"
+    # 目录名可能超过 63 字符 —— 截断后仍要保证首尾是字母数字
+    cleaned = cleaned[:63].strip("-")
+    return cleaned or "app"
+
+
+def render_project_file(
+    routes: list[ProjectRoute], *, notes: list[str] | None = None
+) -> str:
+    """渲染成 devproxy.toml 的文本。
+
+    注释只说**为什么**与**有哪些坑**，不复述字段名（那是文档的事）。
+    """
+    lines: list[str] = [
+        "# devproxy.toml —— 本项目的本地开发路由声明",
+        "#",
+        "# 提交进仓库，全组共享：每个人跑一次 `devproxy sync` 就得到同一套域名。",
+        "# 完整说明见 devproxy 的 README「项目级配置」。",
+        "#",
+        "# command 是 argv 数组，不经过 shell —— $PORT 不会自动展开。",
+        "# 需要端口参数的应用要自己包一层 sh -c，让 shell 在端口分配之后再展开：",
+        '#   command = ["sh", "-c", "npx vite --port $PORT --host 127.0.0.1"]',
+    ]
+    for note in notes or []:
+        lines.append(f"# {note}")
+    lines.append("")
+    for route in routes:
+        lines.append("[[routes]]")
+        lines.append(f'name = "{route.name}"')
+        if route.mode == MODE_EXPOSE:
+            lines.append('mode = "expose"')
+            lines.append(f"port = {route.port}")
+        else:
+            command = route.command or []
+            rendered = ", ".join(_toml_string(part) for part in command)
+            lines.append(f"command = [{rendered}]")
+        if route.ready_timeout is not None:
+            lines.append(f"ready_timeout = {route.ready_timeout}")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _toml_string(value: str) -> str:
+    """渲染成 TOML 基本字符串（含引号与转义）。"""
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
