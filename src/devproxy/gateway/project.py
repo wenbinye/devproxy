@@ -10,7 +10,7 @@
     command = ["npm", "run", "dev"]
 
     [[routes]]
-    name = "legacy"
+    name = "console"
     mode = "expose"
     port = 3000
 

@@ -126,7 +126,7 @@ devproxy doctor    # 体检（静态检查，不做 DNS 解析）：缺什么给
 devproxy up codeup -- sh -c 'npx vite --port $PORT --host 127.0.0.1'
 
 # 给已经在跑的服务开域名（不启动它）
-devproxy expose legacy --port 3000
+devproxy expose console --port 3000
 
 devproxy ls                 # 路由清单（含可达性）
 devproxy down codeup        # 注销路由（子进程也一并收掉）
@@ -597,7 +597,7 @@ name = "api"
 command = ["sh", "-c", "uv run uvicorn app:app --port $PORT"]
 
 [[routes]]
-name = "legacy"
+name = "console"
 mode = "expose"     # 不起进程，给已经在跑的服务开域名
 port = 3000
 ```
