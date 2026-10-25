@@ -12,7 +12,7 @@
 | C. 迁移检测的残留风险 | 1 | `migrate.detect_legacy()`「读不到遗留单元 ⇒ 视为没有遗留环境」 |
 | **小计（A+B+C）** | **28** | |
 | D. Linux 真机检查 | 8 | 单元测试覆盖不到的 Linux 侧行为（不计入 28） |
-| F. 新增功能的真机检查 | 11 | 2026-10-23 起新增的 `uninstall` / `sync` / `run` / 域名后缀护栏 / 子进程超时 |
+| F. 新增功能的真机检查 | 11 | 2026-10-23 起新增的 `uninstall` / `sync` / `run` / 域名后缀护栏 / 子进程超时（F10 已于 2026-10-25 用 ubuntu:24.04 容器验证） |
 
 约定：
 
@@ -27,6 +27,7 @@
 | 日期 | 改了什么 |
 |---|---|
 | 2026-10-24 | 补 F 组（新增功能的真机检查）；C1 标注为已在代码层修复；更新用例数；修掉指向 gitignored 目录的悬空引用 |
+| 2026-10-25 | **F10 完成**：ubuntu:24.04 容器（无 systemd）里全链路跑通 —— 安装 → init → setup 的优雅失败 → run 托管 → sync → trust → `curl https://demo.test` 200（无 -k）→ down |
 
 ---
 
@@ -462,9 +463,35 @@ devproxy: 1 个步骤失败：把 CA 根证书加入系统钥匙串（…）
   `shutdown complete`）、devproxy 退出码 0、**无残留进程**（`pgrep -f caddy` 为空）。
   停服务后路由**不再被服务**（路由表是文件，但没人加载它了）。
 
-### F10. `run` 在**没有 systemd** 的环境可用（容器 / WSL）
+### F10. `run` 在**没有 systemd** 的环境可用（容器 / WSL）—— ✔ 已验证（2026-10-25）
 
-- 检查：在没有 systemd 的容器里跑 `devproxy setup`（装服务会失败）→ 改用 `devproxy run`。
+**环境**：Docker 容器 `ubuntu:24.04`，非 root 用户 `dev` + 免密 sudo，
+**无 systemd**（`/run/systemd/system` 不存在，`systemctl` 不存在）。
+从 `git archive HEAD` 的干净源码 `pip install`，运行时依赖只有 typer/rich。
+
+| # | 验证点 | 结果 |
+|---|---|---|
+| 1 | 安装（`pip install <源码目录>`） | ✔ 干净机器上唯一依赖是 python3-venv |
+| 2 | `config` / `ls` / `init` | ✔ 全部正常；`ls` 空表优雅显示「无路由」 |
+| 3 | `sudo devproxy setup` | ✔ **退 3**：「请以普通用户运行 devproxy……以 root 运行会把服务装进 root 的家目录」 |
+| 4 | `setup --yes`（裸机，缺 libcap2-bin / dnsmasq / systemctl） | ✔ 计划表渲染正确；每个失败都**优雅且可操作**（「sudo: setcap: command not found；请先安装 libcap2-bin」），退出码 1，**无 traceback** |
+| 5 | 补包后 `setup --yes` | ✔ caddy 下载 + **sha256 校验 + setcap**、主 Caddyfile、`/etc/dnsmasq.d/devproxy.conf`、dnsmasq 合并配置全部落地；只剩 systemd 步骤失败（容器的边界，正是 `run` 要补的） |
+| 6 | 手工 dnsmasq（53 端口）+ `/etc/resolv.conf` 指向它 | ✔ `demo.test → 127.0.0.1` |
+| 7 | `devproxy run` 前台托管 Caddy | ✔ 起来、绑 80/443（setcap 生效）、Admin API 响应 |
+| 8 | `devproxy sync` | ✔ 起应用 + 注册路由 + **CA 生成** + 主动提示「请运行 devproxy trust」 |
+| 9 | `devproxy trust --yes` | ✔ 系统信任库装上；NSS 步骤**优雅失败**（无 certutil，提示 `apt install libnss3-tools`） |
+| 10 | `curl https://demo.test` | ✔ **HTTP 200，无 `-k`** —— DNS 走工具的 dnsmasq，证书是本机 CA 签的 |
+| 11 | `devproxy down demo` | ✔ 注销后握手失败（路由真的没了） |
+
+**过程中的两个真实发现**：
+
+- 验证者自己踩了「`$PORT` 没包 `sh -c`」的坑 —— 报错清晰（python 的
+  `invalid int value: '$PORT'`），改法与文档一致。这正是 `init` 生成的
+  文件头部注释警告的事。
+- `trust --yes` 在**只有 NSS 一项失败**时整体退出 1：系统信任库（curl/浏览器
+  需要的）其实装好了。对没有 Chrome 的服务器是噪音，但算"有一步失败就如实报"
+  的设计 —— 暂不改，留作已知行为。
+
 - 预期：`run` 能起来并托管路由；这正是它存在的理由。
 
 ### F11. 域名后缀白名单与子进程超时护栏
