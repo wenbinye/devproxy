@@ -640,13 +640,13 @@ devproxy sync --prune        # 顺带移除本文件里已删掉的路由
   ```
   $ devproxy logs
   跟随中（Ctrl-C 退出）：
-    [a] ~/.local/state/devproxy/logs/routes/codeup-api.log
-    [b] ~/.local/state/devproxy/logs/routes/codeup-web.log
-  [a] INFO:     Uvicorn running on http://127.0.0.1:39743
-  [b] VITE v6.4.4  ready in 329 ms
+    [codeup-api]
+    [codeup-web]
+  [codeup-api] INFO:     Uvicorn running on http://127.0.0.1:39743
+  [codeup-web] VITE v6.4.4  ready in 329 ms
   ```
 
-  标签按 `devproxy.toml` 里的声明顺序分配（a / b / c…），图例先打出来。
+  标签就是 `devproxy.toml` 里的**应用名**（带各自颜色，补齐对齐）。
 - **项目外** → 跟 caddy（老行为）。
 
 看某个应用的输出：

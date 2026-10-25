@@ -4,7 +4,6 @@ from pathlib import Path
 
 from rich.markup import escape
 from rich.text import Text
-import string
 import typer
 
 from devproxy.cli import app
@@ -77,21 +76,15 @@ _PALETTE = ("cyan", "magenta", "yellow", "green", "blue", "bright_red",
             "bright_cyan", "bright_magenta", "bright_yellow", "bright_green")
 
 
-def _tag_letters(count: int) -> list[str]:
-    """给每个应用一个短标签：a b c … z aa bb（声明顺序即标签顺序）。"""
-    letters = string.ascii_lowercase
-    return [letters[i % 26] * (i // 26 + 1) for i in range(count)]
-
-
 def _follow_project(project_path: Path, names: list[str]) -> None:
     """跟随本项目所有应用的日志。一个就是 tail -f；多个带彩色标签。"""
     paths, _, _, _ = s.build_context()
     targets: list[tuple[str, Path]] = []
     missing: list[str] = []
-    for tag, name in zip(_tag_letters(len(names)), names):
+    for name in names:
         path = route_log_path(paths, name)
         if path.exists():
-            targets.append((tag, path))
+            targets.append((name, path))  # 标签就是应用名
         else:
             missing.append(name)
 
@@ -112,16 +105,16 @@ def _follow_project(project_path: Path, names: list[str]) -> None:
             colors = {
                 tag: _PALETTE[i % len(_PALETTE)] for i, (tag, _) in enumerate(targets)
             }
+            width = max(len(tag) for tag, _ in targets)
             s.console.print("跟随中（Ctrl-C 退出）：")
-            for tag, path in targets:
-                # [a]/[b] 必须转义：rich 会把 [b] 当成"粗体"标记吃掉
-                s.console.print(
-                    f"  {escape(f'[{tag}]')} {escape(str(path))}",
-                    style=colors[tag],
-                )
+            for tag, _ in targets:
+                # 名字必须转义：rich 会把方括号内容当标记解析。
+                # 不带路径 —— 长路径会被折行，且名字本身就是身份
+                s.console.print(f"  {escape(f'[{tag}]')}", style=colors[tag])
             for tag, line in follow_many(targets):
                 text = Text()
-                text.append(f"[{tag}] ", style=colors[tag])
+                # 名字补齐到同一宽度，几行日志能纵向对齐
+                text.append(f"[{tag}]".ljust(width + 2) + " ", style=colors[tag])
                 text.append(line.rstrip("\n"))
                 s.console.print(text)
     except KeyboardInterrupt:

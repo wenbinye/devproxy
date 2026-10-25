@@ -320,9 +320,9 @@ def test_logs_bare_multi_app_uses_colored_tags(project_scope, monkeypatch):
     assert result.exit_code == 0, result.output
     assert len(seen) == 1
     tags = [t for t, _ in seen[0]]
-    assert tags == ["a", "b"], "标签按声明顺序 a/b"
+    assert tags == ["web", "api"], "标签就是 devproxy.toml 里的应用名"
     assert "跟随中" in result.output
-    assert "[a]" in result.output and "[b]" in result.output
+    assert "[web]" in result.output and "[api]" in result.output
 
 
 def test_logs_list_with_broken_project_file_falls_back(tmp_path, monkeypatch):
