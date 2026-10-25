@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Callable
 
 from devproxy.core.config import Config
+from devproxy.core.logs import RotatingLogWriter
 from devproxy.gateway.caddy import CaddyAdmin, CaddyError
 from devproxy.gateway.names import domain_for, validate_name
 from devproxy.gateway.routes import Route, RouteTable, RouteTableError
@@ -63,6 +64,41 @@ class UpRequest:
     # 声明来源（devproxy.toml 的绝对路径）。落到路由表里，
     # `devproxy sync --prune` 据此判断「这条路由是不是本文件声明的」。
     source: str | None = None
+    # 应用输出的日志文件。给了就把子进程的输出收进管道、由 devproxy 自己
+    # 写进这个文件 —— 只有自己持有句柄才能在运行中轮转（见 core.logs）。
+    # None = 输出继承当前终端（前台 `devproxy up` 的老行为）。
+    log_path: Path | None = None
+
+
+
+def _start_log_pump(stream, path: Path) -> None:
+    """把子进程的输出搬进日志文件（后台线程）。
+
+    这个线程**必须一直把管道读空** —— 管道缓冲区满了，子进程下一次 write
+    就会阻塞，应用会莫名其妙卡住。所以：写失败（磁盘满之类）时丢弃内容
+    但继续读；只有真的读到 EOF 才收工。
+    """
+
+    def pump() -> None:
+        writer = RotatingLogWriter(path)
+        try:
+            while True:
+                try:
+                    chunk = stream.readline()
+                except OSError:
+                    chunk = b""
+                if not chunk:
+                    break
+                writer.write(chunk)
+        finally:
+            writer.close()
+            try:
+                stream.close()
+            except OSError:
+                pass
+
+    thread = threading.Thread(target=pump, name="devproxy-log-pump", daemon=True)
+    thread.start()
 
 
 class _ChildHandle:
@@ -497,8 +533,14 @@ class UpRunner:
         try:
             # cwd=None 时与从前完全一致（继承当前工作目录）；
             # 给了 cwd 就把子进程放进那个目录（项目根目录）。
+            extra: dict[str, object] = {}
+            if req.log_path is not None:
+                # 收进管道：devproxy 自己写日志文件，才能在运行中轮转。
+                # 代价是多一个泵线程 —— 它必须**一直把管道读空**，
+                # 否则子进程写满管道缓冲区后会卡死。
+                extra = {"stdout": subprocess.PIPE, "stderr": subprocess.STDOUT}
             proc = subprocess.Popen(
-                req.cmd, env=env, cwd=req.cwd, start_new_session=True
+                req.cmd, env=env, cwd=req.cwd, start_new_session=True, **extra
             )
         except OSError as e:
             # 覆盖 FileNotFoundError / PermissionError / Exec format error：
@@ -507,6 +549,8 @@ class UpRunner:
         child.proc = proc
         child.pgid = proc.pid  # start_new_session=True → 子进程是进程组 leader
         child.start = proc_start_time(proc.pid)
+        if req.log_path is not None and proc.stdout is not None:
+            _start_log_pump(proc.stdout, req.log_path)
         return proc
 
     def _wait_ready(

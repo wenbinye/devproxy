@@ -44,6 +44,30 @@ def _load_payload() -> dict:
     return payload
 
 
+class _LogProxy:
+    """把 worker 的输出追加进日志文件（每次写都重新打开）。"""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def write(self, data: str) -> int:
+        if not data:
+            return 0
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with self.path.open("a", encoding="utf-8", errors="replace") as handle:
+                handle.write(data)
+        except OSError:
+            pass  # 日志写不进去不该让 worker 崩掉
+        return len(data)
+
+    def flush(self) -> None:
+        pass
+
+    def isatty(self) -> bool:
+        return False
+
+
 def main(argv: list[str] | None = None) -> int:
     """跑一次 up 并陪着应用。返回进程退出码。"""
     try:
@@ -59,6 +83,13 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     cwd = payload.get("cwd")
+    log_path = payload.get("log_path")
+    if log_path:
+        # worker 自己的输出也进日志文件：每次写都重新打开，文件被轮转后
+        # 下一条消息会落到**新**文件，而不是跟着旧 inode 跑进 .log.1
+        proxy = _LogProxy(Path(log_path))
+        sys.stdout = proxy
+        sys.stderr = proxy
     request = UpRequest(
         name=name,
         cmd=command,
@@ -66,6 +97,7 @@ def main(argv: list[str] | None = None) -> int:
         ready_timeout=payload.get("ready_timeout"),
         cwd=Path(cwd) if cwd else None,
         source=payload.get("source"),
+        log_path=Path(log_path) if log_path else None,
     )
     try:
         paths, config, store, admin = build_context()

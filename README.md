@@ -162,7 +162,7 @@ Caddy 的内部 CA **在第一次加载 `tls internal` 站点时**才生成 —�
 | `devproxy expose <name> --port N` | 给已在运行的服务开域名，注册后立即返回，路由常驻（上游暂时无响应时只告警，路由照样注册） |
 | `devproxy down <name>` | 注销路由；若该路由的子进程还在，一并收掉 |
 | `devproxy ls` | 列出所有已注册路由（含可达性） |
-| `devproxy logs [caddy\|dnsmasq]` | 跟随服务日志（默认 `caddy`） |
+| `devproxy logs [caddy\|dnsmasq\|<路由名>]` | 跟随日志：服务本身（默认 `caddy`）或 sync 起的应用 |
 | `devproxy trust` | 单独安装 CA 根证书（系统信任库 + NSS 库 / 系统钥匙串） |
 | `devproxy config` | 显示当前生效配置与渲染出的路由片段 |
 | `devproxy selftest` | 隔离 Caddy 实例端到端自检 |
@@ -630,12 +630,30 @@ devproxy sync --prune        # 顺带移除本文件里已删掉的路由
 ### 后台进程与日志
 
 `up` 模式在 sync 里启动的应用是**后台进程**（sync 退出后应用继续跑，独立会话），
-标准输出与错误重定向到 `~/.local/state/devproxy/logs/routes/<name>.log`。
-想看某个应用的输出：
+标准输出与错误收进 `~/.local/state/devproxy/logs/routes/<name>.log`。
+
+看某个应用的输出：
 
 ```bash
-tail -f ~/.local/state/devproxy/logs/routes/web.log
+devproxy logs web              # 跟随（Ctrl-C 退出）
+tail -f ~/.local/state/devproxy/logs/routes/web.log   # 等价写法
 ```
+
+`devproxy logs` 的参数可以是：
+
+| 参数 | 看什么 |
+|---|---|
+| `caddy` / `dnsmasq` | **服务本身**的日志（Linux 走 journalctl，macOS 是文件） |
+| `<路由名>` | **sync 起的应用**的日志 |
+
+参数不认识时退 2，并把当前可用的路由日志名列出来。
+
+**日志会轮转**：单个文件超过 **10 MB** 就改名成 `.log.1`（覆盖上一份），当前文件从头写。
+所以每条路由的日志最多占 20 MB，不会无限涨 —— Spring Boot 这类应用在开发时
+能以几 MB/小时 的速度写日志，不轮转的话跑几天就能吃掉几百 MB。
+
+轮转在**写入端**做（devproxy 自己收应用的输出、自己写文件），不是靠 logrotate ——
+这些日志是 devproxy 拉起的进程写的，只有写它的人能保证文件不会无限大。
 
 ### 与 `up` / `expose` 的关系
 

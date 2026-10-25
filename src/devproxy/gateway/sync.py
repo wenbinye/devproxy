@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from dataclasses import field
 from pathlib import Path
 
+from devproxy.core.logs import rotate_at_start
 from devproxy.core.config import Config
 from devproxy.core.paths import Paths
 from devproxy.gateway.names import domain_for
@@ -318,21 +319,26 @@ def _spawn_worker(
         "ready_timeout": declared.ready_timeout,
         "cwd": str(project.project_dir),
         "source": str(project.path),
+        "log_path": str(log_path),
     }
     env = dict(os.environ)
     env[PAYLOAD_ENV] = json.dumps(payload)
     env["PYTHONPATH"] = _pythonpath()
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(log_path, "ab") as log:
-        return subprocess.Popen(
-            [sys.executable, "-m", WORKER_MODULE],
-            env=env,
-            cwd=str(project.project_dir),
-            stdin=subprocess.DEVNULL,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
+    # 上一轮留下的日志挪成 .1：反复重启不会把日志堆成一条
+    rotate_at_start(log_path)
+    # stdout/stderr 交给 worker 自己写进日志文件（见 cli/_worker.py 的
+    # _LogProxy）—— 那样 worker 的消息和应用的输出走同一个写入端，
+    # 文件被轮转时不会有一半消息留在旧 inode 里。
+    return subprocess.Popen(
+        [sys.executable, "-m", WORKER_MODULE],
+        env=env,
+        cwd=str(project.project_dir),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
 
 
 def _pythonpath() -> str:
