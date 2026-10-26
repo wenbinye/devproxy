@@ -1,6 +1,6 @@
-# SDD ledger — plan: docs/superpowers/plans/2026-10-22-devproxy-core-gateway.md
+# SDD ledger — plan: docs/design/plans/2026-10-22-devproxy-core-gateway.md
 
-- 规格（权威）：`docs/superpowers/specs/2026-10-22-devproxy-local-dev-env-tool-design.md`
+- 规格（权威）：`docs/design/specs/2026-10-22-devproxy-local-dev-env-tool-design.md`
 - 工作区：`.superpowers/sdd/2026-10-22-devproxy-core-gateway/`
 - 代码分支：`worktree-devproxy`（worktree 位于 `.claude/worktrees/devproxy`）
 - 计划基线提交：`5cfd722`

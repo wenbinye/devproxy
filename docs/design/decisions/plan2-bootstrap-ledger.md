@@ -1,6 +1,6 @@
-# SDD ledger — plan: docs/superpowers/plans/2026-10-22-devproxy-bootstrap.md
+# SDD ledger — plan: docs/design/plans/2026-10-22-devproxy-bootstrap.md
 
-- 规格（权威）：`docs/superpowers/specs/2026-10-22-devproxy-local-dev-env-tool-design.md`
+- 规格（权威）：`docs/design/specs/2026-10-22-devproxy-local-dev-env-tool-design.md`
 - 前置：Plan 1（核心网关）已 COMPLETE（分支推进到 2457761，214 tests；修复波后 HEAD 为 2457761）
 - 工作区：`.superpowers/sdd/2026-10-22-devproxy-bootstrap/`
 - 计划修正提交：c3bb4ac（DnsComponent system 后端重启目标修正）

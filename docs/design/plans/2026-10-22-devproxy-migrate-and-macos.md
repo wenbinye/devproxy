@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python ≥ 3.11、Typer ≥ 0.12、Rich ≥ 13、pytest ≥ 8、systemd(user)、launchd(LaunchDaemon/LaunchAgent)、dnsmasq、macOS `security` / `/etc/resolver`
 
-**Spec:** `docs/superpowers/specs/2026-10-22-devproxy-local-dev-env-tool-design.md` —— 重点看 §8（迁移）、§2 D7/D16/D19/D20、§10.3（真机验证清单）
+**Spec:** `docs/design/specs/2026-10-22-devproxy-local-dev-env-tool-design.md` —— 重点看 §8（迁移）、§2 D7/D16/D19/D20、§10.3（真机验证清单）
 
 **前置条件：** Plan 1 与 Plan 2 已完成并通过测试。
 

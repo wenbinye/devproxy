@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3 stdlib only（argparse/subprocess/socket/threading/urllib/fcntl/json）、Caddy v2.11（现有 systemd 用户级服务）、just、unittest（无 pytest）。
 
-**Spec:** `docs/superpowers/specs/2026-10-21-devp-dynamic-domain-gateway-design.md`（本计划与 spec 同仓：`~/work/tasks/local-https/`）
+**Spec:** `docs/design/specs/2026-10-21-devp-dynamic-domain-gateway-design.md`（本计划与 spec 同仓：`~/work/tasks/local-https/`）
 
 ## Global Constraints
 
@@ -102,7 +102,7 @@ Expected: FAIL/ERROR（`devp` 文件不存在，加载即报 FileNotFoundError�
   devp ls
   devp selftest
 
-注册协议与设计决策见 docs/superpowers/specs/2026-10-21-devp-dynamic-domain-gateway-design.md
+注册协议与设计决策见 docs/design/specs/2026-10-21-devp-dynamic-domain-gateway-design.md
 """
 import os
 import re
@@ -1099,7 +1099,7 @@ devp selftest                          # 隔离实例端到端自检
   （如 `codeup-featx`）。
 - 注册协议：Admin API GET 路由数组 → 插到 `*.test` 通配兜底之前 → PATCH 回写
   （POST 追加会被通配路由遮蔽）；注销按 `@id` DELETE。详见
-  `docs/superpowers/specs/2026-10-21-devp-dynamic-domain-gateway-design.md`。
+  `docs/design/specs/2026-10-21-devp-dynamic-domain-gateway-design.md`。
 ```
 
 - [ ] **Step 3: 安装并验收**

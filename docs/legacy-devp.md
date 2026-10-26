@@ -15,7 +15,7 @@
 - `devp selftest`：起一个隔离的 Caddy 实例做端到端自检
 - 路由状态存在 `~/.local/state/devp/` 下的一个 JSON 文件里，用 flock 串行化
 
-设计文档留在 `docs/superpowers/specs/2026-10-21-devp-dynamic-domain-gateway-design.md`。
+设计文档留在 `docs/design/specs/2026-10-21-devp-dynamic-domain-gateway-design.md`。
 
 ## 为什么被 `devproxy` 取代
 

@@ -33,4 +33,4 @@
 
 - [verification-checklist.md](verification-checklist.md) —— 真机验证清单（自动化测试覆盖不到、必须在真机器上跑的行为）
 - [legacy-devp.md](legacy-devp.md) —— 旧脚本 `devp` 为什么消失
-- `superpowers/` —— 建造期的设计规格与决策记录（历史档案，不是当前设计）
+- `design/` —— 建造期的设计规格与决策记录（历史档案，不是当前设计）

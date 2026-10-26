@@ -709,7 +709,7 @@ local-https/                    →  变成 devproxy 的源码仓库
 ├── Justfile                    保留为转发壳，标注 deprecated
 ├── Caddyfile                   迁移后不再被服务使用，保留作历史/参考
 ├── site/                       你的静态站目录（不变）
-└── docs/superpowers/specs/     设计与实施计划
+└── docs/design/specs/     设计与实施计划
 ```
 
 `Justfile` 瘦身为转发壳（`just setup` → `devproxy setup`，`just logs` → `devproxy logs`，`just status` → `devproxy doctor`），不再有第二份实现（D15）。
