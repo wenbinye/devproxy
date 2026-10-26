@@ -1,30 +1,30 @@
-name: 功能建议
-description: 想要 devproxy 多做一件事
+name: Feature request
+description: Something you want devproxy to do
 labels: ["enhancement"]
 body:
   - type: textarea
     id: problem
     attributes:
-      label: 你想解决的问题
-      description: 先说问题，别直接说方案 —— 往往有更简单的解法
+      label: The problem you want solved
+      description: "Start with the problem rather than the solution — there is often a simpler fix"
       render: text
     validations:
       required: true
   - type: textarea
     id: proposal
     attributes:
-      label: 你设想的用法
-      description: 具体到命令长什么样
+      label: How you imagine it working
+      description: "Be concrete about what the command would look like"
       render: text
     validations:
       required: true
   - type: dropdown
     id: scope
     attributes:
-      label: 涉及范围
+      label: Scope
       options:
-        - 只影响本地开发体验
-        - 影响整机（DNS / 证书 / 服务单元）
-        - 不确定
+        - Only affects the local development experience
+        - Affects the whole machine (DNS / certificates / service units)
+        - Not sure
     validations:
       required: true

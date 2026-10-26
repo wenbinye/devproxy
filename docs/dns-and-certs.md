@@ -1,14 +1,14 @@
-# DNS 与证书
+# DNS and certificates
 
 ## DNS
 
-| 平台 | 机制 | dnsmasq 监听 |
+| Platform | Mechanism | dnsmasq listens on |
 |---|---|---|
-| Linux（默认 `resolved`） | 写 `/etc/systemd/resolved.conf.d/devproxy.conf`，其中 `Domains=~.<后缀>` 把该后缀路由到 dnsmasq | `127.0.0.1:5353` |
-| Linux（`system`） | 写 `/etc/dnsmasq.d/devproxy.conf`，由系统 dnsmasq 负责 | `127.0.0.1:5353` |
-| macOS | 写 `/etc/resolver/<后缀>`（每域解析器文件），不动 `/etc/resolv.conf` | `127.0.0.1:5300` |
+| Linux (default `resolved`) | Writes `/etc/systemd/resolved.conf.d/devproxy.conf`, where `Domains=~.<suffix>` routes that suffix to dnsmasq | `127.0.0.1:5353` |
+| Linux (`system`) | Writes `/etc/dnsmasq.d/devproxy.conf`, handled by the system dnsmasq | `127.0.0.1:5353` |
+| macOS | Writes `/etc/resolver/<suffix>` (a per-domain resolver file); does not touch `/etc/resolv.conf` | `127.0.0.1:5300` |
 
-Linux 的 resolved drop-in 内容形如：
+The Linux resolved drop-in looks like:
 
 ```ini
 [Resolve]
@@ -17,46 +17,54 @@ FallbackDNS=1.1.1.1 8.8.8.8
 Domains=~.test
 ```
 
-**注意**：drop-in 里的 `DNS=` 把这台机器的**全局** DNS 指到了用户级 dnsmasq ——
-这是为了不占用 53 端口而做的取舍。落到实际语义上：
+**Note**: the `DNS=` in the drop-in points this machine's **global** DNS at the user-scope
+dnsmasq -- a trade-off made to avoid occupying port 53. In practice this means:
 
-- `DNS=127.0.0.1:5353` 写在 resolved 的**全局段**，决定的是**这台机器全部域名**的
-  解析都先问用户级 dnsmasq，**不只是 `*.test`**；
-- `FallbackDNS=1.1.1.1 8.8.8.8` 是同一份 drop-in 里的**整机兜底**：dnsmasq 起不来、
-  或它答不了的时候，全机解析退化为这两个公共解析器（而不是整机断网）；
-- `Domains=~.<后缀>` 决定 dnsmasq 内部把哪个后缀解析到本机。
+- `DNS=127.0.0.1:5353` in resolved's **global section** decides that **every domain on
+  this machine** asks the user-scope dnsmasq first, **not just `*.test`**;
+- `FallbackDNS=1.1.1.1 8.8.8.8` in the same drop-in is the **machine-wide fallback**: if
+  dnsmasq cannot start or cannot answer, all resolution degrades to these two public
+  resolvers (rather than the whole machine going offline);
+- `Domains=~.<suffix>` decides which suffix dnsmasq resolves to this machine internally.
 
-`Domains=~.<后缀>` 里的后缀**为什么只能是保留顶级域**，见
-[「域名后缀只允许保留顶级域」](configuration.md#域名后缀只允许保留顶级域) ——
-真实公共顶级域会让**整台机器**该后缀的解析都被劫持。
+For why the suffix in `Domains=~.<suffix>` **can only be a reserved top-level domain**,
+see
+[Only reserved top-level domains are allowed as the domain suffix](configuration.md#only-reserved-top-level-domains-are-allowed-as-the-domain-suffix) --
+a real public top-level domain would hijack resolution of that suffix **across the whole
+machine**.
 
-作为配套，工具保证 dnsmasq 的配置里**始终带 `no-resolv`**
-（除非你自己写了 `resolv-file=`）：dnsmasq 因此**不会**把 `/etc/resolv.conf`
-（resolved 机器上是 `127.0.0.53` 桩）当成上游，否则 resolved ↔ dnsmasq 互指，
-普通域名的解析会在全机范围内失败。
+As a companion guarantee, the tool ensures dnsmasq's configuration **always contains
+`no-resolv`** (unless you wrote `resolv-file=` yourself): dnsmasq therefore **does not**
+treat `/etc/resolv.conf` (on a resolved machine, the `127.0.0.53` stub) as an upstream,
+otherwise resolved and dnsmasq would point at each other and ordinary domain resolution
+would fail machine-wide.
 
-dnsmasq 的配置是**增量合并**的：你的 `~/.config/dnsmasq/dnsmasq.conf` 里已有的
-域名条目、`filter-AAAA` 等都会保留，工具只保证 `port=`、`address=/.<后缀>/`、
-`listen-address=127.0.0.1`、`bind-interfaces`、`no-resolv` 与缺失的全局上游存在。
-它**只监听回环地址**，不会在局域网里变成一个开放递归解析器。
-## `doctor` 与 `setup` 各查什么
+dnsmasq's configuration is **merged incrementally**: domain entries, `filter-AAAA`, and the
+like already in your `~/.config/dnsmasq/dnsmasq.conf` are preserved; the tool only ensures
+that `port=`, `address=/.<suffix>/`, `listen-address=127.0.0.1`, `bind-interfaces`,
+`no-resolv`, and the missing global upstreams exist. It **only listens on the loopback
+address**, so it does not become an open recursive resolver on the LAN.
+## What `doctor` and `setup` each check
 
-- **`devproxy doctor` 只做静态检查**：DNS 路由文件在不在、服务在不在跑、CA 在不在、
-  单元是否指向本工具的 Caddyfile 与二进制。**它不做 DNS 解析** —— 不发起任何
-  `resolvectl` / `dig` 查询。
-- **「解析是否真的生效」由 `setup` 的自检阶段负责**：`setup` 执行完变更后会做 verify，
-  真的解析一次 `foo.<后缀>` 并确认结果指向本机。注意这只发生在 **setup 确实做了变更**的时候；
-  `setup` 走「所有组件已就绪」的 no-op 分支时，这次自检**不会**发生。
+- **`devproxy doctor` only does static checks**: whether the DNS route file exists,
+  whether the service is running, whether the CA exists, and whether the unit points at
+  this tool's Caddyfile and binary. **It does not do DNS resolution** -- it issues no
+  `resolvectl` / `dig` query.
+- **"Whether resolution really works" is `setup`'s self-check phase**: after applying
+  changes, `setup` verifies by actually resolving `foo.<suffix>` once and confirming the
+  result points at this machine. Note that this only happens when **setup actually changed
+  something**; when `setup` takes the "all components ready" no-op branch, this self-check
+  **does not** happen.
 
-要立刻确认解析是否生效，可以自己查一次：
+To confirm immediately whether resolution works, query it yourself:
 
 ```bash
 resolvectl query foo.test          # Linux
 dscacheutil -q host -a name foo.test   # macOS
 ```
-## 证书：精确站点块，不是通配符
+## Certificates: exact site blocks, not wildcards
 
-每条路由渲染成**一个精确的站点块**：
+Each route renders as **one exact site block**:
 
 ```caddyfile
 codeup.test {
@@ -65,47 +73,53 @@ codeup.test {
 }
 ```
 
-**没有 `*.test` 通配块，也没有 on-demand TLS。** 由此得到一个明确的安全属性：
+**There is no `*.test` wildcard block and no on-demand TLS.** This yields a clear security
+property:
 
-> **没有注册的域名拿不到任何证书** —— TLS 握手直接失败。
+> **An unregistered domain gets no certificate at all** -- the TLS handshake fails outright.
 
-也就是说，不存在「本机任意进程都能为任意 `.test` 名字骗到一个被系统信任的证书」的情况。
+In other words, there is no "any process on this machine can trick the system into trusting
+a certificate for any `.test` name" situation.
 
-信任 CA 需要装进不同的地方：
+Trusting the CA requires installing it in different places:
 
-| 平台 | 装入位置 | 谁读它 |
+| Platform | Installed into | Who reads it |
 |---|---|---|
-| Linux | 系统信任库（`/usr/local/share/ca-certificates/` + `update-ca-certificates`） | curl / Go / Java 等 |
-| Linux | NSS 库 `~/.pki/nssdb` | **Chrome / Chromium 只认 NSS 库** |
-| macOS | 系统钥匙串 `/Library/Keychains/System.keychain` | Safari / Chrome 都读 |
-| 任意 | **Firefox 不读上面任何一处** | Firefox 只认自己 profile 里的 `cert9.db` |
+| Linux | System trust store (`/usr/local/share/ca-certificates/` + `update-ca-certificates`) | curl / Go / Java, etc. |
+| Linux | NSS DB `~/.pki/nssdb` | **Chrome / Chromium only read the NSS DB** |
+| macOS | System keychain `/Library/Keychains/System.keychain` | Safari / Chrome both read it |
+| Any | **Firefox reads none of the above** | Firefox only reads `cert9.db` in its own profile |
 
-两步是独立的：只装系统信任库，Chrome 照样报 `net::ERR_CERT_AUTHORITY_INVALID`；
-只装 NSS 库，curl 又不认。Linux 上装 NSS 库需要 `certutil`
-（`sudo apt install libnss3-tools`）。
+The two steps are independent: install only the system trust store and Chrome still reports
+`net::ERR_CERT_AUTHORITY_INVALID`; install only the NSS DB and curl still does not accept
+it. Installing the NSS DB on Linux requires `certutil`
+(`sudo apt install libnss3-tools`).
 
-**Linux 上装入 NSS 库后必须完全退出并重启 Chrome** —— 关窗口不算，要从托盘退出进程；
-Chrome 只在启动时读取 NSS 库。
+**On Linux, after installing into the NSS DB you must fully quit and restart Chrome** --
+closing the window is not enough; quit the process from the tray. Chrome only reads the NSS
+DB at startup.
 
-### Firefox 要单独信任（工具不替你装）
+### Firefox needs separate trust (the tool does not install it for you)
 
-**Firefox 有自己的证书库**（`~/.mozilla/firefox/<profile>/cert9.db`）——
-它既不读 NSS 库，也不读系统信任库。因此 `devproxy trust` 跑完之后，
-**Chrome 正常了，Firefox 仍会报证书错误** —— 这不是工具坏了，是 Firefox 的设计。
+**Firefox has its own certificate store** (`~/.mozilla/firefox/<profile>/cert9.db`) -- it
+reads neither the NSS DB nor the system trust store. So after `devproxy trust` finishes,
+**Chrome works but Firefox still reports a certificate error** -- this is not the tool
+being broken; it is Firefox's design.
 
-两种解法（**都要完全退出并重启 Firefox** 才生效）：
+Two solutions (**both require fully quitting and restarting Firefox** to take effect):
 
-1. **手动导入**：Firefox → 设置 → 隐私与安全 → 证书 → 查看证书 → 导入 →
-   选 `<storage>/pki/authorities/local/root.crt`
-   （默认 `~/.local/share/caddy/pki/authorities/local/root.crt`）；
-2. **让 Firefox 也认系统信任库**：在 `about:config` 里打开
-   `security.enterprise_roots.enabled`（布尔值改为 `true`）。
+1. **Import manually**: Firefox → Settings → Privacy & Security → Certificates → View
+   Certificates → Import → choose `<storage>/pki/authorities/local/root.crt`
+   (default `~/.local/share/caddy/pki/authorities/local/root.crt`);
+2. **Make Firefox honor the system trust store too**: in `about:config`, enable
+   `security.enterprise_roots.enabled` (set the boolean to `true`).
 
-`devproxy doctor` 在检测到本机装了 Firefox 时会把这条提示打出来；
-`devproxy trust` 装完之后也会提醒一句。**这是提示，不是缺陷** ——
-Firefox 没装 CA 不影响 doctor 的体检结论（Chrome / curl 侧可能完全正常）。
+When `devproxy doctor` detects Firefox installed on this machine, it prints this hint;
+after `devproxy trust` finishes it also reminds you. **This is a note, not a defect** --
+Firefox not having the CA does not affect doctor's health-check verdict (the Chrome / curl
+side may be perfectly fine).
 
-CA 根证书的路径是 `<storage>/pki/authorities/local/root.crt`
-（默认 `~/.local/share/caddy/pki/authorities/local/root.crt`）。
+The CA root certificate path is `<storage>/pki/authorities/local/root.crt`
+(default `~/.local/share/caddy/pki/authorities/local/root.crt`).
 
 ---

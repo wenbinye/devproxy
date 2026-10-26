@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python ≥ 3.11（`tomllib`）、Typer ≥ 0.12、Rich ≥ 13、pytest ≥ 8、Caddy 2.11.7
 
-**Spec:** `docs/design/specs/2026-10-22-devproxy-local-dev-env-tool-design.md` —— 实施前必读，尤其是 §2.1（S1–S5 实测结论）、§5（路由模型）、§9.1（退出码）
+**Spec:** `docs/superpowers/specs/2026-10-22-devproxy-local-dev-env-tool-design.md` —— 实施前必读，尤其是 §2.1（S1–S5 实测结论）、§5（路由模型）、§9.1（退出码）
 
 **本计划的范围：** 只做核心网关。基础设施自举（`setup`/`doctor`/组件层/平台层）属于 Plan 2；环境迁移与 macOS 属于 Plan 3。本计划假定 **Caddy 已经在跑**，且其主 Caddyfile 由本工具的 `devproxy config init` 生成（Task 3 提供该能力）。
 

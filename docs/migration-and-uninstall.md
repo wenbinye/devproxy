@@ -1,91 +1,110 @@
-# 迁移、回滚与卸载
+# Migration, rollback, and uninstall
 
-## 迁移与回滚
+## Migration and rollback
 
-`devproxy setup` 会检测到**本工具未管理的遗留 caddy 服务**（手工写的
-`caddy.service` + `Caddyfile`）。检测到之后，迁移按「**先备份，再动手**」的顺序执行：
+`devproxy setup` detects a **legacy caddy service that this tool does not manage** (a
+hand-written `caddy.service` + `Caddyfile`). Once detected, migration follows a
+**back up first, then act** order:
 
-1. 把**每一个将被改动的文件**备份到 `~/.local/state/devproxy/backups/<UTC时间戳>/`
-   （目录里另有 `manifest.json` 与人可读的 `MANIFEST.txt`）；
-2. 备份失败 → **一个文件都不改**，迁移中止；
-3. 把遗留 Caddyfile 里的**个人站点块**搬到 `~/.config/devproxy/sites.caddy`
-   （`.test` 相关的块由工具接管、会被丢弃，旧 Caddyfile 本身完整保留在备份里）；
-4. 用 `caddy validate` 校验新配置（校验不过就不换单元）；
-5. 改写服务单元、重启 caddy。
+1. Back up **every file that will be changed** to
+   `~/.local/state/devproxy/backups/<UTC timestamp>/` (the directory also contains
+   `manifest.json` and a human-readable `MANIFEST.txt`);
+2. If the backup fails → **no file is changed**, and the migration aborts;
+3. Move the **personal site blocks** from the legacy Caddyfile into
+   `~/.config/devproxy/sites.caddy` (`.test`-related blocks are taken over by the tool
+   and dropped; the old Caddyfile itself is preserved in full in the backup);
+4. Validate the new config with `caddy validate` (if validation fails, the unit is not
+   swapped);
+5. Rewrite the service unit and restart caddy.
 
-**有两种遗留环境会被工具直接拒绝迁移**，而不是无备份地硬来 —— 两种情况都以退出码 1 中止，
-**一个文件都不改**：
+**Two kinds of legacy environment are refused outright** instead of being forced without
+a backup — both abort with exit code 1 and **change no file**:
 
-- **`ExecStart=` 里解析不出 `--config`** —— 无法确认它用的是哪个 Caddyfile，猜错就会改错文件；
-- **单元使用 `EnvironmentFile=`** —— 变量不在单元里，迁移无法把它们安全带到新单元。
+- **`--config` cannot be parsed out of `ExecStart=`** — there is no way to confirm which
+  Caddyfile it uses, and guessing wrong means editing the wrong file;
+- **The unit uses `EnvironmentFile=`** — the variables are not in the unit, so migration
+  cannot carry them safely into the new unit.
 
-修好单元后重跑 `setup` 即可：`--config` 写成 `--config <路径>` 或 `--config=<路径>` 都认；
-`EnvironmentFile` 里的变量需要内联到 `Environment=`，或直接移除 `EnvironmentFile=`。
+Fix the unit and rerun `setup`: both `--config <path>` and `--config=<path>` are
+accepted; variables from `EnvironmentFile` need to be inlined into `Environment=`, or
+`EnvironmentFile=` must be removed.
 
-回滚：
+Rollback:
 
 ```bash
 devproxy setup --rollback ~/.local/state/devproxy/backups/2026-10-22T12-00-00Z
 ```
 
-回滚会按备份逐个还原文件（原本不存在的文件会被删掉），部分条目失败时会把
-「已还原了哪些」如实打印出来。
+Rollback restores files one by one from the backup (files that did not exist originally
+are deleted); if some entries fail, it prints exactly **which ones were restored**.
 
-非交互环境里做迁移必须加 `--yes`，否则以退出码 4 拒绝（迁移会改写你的单元与配置，
-不能不问一声就动手）。
+In a non-interactive environment, migration requires `--yes`; otherwise it refuses with
+exit code 4 (migration rewrites your unit and config, so it cannot act without asking).
 
 ---
-## 卸载
+## Uninstall
 
 ```bash
-devproxy uninstall --dry-run   # 先看它会做什么，不做任何变更、不需要 sudo
-devproxy uninstall             # 交互式：逐项提问，最后再确认一次
-devproxy uninstall --yes       # 非交互（CI / 脚本）必须加，否则退 4
+devproxy uninstall --dry-run   # see what it would do first; changes nothing and needs no sudo
+devproxy uninstall             # interactive: asks item by item, then confirms once at the end
+devproxy uninstall --yes       # required for non-interactive (CI / scripts), otherwise exits 4
 ```
 
-**交互式会问什么**（这两个选择都有对应的 flag，给了就不再问）：
+**What interactive mode asks** (each of these choices has a corresponding flag; if the
+flag is given, it is not asked again):
 
-1. 「还要删除 Caddy 存储（CA 与证书）、迁移备份与下载的 caddy 二进制吗？」—— 默认**否**
-2. 「要把 CA 从系统信任库卸载吗？」—— 只在 CA 属于「迁移前就存在」时问，默认**否**
-3. 最后确认「即将执行以上卸载步骤，继续？」—— 默认**否**
+1. "Also delete the Caddy storage (CA and certificates), the migration backups, and the
+   downloaded caddy binary?" — default **no**
+2. "Remove the CA from the system trust store?" — asked only when the CA "existed before
+   the migration"; default **no**
+3. Final confirmation "About to run the uninstall steps above. Continue?" — default **no**
 
-答「是」之后工具会**重建并重画计划**，让你看清多出来的是哪几步，再进入最终确认。
+After you answer yes, the tool **rebuilds and redraws the plan** so you can see which
+extra steps appear, then goes to the final confirmation.
 
-**默认会做**（按这个顺序）：
+**What it does by default** (in this order):
 
-1. 收掉由本工具启动、还挂着的子进程（按 `routes.json` 里的 pid + 启动时刻校验，不会误杀）
-2. 停止并移除 `caddy`、`dnsmasq` 两个服务单元
-3. 删除工具写入的 DNS 路由文件，并让解析器重新加载
-4. 卸载 CA —— 但受下面两条规则约束
-5. 删除工具生成的状态文件（`Caddyfile`、`routes.*`、`dns-route.json`、`caddy-storage.json`、`caddy-env.json`、`logs/`）
+1. Tear down child processes started by this tool that are still attached (validated
+   against the pid + start time in `routes.json`; never kills the wrong process)
+2. Stop and remove the `caddy` and `dnsmasq` service units
+3. Delete the DNS route file written by the tool and make the resolver reload
+4. Remove the CA — subject to the two rules below
+5. Delete the state files generated by the tool (`Caddyfile`, `routes.*`, `dns-route.json`,
+   `caddy-storage.json`, `caddy-env.json`, `logs/`)
 
-**默认保留**（不删）：
+**Kept by default** (not deleted):
 
-| 保留 | 原因 |
+| Kept | Reason |
 |---|---|
-| `sites.caddy` | 你的个人站点 |
-| `config.toml` | 你的配置 |
-| `~/.local/share/caddy` | CA 与全部证书 —— 你自己另起的 caddy 可能也在用 |
-| `~/.local/bin/caddy` | 可能是你自己装的 |
-| `~/.config/dnsmasq/dnsmasq.conf` | 是**增量合并**的，原本就有。有改动前的备份就从最新备份还原，没有就原样保留并提示 |
-| `backups/` | 回滚的唯一依据 |
-| `loginctl enable-linger` | 整机级设置，你别的 user 服务可能依赖它 |
+| `sites.caddy` | Your personal sites |
+| `config.toml` | Your configuration |
+| `~/.local/share/caddy` | The CA and all certificates — another caddy you run yourself may also use them |
+| `~/.local/bin/caddy` | May be your own install |
+| `~/.config/dnsmasq/dnsmasq.conf` | It is merged **incrementally** and pre-existed. If a pre-change backup exists, restore it from the newest backup; otherwise keep it as-is and say so |
+| `backups/` | The only basis for rollback |
+| `loginctl enable-linger` | A machine-wide setting; your other user services may depend on it |
 
-**CA 的两条规则**：
+**The two CA rules**:
 
-- **按指纹精确匹配**来删，不按昵称 —— 同一台机器上同名不同内容的根证书不会被误删；
-- **迁移来的 CA 默认不卸载**：如果存在 `caddy-storage.json` 留档，说明这个 CA 在本工具接管**之前**就存在、
-  你的站点在用。此时跳过并提示；确实要卸就显式加 `--remove-ca`。
+- **Match by fingerprint exactly**, not by nickname — a root certificate with the same
+  name but different content on the same machine is never deleted by mistake;
+- **A migrated CA is not removed by default**: if a `caddy-storage.json` archive exists,
+  the CA existed **before** this tool took over and your sites use it. In that case skip
+  it and say so; to remove it anyway, pass `--remove-ca` explicitly.
 
-**「连存储一起删」被选中时才额外删除**（交互答「是」，或显式 `--purge`）：
-`~/.local/share/caddy`、`backups/`、`config.caddy_bin_path`。
-注意最后一项默认是 `~/.local/bin/caddy` —— 如果你自己装过 caddy，这一步会把它一起删掉。
+**Only when "delete the storage too" is selected** (answer yes interactively, or pass
+`--purge` explicitly) does it additionally delete: `~/.local/share/caddy`, `backups/`,
+`config.caddy_bin_path`. Note that the last one defaults to `~/.local/bin/caddy` — if you
+installed caddy yourself, this step deletes it too.
 
-**迁移过的机器**：卸载不会自动还原遗留环境。原始 `caddy.service` 与 `Caddyfile` 在
-`backups/<时间戳>/` 里，工具会在结尾把路径打出来；要回到迁移前的状态用
-`devproxy setup --rollback <目录>`。备份默认保留，所以「先卸载、再回滚」也能恢复；
-但 `--purge` 会把备份一起删掉，之后就来不及了。
+**On a machine that was migrated**: uninstall does not restore the legacy environment
+automatically. The original `caddy.service` and `Caddyfile` are in
+`backups/<timestamp>/`, and the tool prints the path at the end; to return to the
+pre-migration state, use `devproxy setup --rollback <dir>`. Backups are kept by default,
+so "uninstall first, roll back later" can also restore; but `--purge` deletes the backups
+too, and after that it is too late.
 
-`uninstall` 是幂等的：已经卸干净之后再跑一次会说「没有可卸载的东西」并成功退出。
+`uninstall` is idempotent: running it again after a clean uninstall prints "Nothing to
+uninstall." and exits successfully.
 
 ---

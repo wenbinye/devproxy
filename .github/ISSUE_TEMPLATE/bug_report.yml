@@ -1,71 +1,74 @@
-name: 报告一个 Bug
-description: devproxy 报错了、行为不对、或者在某台机器上装不起来
+name: Bug report
+description: devproxy errors out, behaves oddly, or will not install on a machine
 labels: ["bug"]
 body:
   - type: markdown
     attributes:
       value: |
-        谢谢反馈！**先看一眼 [排障文档](docs/troubleshooting.md)**，多数问题在那里有答案。
+        Thanks for the report! **Take a look at the
+        [troubleshooting guide](https://github.com/wenbinye/devproxy/blob/main/docs/troubleshooting.md) first** —
+        most problems have an answer there.
 
-        这个工具会改你的系统（装 CA、改 DNS、写服务单元），所以下面几项
-        对定位问题很关键 —— 尤其**完整命令**与**退出码**。
+        This tool changes your system (installs a CA, edits DNS, writes service units),
+        so the fields below are what makes a diagnosis possible — especially the **full
+        command** and the **exit code**.
   - type: input
     id: version
     attributes:
-      label: 版本
-      description: "`devproxy --version` 的输出，或你安装它的方式"
+      label: Version
+      description: "The output of `devproxy --version`, or how you installed it"
       placeholder: "0.1.0 (uv tool install devproxy)"
     validations:
       required: true
   - type: dropdown
     id: os
     attributes:
-      label: 操作系统
+      label: Operating system
       options:
         - Linux
         - macOS
-        - Windows（WSL）
-        - 其他
+        - Windows (WSL)
+        - Other
     validations:
       required: true
   - type: input
     id: command
     attributes:
-      label: 执行的完整命令
-      description: "逐字贴出来（包括 `--` 后面的部分）"
+      label: The full command you ran
+      description: "Paste it verbatim (including everything after `--`)"
       placeholder: "devproxy up web -- sh -c 'npm run dev -- --port $PORT'"
     validations:
       required: true
   - type: input
     id: exit-code
     attributes:
-      label: 退出码
-      description: "终端里 `echo $?` 的结果"
+      label: Exit code
+      description: "The result of `echo $?` in your terminal"
       placeholder: "1"
     validations:
       required: true
   - type: textarea
     id: output
     attributes:
-      label: 完整输出
-      description: "报错与上下文（请**删掉**里面的 token / 密钥 / 内网地址）"
+      label: Full output
+      description: "The error and its context (please **remove** tokens, secrets, and internal addresses)"
       render: text
     validations:
       required: true
   - type: textarea
     id: doctor
     attributes:
-      label: "`devproxy doctor` 的输出"
-      description: "体检结果能一次说清环境状态"
+      label: Output of `devproxy doctor`
+      description: "The health check describes the environment in one go"
       render: text
   - type: textarea
     id: reproduce
     attributes:
-      label: 复现步骤
-      description: "从干净状态到出问题的每一步"
+      label: Steps to reproduce
+      description: "Every step from a clean state to the failure"
       render: text
   - type: input
     id: related
     attributes:
-      label: 相关 issue / PR
-      description: 如果有
+      label: Related issues / PRs
+      description: "If any"

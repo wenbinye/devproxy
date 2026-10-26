@@ -1,9 +1,9 @@
 name: CI
 
-# 单元测试是**封闭的**：不碰真实系统、不需要 caddy 二进制。
-# certutil（libnss3-tools）是例外但不是必需：NSS 库的用例要在**真的**
-# NSS 库上跑，缺了 certutil 就整组跳过 —— 不装它测试仍然全绿，
-# 只是那组用例在 CI 上不执行。
+# The unit suite is **hermetic**: it never touches the real system and needs no caddy
+# binary. certutil (libnss3-tools) is the exception, and not even a required one: the
+# NSS tests must run against a **real** NSS DB, and the whole group is skipped without
+# certutil -- the suite still passes, that group just does not run on CI.
 on:
   push:
     branches: [main]
@@ -12,15 +12,16 @@ on:
 
 jobs:
   lint:
-    # 风格与类型：**阻断**。规则集见 pyproject 的 [tool.ruff] / [tool.mypy]。
-    # 依赖按 uv.lock 装（--locked：锁文件与 pyproject 不一致就直接失败）。
+    # Style and types: **blocking**. The rule set lives in pyproject's
+    # [tool.ruff] / [tool.mypy]. Dependencies come from uv.lock (--locked: fail outright
+    # when the lock file disagrees with pyproject).
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
-      - name: 装依赖（按锁文件）
+      - name: Install dependencies (from the lock file)
         run: uv sync --locked --all-groups
       - name: ruff check
         run: uv run ruff check src/ tests/
@@ -30,8 +31,9 @@ jobs:
         run: uv run mypy
 
   test:
-    # Linux 与 macOS 都要跑：平台层（systemd / launchd、证书信任、
-    # DNS 路由）两端的实现不同，只跑 Linux 会漏掉一整边。
+    # Both Linux and macOS run: the platform layer (systemd / launchd, certificate trust,
+    # the DNS route) is implemented differently on each side, and Linux alone would miss
+    # half of it.
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -43,15 +45,15 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
-      - name: 装 NSS 工具（certutil）
-        # NSS 库判定的用例（tests/test_nss_real_certutil.py）要在真库上跑：
-        # NSS 按 (issuer, serial) 去重这条规则只有真 certutil 才有。
-        # macOS 上没有 libnss3-tools，那组用例会自己跳过。
+      - name: Install the NSS tools (certutil)
+        # The NSS-trust tests (tests/test_nss_real_certutil.py) need a real DB: the rule
+        # that NSS dedupes by (issuer, serial) only exists in the real certutil.
+        # macOS has no libnss3-tools, so that group skips itself there.
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libnss3-tools
-      - name: 装依赖（按锁文件）
+      - name: Install dependencies (from the lock file)
         run: uv sync --locked --all-groups
-      - name: 单元测试
-        # tests/test_integration.py 需要真实的 caddy 二进制与真实网络，
-        # 属于「真机验证」，不进 CI。
+      - name: Unit tests
+        # tests/test_integration.py needs a real caddy binary and real network access, so
+        # it counts as real-machine verification and stays out of CI.
         run: uv run pytest -q --ignore=tests/test_integration.py

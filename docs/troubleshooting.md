@@ -1,40 +1,43 @@
-# 故障排查
+# Troubleshooting
 
-## 常见症状
+## Common symptoms
 
 
-- **`devproxy up` 报「就绪超时」**：应用多半没读 `PORT`。改用 `sh -c '... $PORT ...'`，
-  或用 `--port N` 显式指定端口（此时应用必须自己绑这个端口）。
-- **`up` 报「Caddy 未运行（Admin API 不可达）」**（退出码 3）：先跑 `devproxy setup`，
-  或 `systemctl --user start caddy` / `launchctl kickstart -k system/com.devproxy.caddy`。
-- **`up` 报「主 Caddyfile 不存在」**（退出码 3）：还没 setup，先 `devproxy setup`。
-- **curl 报证书错误 / Chrome 报 `net::ERR_CERT_AUTHORITY_INVALID`**：
-  还没跑 `devproxy trust`，或 CA 是之后才生成的。顺序是：先 `up`（生成 CA）→ 再 `trust`。
-  Chrome 只认 NSS 库，装完必须**完全退出并重启 Chrome**。
-- **`doctor` 说「CA 根证书未被信任（缺少：系统信任库、NSS 库）」**：跑 `devproxy trust`。
-  Linux 上若报缺 `certutil`，先 `sudo apt install libnss3-tools`。
-- **Chrome 正常但 Firefox 仍报证书错误**：Firefox 有自己的证书库
-  （`~/.mozilla/firefox/<profile>/cert9.db`），**不读** NSS 库也不读系统信任库。
-  手动导入 CA，或在 `about:config` 打开 `security.enterprise_roots.enabled`，
-  两种做法都要**完全退出并重启 Firefox**。详见上面「Firefox 要单独信任」一节。
-- **升级后每条命令都报「配置项 domain_suffix 非法」**：新加的顶级域白名单挡住了你原来的
-  `domain_suffix`。看上面「升级提示：既有用户可能突然报错」一节。
-- **`doctor` 说「caddy 版本不符」**：setup 会替换为固定版本，重跑 `devproxy setup`。
-- **改了 `config.toml` 的 `storage` 却没生效**：看上面「storage 留档」一节。
-- **域名解析到别的 IP**：`doctor` 不查解析（它只做静态检查），自己查一次
-  `resolvectl query <name>.test`（macOS 用 `dscacheutil -q host -a name <name>.test`）；
-  确认路由文件在位之后，Linux 上必要时 `sudo systemctl restart systemd-resolved`。
-- **`devproxy logs caddy` 打印了一堆东西但没有退出**：这是预期行为 —— 它是流式跟随，
-  Ctrl-C 退出。
-- **路由残留**（devproxy 被 `kill -9`）：`devproxy ls` 会把不可达的路由标出来，
-  `devproxy down <name>` 清掉。
-- **`devproxy logs dnsmasq`** 看 dnsmasq 的日志；Linux 是 journalctl，macOS 是
-  `~/.local/state/devproxy/logs/dnsmasq.log`。
-- **`devproxy run` 提示「caddy 服务仍在运行，80/443 已被占用」**：先按提示停掉服务
-  （Linux `systemctl --user stop caddy`，macOS `launchctl bootout system/com.devproxy.caddy`），
-  或者用 `--config` 指向一份用别的端口的 Caddyfile。
+- **`devproxy up` reports "ready timeout"**: the app most likely does not read `PORT`. Change it to
+  `sh -c '... $PORT ...'`, or pass `--port N` explicitly (in that case the app must bind that port itself).
+- **`up` reports "Caddy is not running (Admin API unreachable)"** (exit code 3): run `devproxy setup` first,
+  or `systemctl --user start caddy` / `launchctl kickstart -k system/com.devproxy.caddy`.
+- **`up` reports "main Caddyfile not found"** (exit code 3): setup has not run yet; run `devproxy setup` first.
+- **curl reports a certificate error / Chrome reports `net::ERR_CERT_AUTHORITY_INVALID`**:
+  `devproxy trust` has not been run yet, or the CA was generated afterwards. The order is: run `up` first
+  (generates the CA) → then `trust`.
+  Chrome only reads the NSS DB, so after installing you must **fully quit and restart Chrome**.
+- **`doctor` says "CA root certificate is not trusted (missing: system trust store, NSS DB)"**: run `devproxy trust`.
+  On Linux, if it reports `certutil` missing, first run `sudo apt install libnss3-tools`.
+- **Chrome works but Firefox still reports a certificate error**: Firefox has its own certificate store
+  (`~/.mozilla/firefox/<profile>/cert9.db`), which **does not read** the NSS DB or the system trust store.
+  Import the CA manually, or enable `security.enterprise_roots.enabled` in `about:config`;
+  both require **fully quitting and restarting Firefox**. See the "Firefox needs separate trust" section above.
+- **After upgrading, every command reports "invalid config option domain_suffix"**: the newly added top-level
+  domain whitelist rejects your original `domain_suffix`. See the "Upgrade note: existing users may suddenly
+  get errors" section above.
+- **`doctor` says "caddy version mismatch"**: setup will replace it with the pinned version; rerun `devproxy setup`.
+- **Changed `storage` in `config.toml` but it has no effect**: see the "storage archive" section above.
+- **The domain resolves to another IP**: `doctor` does not check resolution (it only does static checks); check
+  once yourself with `resolvectl query <name>.test` (on macOS use `dscacheutil -q host -a name <name>.test`);
+  after confirming the route file is in place, on Linux restart systemd-resolved if needed with
+  `sudo systemctl restart systemd-resolved`.
+- **`devproxy logs caddy` prints a lot but does not exit**: this is expected -- it streams/follows;
+  Ctrl-C exits.
+- **Route residue** (devproxy was `kill -9`ed): `devproxy ls` marks unreachable routes;
+  `devproxy down <name>` clears them.
+- **`devproxy logs dnsmasq`** shows dnsmasq's logs; on Linux it is journalctl, on macOS
+  `~/.local/state/devproxy/logs/dnsmasq.log`.
+- **`devproxy run` says "the caddy service is still running and holds 80/443"**: first stop the service as
+  instructed (Linux `systemctl --user stop caddy`, macOS `launchctl bootout system/com.devproxy.caddy`),
+  or use `--config` to point at a Caddyfile that uses other ports.
 
-真机验证清单见 [verification-checklist.md](verification-checklist.md) ——
-里面列了自动化测试覆盖不到、必须在真实机器上逐条跑的行为。
+For the real-machine verification checklist see [verification-checklist.md](verification-checklist.md) --
+it lists behaviours automated tests cannot cover that must be run item by item on a real machine.
 
 ---

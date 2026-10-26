@@ -1,48 +1,58 @@
-# 行为准则
+# Code of Conduct
 
-## 我们的承诺
+中文版：[CODE_OF_CONDUCT.zh-CN.md](CODE_OF_CONDUCT.zh-CN.md)
 
-为了让参与这个项目的人都能安心贡献，我们承诺：
+## Our pledge
 
-- **营造无骚扰的环境**：不论年龄、体型、残疾、族裔、性别认同与表达、经验水平、
-  国籍、外貌、种族、宗教或性取向，都不受骚扰。
-- **接受多元观点**：欢迎不同的经验、视角与想法。
-- **对不友善的行为零容忍**。
-- **对贡献者负责**：我们承认自己对社区有责任，会用积极的方式回应问题。
+In the interest of fostering an open and welcoming environment, we as contributors and
+maintainers pledge to make participation in our project and our community a
+harassment-free experience for everyone, regardless of age, body size, disability,
+ethnicity, sex characteristics, gender identity and expression, level of experience,
+education, socio-economic status, nationality, personal appearance, race, religion, or
+sexual identity and orientation.
 
-## 我们的标准
+## Our standards
 
-**有助于社区的行为**：
+Examples of behaviour that contributes to a positive environment:
 
-- 使用友善与包容的语言；
-- 尊重不同的观点与经验；
-- 优雅地接受建设性的批评，必要时道歉并改进；
-- 关注对社区最有利的事情；
-- 对其他人的错误保持同理心。
+- Using welcoming and inclusive language
+- Being respectful of differing viewpoints and experiences
+- Gracefully accepting constructive criticism
+- Focusing on what is best for the community
+- Showing empathy towards other community members
 
-**不可接受的行为**：
+Examples of unacceptable behaviour:
 
-- 性化的语言或 imagery、未经意愿的性关注或挑逗；
-- 挑衅、侮辱/贬损的攻击，人身攻击或政治攻击；
-- 公开或私下的骚扰；
-- 未经明确许可，发布他人的私人信息（如物理或电子地址）；
-- 在专业场合被认为不合适的其他行为。
+- The use of sexualized language or imagery and unwelcome sexual attention or advances
+- Trolling, insulting/derogatory comments, and personal or political attacks
+- Public or private harassment
+- Publishing others' private information, such as a physical or electronic address,
+  without explicit permission
+- Other conduct which could reasonably be considered inappropriate in a professional
+  setting
 
-## 责任
+## Our responsibilities
 
-项目维护者有责任为「可接受的行为」标准做出诠释与纠正，并会采取适当的纠正措施
-（警告、封禁、临时或永久驱逐出社区）。
+Project maintainers are responsible for clarifying the standards of acceptable behaviour
+and are expected to take appropriate and fair corrective action in response to any
+instances of unacceptable behaviour (warning, ban, temporary or permanent removal from
+the community).
 
-## 适用范围
+## Scope
 
-本准则适用于项目空间（issue、PR、讨论），以及个人代表项目时的公开场合。
+This Code of Conduct applies within project spaces (issues, PRs, discussions) and in
+public spaces when an individual is representing the project or its community.
 
-## 举报
+## Enforcement
 
-请向项目维护者举报不可接受的行为。**所有投诉都会被审查与调查**。
-维护者有义务尊重投诉者的隐私与安全。
+Instances of abusive, harassing, or otherwise unacceptable behaviour may be reported to
+the project maintainers. **All complaints will be reviewed and investigated** and will
+result in a response that is deemed necessary and appropriate to the circumstances.
+Maintainers are obligated to respect the privacy and security of the reporter of any
+incident.
 
-## 来源
+## Attribution
 
-改编自 [Contributor Covenant](https://www.contributor-covenant.org/) 2.1 版，
-见 <https://www.contributor-covenant.org/version/2/1/code_of_conduct.html>。
+This Code of Conduct is adapted from the [Contributor Covenant](https://www.contributor-covenant.org),
+version 2.1, available at
+<https://www.contributor-covenant.org/version/2/1/code_of_conduct.html>.

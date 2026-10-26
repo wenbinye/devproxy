@@ -1,36 +1,41 @@
-# devproxy 文档
+# devproxy documentation
 
-[README](../README.md) 是快速上手（安装 → 起服务 → 常用命令）；这里是各专题的详细说明。
+The [README](../README.md) is the quick start (install → start a service → everyday
+commands); this directory holds the detailed write-ups per topic.
 
-## 按场景找
+中文文档：[docs/zh-CN/](zh-CN/README.md)
 
-| 你想做的事 | 看哪篇 |
+## Find by scenario
+
+| What you want to do | Read |
 |---|---|
-| 第一次装、第一次跑 | [README](../README.md) |
-| 查某个命令怎么用、退出码是什么 | [commands.md](commands.md) |
-| 把自己的服务挂到域名上 | [apps.md](apps.md) |
-| 域名解析不生效 / 证书报错 | [dns-and-certs.md](dns-and-certs.md) |
-| 改配置（后缀、端口、存储路径） | [configuration.md](configuration.md) |
-| 让全组共享一套域名（`devproxy.toml`） | [project-config.md](project-config.md) |
-| 迁移遗留的 caddy 服务 / 回滚 / 卸载 | [migration-and-uninstall.md](migration-and-uninstall.md) |
-| 容器 / WSL 里没有 systemd | [platforms.md](platforms.md) |
-| 出问题了 | [troubleshooting.md](troubleshooting.md) |
-| 改代码、跑测试 | [development.md](development.md) |
+| Install and run it for the first time | [README](../README.md) |
+| Look up a command, its options, or exit codes | [commands.md](commands.md) |
+| Put my own service behind a domain | [apps.md](apps.md) |
+| DNS does not resolve / the certificate errors out | [dns-and-certs.md](dns-and-certs.md) |
+| Change configuration (suffix, ports, storage path) | [configuration.md](configuration.md) |
+| Share one set of domains with the whole team (`devproxy.toml`) | [project-config.md](project-config.md) |
+| Migrate a legacy caddy setup / roll back / uninstall | [migration-and-uninstall.md](migration-and-uninstall.md) |
+| Containers / WSL, where there is no systemd | [platforms.md](platforms.md) |
+| Something is broken | [troubleshooting.md](troubleshooting.md) |
+| Change the code, run the tests | [development.md](development.md) |
 
-## 全部文档
+## All documents
 
-- [commands.md](commands.md) —— 全部命令、选项、退出码
-- [apps.md](apps.md) —— 应用接入：`expose`、`$PORT` 的两种写法、注意事项
-- [dns-and-certs.md](dns-and-certs.md) —— DNS 路由、证书信任（含 Firefox）、`doctor` 与 `setup` 分工
-- [configuration.md](configuration.md) —— `config.toml` 全部配置项、域名后缀白名单、storage 留档
-- [project-config.md](project-config.md) —— `devproxy.toml`：`init` / `up` / `down` 的声明式工作流
-- [platforms.md](platforms.md) —— 目录与文件、平台差异、没有 systemd 时用 `devproxy run`
-- [migration-and-uninstall.md](migration-and-uninstall.md) —— 迁移与回滚、卸载
-- [troubleshooting.md](troubleshooting.md) —— 故障排查
-- [development.md](development.md) —— 开发与 CI、代码结构、仓库里的历史文件
+- [commands.md](commands.md) — every command, option, and exit code
+- [apps.md](apps.md) — wiring apps up: `expose`, the two ways to use `$PORT`, caveats
+- [dns-and-certs.md](dns-and-certs.md) — the DNS route, certificate trust (including Firefox), `doctor` vs `setup`
+- [configuration.md](configuration.md) — every `config.toml` setting, the domain-suffix allowlist, the storage archive
+- [project-config.md](project-config.md) — `devproxy.toml`: the declarative `up` / `down` workflow
+- [platforms.md](platforms.md) — directories and files, platform differences, `devproxy run` without systemd
+- [migration-and-uninstall.md](migration-and-uninstall.md) — migration and rollback, uninstall
+- [troubleshooting.md](troubleshooting.md) — troubleshooting
+- [development.md](development.md) — development and CI, code structure
 
-## 其它
+## Other
 
-- [verification-checklist.md](verification-checklist.md) —— 真机验证清单（自动化测试覆盖不到、必须在真机器上跑的行为）
-- [legacy-devp.md](legacy-devp.md) —— 旧脚本 `devp` 为什么消失
-- `design/` —— 建造期的设计规格与决策记录（历史档案，不是当前设计）
+- [verification-checklist.md](verification-checklist.md) — real-machine verification checklist
+  (behaviour automated tests cannot cover and that must be run on a real machine)
+- [legacy-devp.md](legacy-devp.md) — why the old `devp` script is gone
+- `superpowers/` — design specs and decision records from the build phase (a historical
+  archive, kept in the language it was written in; not the current design)

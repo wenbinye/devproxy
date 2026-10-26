@@ -1,7 +1,7 @@
 # devproxy
 
 <p align="center">
-  <img src="assets/icon-256.png" width="128" alt="devproxy 图标：多个本地服务汇聚到一把 HTTPS 挂锁，指向 .test 域名">
+  <img src="assets/icon-256.png" width="128" alt="devproxy icon: several local services converging into one HTTPS padlock that points at a .test domain">
 </p>
 
 <p align="center">
@@ -12,101 +12,111 @@
   <img alt="Platform" src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS-lightgrey.svg">
 </p>
 
-本地开发环境一键部署与域名网关。把本地跑起来的服务用 `https://<name>.test` 暴露出去，
-开发者只记域名，不记端口。
+One-command local dev environment and domain gateway. Expose whatever runs on your
+machine as `https://<name>.test` — developers remember domains, not ports.
 
-- 一条命令部署 **Caddy + dnsmasq + DNS 路由 + 证书信任 + 开机自启**（`devproxy setup`）
-- 一条命令把服务挂到域名上（`devproxy up <name> -- CMD...`）
-- 路由表是**文件**（`routes.json`），Caddy 重启后路由仍在，不需要常驻守护进程
+- One command deploys **Caddy + dnsmasq + the DNS route + CA trust + autostart** (`devproxy setup`)
+- One command puts a service behind a domain (`devproxy up <name> -- CMD...`)
+- The route table is a **file** (`routes.json`), so routes survive a Caddy restart with no
+  resident daemon
 
 ---
 
-## ⚠️ 这个工具会修改你的系统
+## ⚠️ This tool changes your system
 
-`devproxy setup` 不是「装个 Python 包就完事」。它会写系统目录、装服务单元、
-改 DNS 解析路径、把自签 CA 装进系统信任库。**请先读完这一节再运行。**
+`devproxy setup` is not "install a Python package and you're done". It writes into system
+directories, installs service units, changes the DNS resolution path, and puts a
+self-signed CA into your system trust store. **Read this section before running it.**
 
-它会改动的东西：
+What it touches:
 
-| 改动 | 位置（Linux） | 位置（macOS） |
+| What | Where (Linux) | Where (macOS) |
 |---|---|---|
-| Caddy 二进制 | `~/.local/bin/caddy`（下载，校验 sha256） | 同左 |
-| Caddy 主配置 | `~/.config/devproxy/Caddyfile` | 同左 |
-| 你的个人站点 | `~/.config/devproxy/sites.caddy`（只 import，不改内容） | 同左 |
-| Caddy 服务单元 | `~/.config/systemd/user/caddy.service`（user scope） | `/Library/LaunchDaemons/com.devproxy.caddy.plist`（**root** LaunchDaemon） |
-| dnsmasq 服务单元 | `~/.config/systemd/user/dnsmasq.service`（user scope） | `~/Library/LaunchAgents/com.devproxy.dnsmasq.plist` |
-| dnsmasq 配置 | 增量合并 `~/.config/dnsmasq/dnsmasq.conf` | 同左 |
-| DNS 路由 | `/etc/systemd/resolved.conf.d/devproxy.conf`（或 `/etc/dnsmasq.d/devproxy.conf`） | `/etc/resolver/test` |
-| CA 根证书 | `/usr/local/share/ca-certificates/devproxy-local.crt` + NSS 库 `~/.pki/nssdb` | 系统钥匙串 `/Library/Keychains/System.keychain` |
-| 开机自启 | `loginctl enable-linger <用户>` | launchd 的 `RunAtLoad` |
+| Caddy binary | `~/.local/bin/caddy` (downloaded, sha256-verified) | same |
+| Main Caddy config | `~/.config/devproxy/Caddyfile` | same |
+| Your personal sites | `~/.config/devproxy/sites.caddy` (imported only, never rewritten) | same |
+| Caddy service unit | `~/.config/systemd/user/caddy.service` (user scope) | `/Library/LaunchDaemons/com.devproxy.caddy.plist` (**root** LaunchDaemon) |
+| dnsmasq service unit | `~/.config/systemd/user/dnsmasq.service` (user scope) | `~/Library/LaunchAgents/com.devproxy.dnsmasq.plist` |
+| dnsmasq config | merged incrementally into `~/.config/dnsmasq/dnsmasq.conf` | same |
+| DNS route | `/etc/systemd/resolved.conf.d/devproxy.conf` (or `/etc/dnsmasq.d/devproxy.conf`) | `/etc/resolver/test` |
+| CA root certificate | `/usr/local/share/ca-certificates/devproxy-local.crt` + NSS DB `~/.pki/nssdb` | system keychain `/Library/Keychains/System.keychain` |
+| Autostart | `loginctl enable-linger <user>` | launchd's `RunAtLoad` |
 
-**DNS 路由的改动是整机范围的（Linux `resolved` 后端）** —— 这一点必须单独说清楚：
+**On the Linux `resolved` backend the DNS change is machine-wide** — this deserves its
+own explanation:
 
-- 写进 drop-in 的 `DNS=127.0.0.1:5353` 落在 resolved 的**全局段**，它决定的是
-  **这台机器全部域名**的解析先去问用户级的 dnsmasq，**不只是 `*.test`**；
-- 同一份 drop-in 里还有一行 `FallbackDNS=1.1.1.1 8.8.8.8`，它是**整机兜底**：
-  dnsmasq 起不来的时候，全机解析退化为这两个公共解析器；
-- `Domains=~.<后缀>` 才是把 `<后缀>` 交给 dnsmasq 的那一条 —— 但在
-  `DNS=` 已经把全机解析指向 dnsmasq 的前提下，它只决定 dnsmasq 内部怎么分流。
+- The `DNS=127.0.0.1:5353` written into the drop-in lands in resolved's **global**
+  section, so it decides that **every domain on this machine** asks the user-scope
+  dnsmasq first — **not just `*.test`**;
+- The same drop-in carries `FallbackDNS=1.1.1.1 8.8.8.8`, which is a **machine-wide
+  fallback**: if dnsmasq is not up, all resolution degrades to those two public resolvers;
+- `Domains=~.<suffix>` is the line that hands `<suffix>` to dnsmasq — but given that
+  `DNS=` already points all resolution at dnsmasq, it only decides how dnsmasq splits
+  traffic internally.
 
-`devproxy setup` 在打印变更清单时会把这段整机作用域**单独打一遍**（表格里放不下，
-也放不下重点），你点确认之前就会看到。macOS 的每域解析器文件与 Linux `system`
-后端的 dnsmasq 片段**只影响本后缀**，不涉及整机。
+`devproxy setup` prints this machine-wide scope **again on its own** when showing the
+change plan (it neither fits nor reads well in the table), so you see it before you
+confirm. macOS's per-domain resolver file and the Linux `system` backend's dnsmasq
+snippet affect **only this suffix**, never the whole machine.
 
-**需要 sudo 的步骤**：
+**Steps that need sudo:**
 
 - Linux
-  - `sudo setcap cap_net_bind_service=+ep ~/.local/bin/caddy`（让 caddy 能绑 80/443）
-  - `sudo` 写 `/etc/systemd/resolved.conf.d/devproxy.conf`，并 `sudo systemctl restart systemd-resolved`
-  - `sudo loginctl enable-linger <用户>`（开机自启，未登录也跑）
-  - `sudo` 把 CA 装进系统信任库并执行 `update-ca-certificates`
+  - `sudo setcap cap_net_bind_service=+ep ~/.local/bin/caddy` (lets caddy bind 80/443)
+  - `sudo` writes `/etc/systemd/resolved.conf.d/devproxy.conf`, then `sudo systemctl restart systemd-resolved`
+  - `sudo loginctl enable-linger <user>` (autostart even when not logged in)
+  - `sudo` installs the CA into the system trust store and runs `update-ca-certificates`
 - macOS
-  - `sudo` 写 `/Library/LaunchDaemons/com.devproxy.caddy.plist`（macOS 没有 `setcap`，
-    绑 80/443 只能靠 root 跑的 LaunchDaemon）
-  - `sudo` 写 `/etc/resolver/test`
+  - `sudo` writes `/Library/LaunchDaemons/com.devproxy.caddy.plist` (macOS has no
+    `setcap`; binding 80/443 requires a root LaunchDaemon)
+  - `sudo` writes `/etc/resolver/test`
   - `sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain <ca>`
 
-**不需要 sudo 的步骤**：下载 caddy、写 `~/.config/devproxy/` 与 `~/.local/state/devproxy/`、
-合并 dnsmasq 配置、安装 systemd user 单元 / LaunchAgent、装 NSS 库（需要 `certutil`）。
+**Steps that need no sudo**: downloading caddy; writing `~/.config/devproxy/` and
+`~/.local/state/devproxy/`; merging the dnsmasq config; installing the systemd user unit /
+LaunchAgent; installing into the NSS DB (needs `certutil`).
 
-非交互环境（CI、脚本）里跑 `setup` / `trust`，如果需要提权，必须显式加 `--yes`，
-否则工具会以退出码 4 拒绝执行（不会默默跳过，也不会默默提权）。
+In a non-interactive environment (CI, scripts), `setup` / `trust` need an explicit
+`--yes` whenever a step requires elevation; otherwise the tool refuses with exit code 4
+(it neither skips silently nor elevates silently).
 
-**想撤回？** 见下面的[「卸载」](docs/migration-and-uninstall.md#卸载)：`devproxy uninstall --dry-run` 可以先看它会做什么。
+**Want to undo it?** See [Uninstall](docs/migration-and-uninstall.md#uninstall):
+`devproxy uninstall --dry-run` shows what it would do.
 
 ---
 
-## 安装
+## Install
 
-**当前项目尚未发布到 PyPI**，从源码仓库安装。最省事的一条 —— `uv` 会自己建隔离环境、
-装好入口：
+**The project is not on PyPI yet**, so install from the source repository. The easiest
+line — `uv` builds an isolated environment and wires up the entry point for you:
 
 ```bash
 uv tool install 'git+https://github.com/wenbinye/devproxy.git'
 ```
 
-想钉住分支 / 标签 / 提交：
+To pin a branch / tag / commit:
 
 ```bash
 uv tool install 'git+https://github.com/wenbinye/devproxy.git@main'
-uv tool install 'git+https://github.com/wenbinye/devproxy.git@<tag 或 commit>'
+uv tool install 'git+https://github.com/wenbinye/devproxy.git@<tag or commit>'
 ```
 
-不写 `@…` 时取仓库的默认分支（当前是 `main`）。升级到远端最新：
+Without `@...` you get the repository's default branch (currently `main`). Upgrade to
+the latest upstream:
 
 ```bash
 uv tool upgrade devproxy
 ```
 
-没装 `uv` 的话：macOS `brew install uv`，Linux 用官方安装脚本。
+No `uv`? macOS: `brew install uv`; Linux: the official install script.
 
-不想用 uv，也可以用 pipx（同样的 git 地址）：
+If you would rather not use uv, pipx works with the same git URL:
 
 ```bash
 pipx install 'git+https://github.com/wenbinye/devproxy.git'
 ```
 
-**本地开发**用可编辑安装 —— 改源码即生效，不必每次重装：
+**Local development** uses an editable install — source changes take effect immediately:
 
 ```bash
 git clone https://github.com/wenbinye/devproxy.git
@@ -114,113 +124,118 @@ cd devproxy
 uv tool install -e .
 ```
 
-发布到 PyPI 之后，`uv tool install devproxy` 才可用 —— 在那之前这条命令会失败
-（PyPI 上没有这个包，且这个名字将来可能与别的包冲突）。
+`uv tool install devproxy` only works once the package is on PyPI — until then that
+command fails (there is no such package on PyPI, and the name may collide later).
 
-依赖：Python ≥ 3.11（uv 会自动挑一个合适的解释器），运行时依赖只有 `typer` 与 `rich`。
+Requirements: Python ≥ 3.11 (uv picks a suitable interpreter), with only `typer` and
+`rich` at runtime.
 
-安装后 `devproxy --help` 应能列出全部子命令。命令落在 `~/.local/bin/devproxy`；
-如果 `command -v devproxy` 找不到，跑一次 `uv tool update-shell`，或把 `~/.local/bin` 加进 `PATH`。
+After installing, `devproxy --help` should list every subcommand. The command lands in
+`~/.local/bin/devproxy`; if `command -v devproxy` cannot find it, run `uv tool update-shell`
+once, or add `~/.local/bin` to `PATH`.
 
 ---
 
-## 快速开始
+## Quick start
 
 ```bash
-devproxy setup     # 部署 Caddy + dnsmasq + DNS 路由 + 服务自启（幂等，可重复执行）
-devproxy doctor    # 体检（静态检查，不做 DNS 解析）：缺什么给什么修复命令
+devproxy setup     # deploy Caddy + dnsmasq + the DNS route + autostart (idempotent)
+devproxy doctor    # health check (static, no DNS lookups): missing pieces come with a fix
 ```
 
-`setup` 之后：
+After `setup`:
 
 ```bash
-# 启动一个服务并注册 https://codeup.test
+# Start a service and register https://codeup.test
 devproxy up codeup -- sh -c 'npx vite --port $PORT --host 127.0.0.1'
 
-# 给已经在跑的服务开域名（不启动它）
+# Give an already-running service a domain (without starting it)
 devproxy expose console --port 3000
 
-devproxy ls                 # 路由清单（含可达性）
-devproxy down codeup        # 注销路由（子进程也一并收掉）
-devproxy logs caddy         # 跟随日志（Ctrl-C 退出，不会自己结束）
+devproxy ls                 # route list (with reachability)
+devproxy down codeup        # unregister the route (its child process goes too)
+devproxy logs caddy         # follow logs (Ctrl-C exits; the command never ends on its own)
 
-# 项目里有一份 devproxy.toml（提交进仓库、全组共享）时：
-devproxy up               # 按声明同步路由
+# When the project has a devproxy.toml (committed, shared by the team):
+devproxy up               # reconcile the routes with the declarations
 ```
 
-### CA 根证书是在第一条路由注册之后才存在的
+### The CA root certificate only exists after the first route is registered
 
-Caddy 的内部 CA **在第一次加载 `tls internal` 站点时**才生成 —— 也就是**第一条路由被注册时**
-（`devproxy up` 或 `devproxy expose` 都算）。所以在一台干净的机器上：
+Caddy's internal CA is generated **the first time it loads a `tls internal` site** — that
+is, **when the first route is registered** (`devproxy up` and `devproxy expose` both
+count). So on a clean machine:
 
-1. `devproxy setup` 成功，但此时系统里**还没有 CA 根证书**（`setup` 结束时会把这条提示打出来）；
-2. 第一次注册路由（`devproxy up <name> -- ...` 或 `devproxy expose <name> --port N`）之后，
-   Caddy 才生成 CA；
-3. **这时还需要跑一次 `devproxy trust`**，curl / Chrome 才会信任它。
+1. `devproxy setup` succeeds, but there is **no CA root certificate** in the system yet
+   (`setup` prints a note about this at the end);
+2. Caddy generates the CA when the first route is registered
+   (`devproxy up <name> -- ...` or `devproxy expose <name> --port N`);
+3. **You still need to run `devproxy trust` once** before curl / Chrome will trust it.
 
-`devproxy doctor` 在 CA 尚未生成时显示「尚无 CA 根证书（将在首条路由注册时由 Caddy 生成）」，
-这是正常状态，不是故障。
-
----
-
-## 命令
-
-| 命令 | 说明 |
-|---|---|
-| `devproxy setup` | 部署本地开发环境（幂等，可重复执行） |
-| `devproxy setup --rollback <备份目录>` | 按备份目录回滚（见「迁移与回滚」） |
-| `devproxy doctor` | 体检所有前置条件（静态检查：文件在位、服务在跑、证书已装、单元指向本工具），缺什么给什么修复命令 |
-| `devproxy up <name> [--port N] [--ready-timeout S] -- CMD...` | 分配端口、启动命令、注册 `https://<name>.test` |
-| `devproxy expose <name> --port N` | 给已在运行的服务开域名，注册后立即返回，路由常驻（上游暂时无响应时只告警，路由照样注册） |
-| `devproxy down <name>` | 注销路由；若该路由的子进程还在，一并收掉 |
-| `devproxy ls` / `devproxy ps` | 列出所有已注册路由（含可达性），按应用名升序 |
-| `devproxy logs [caddy\|dnsmasq\|<路由名>]` | 跟随日志：服务本身（默认 `caddy`）或 sync 起的应用 |
-| `devproxy logs <路由名> --edit` | 用 `$EDITOR` 打开该路由的日志文件（未设时依次找 `vim` / `vi` / `nano`；`--list` 看有哪些、连完整路径） |
-| `devproxy trust` | 单独安装 CA 根证书（系统信任库 + NSS 库 / 系统钥匙串） |
-| `devproxy config` | 显示当前生效配置与渲染出的路由片段 |
-| `devproxy selftest` | 隔离 Caddy 实例端到端自检 |
-| `devproxy uninstall` | 卸载：停服务、移除单元、DNS 路由与（可选）CA。默认保守保留你的配置、个人站点、Caddy 存储与备份 |
-| `devproxy up` | 在项目里：按 `devproxy.toml` 应用**全部**声明（compose 的 `up -d`） |
-| `devproxy down` | 在项目里：停掉本项目声明的**所有**应用；带路由名则只停那一条 |
-| `devproxy run` | **前台**托管 Caddy（不装服务、不留状态，Ctrl-C 退出）。没有 systemd 的环境（容器 / WSL）用它替代服务 |
-| `devproxy init` | 在项目里生成 `devproxy.toml`（路由名取目录名，启动命令按项目类型猜或用 `--command` / `--from` 指定） |
-| `devproxy --install-completion` | 装 shell 补全：命令、选项，以及 `logs` / `down` 里的**路由名**（bash / zsh / fish / powershell） |
-
-常用选项与各命令的全部选项：见 [docs/commands.md](docs/commands.md)。
-
+Until the CA exists, `devproxy doctor` reports "no CA root certificate yet (Caddy
+creates it when the first route is registered)" — that is a normal state, not a fault.
 
 ---
 
-## 文档
+## Commands
 
-详细说明拆在 [docs/](docs/) 下，按需查阅：
-
-| 文档 | 内容 |
+| Command | What it does |
 |---|---|
-| [docs/commands.md](docs/commands.md) | 全部命令、选项、退出码 |
-| [docs/apps.md](docs/apps.md) | 应用接入：`expose`、`$PORT` 的两种写法、注意事项 |
-| [docs/dns-and-certs.md](docs/dns-and-certs.md) | DNS 路由、证书信任（含 Firefox）、`doctor` 与 `setup` 分工 |
-| [docs/configuration.md](docs/configuration.md) | `config.toml` 全部配置项、域名后缀白名单、storage 留档 |
-| [docs/project-config.md](docs/project-config.md) | `devproxy.toml`：`up` / `down` 的声明式工作流 |
-| [docs/platforms.md](docs/platforms.md) | 目录与文件、平台差异、没有 systemd 时用 `devproxy run` |
-| [docs/migration-and-uninstall.md](docs/migration-and-uninstall.md) | 迁移与回滚、卸载 |
-| [docs/troubleshooting.md](docs/troubleshooting.md) | 故障排查 |
-| [docs/development.md](docs/development.md) | 开发与 CI、代码结构 |
+| `devproxy setup` | Deploy the local dev environment (idempotent) |
+| `devproxy setup --rollback <backup dir>` | Roll back from a backup directory (see "Migration and rollback") |
+| `devproxy doctor` | Check every precondition (static: files present, services running, certificate installed, unit pointing at this tool); missing pieces come with a fix |
+| `devproxy up <name> [--port N] [--ready-timeout S] -- CMD...` | Allocate a port, start the command, register `https://<name>.test` |
+| `devproxy expose <name> --port N` | Give an already-running service a domain; returns immediately, the route persists (an unresponsive upstream only warns, the route is still registered) |
+| `devproxy down <name>` | Unregister a route; if its child process is still alive it is stopped too |
+| `devproxy ls` / `devproxy ps` | List every registered route (with reachability), sorted by app name |
+| `devproxy logs [caddy\|dnsmasq\|<route name>]` | Follow logs: a service (default `caddy`) or an app started by up |
+| `devproxy logs <route name> --edit` | Open the route's log file with `$EDITOR` (falls back to `vim` / `vi` / `nano`; `--list` shows what exists plus full paths) |
+| `devproxy trust` | Install the CA root certificate on its own (system store + NSS DB / system keychain) |
+| `devproxy config` | Show the effective configuration and the rendered route snippet |
+| `devproxy selftest` | End-to-end self-check against an isolated Caddy instance |
+| `devproxy uninstall` | Uninstall: stop services, remove units, the DNS route, and (optionally) the CA. Conservative by default: your config, personal sites, Caddy storage, and backups stay |
+| `devproxy up` | In a project: apply **every** declaration in `devproxy.toml` (compose's `up -d`) |
+| `devproxy down` | In a project: stop **every** app it declares; with a route name, only that one |
+| `devproxy run` | Supervise Caddy in the **foreground** (installs no service, keeps no state; Ctrl-C exits). For environments without systemd (containers / WSL) |
+| `devproxy init` | Generate a `devproxy.toml` in the project (route name from the directory, start command guessed from the project type or given with `--command` / `--from`) |
+| `devproxy --install-completion` | Install shell completion: commands, options, and the **route names** in `logs` / `down` (bash / zsh / fish / powershell) |
 
-按场景找文档：[docs/README.md](docs/README.md)。
-真机验证清单：[docs/verification-checklist.md](docs/verification-checklist.md)。
+Every option of every command: see [docs/commands.md](docs/commands.md).
 
 ---
 
-## 参与
+## Documentation
 
-| 文件 | 什么时候看 |
+The details live under [docs/](docs/), pick what you need:
+
+| Document | Contents |
 |---|---|
-| [CONTRIBUTING.md](CONTRIBUTING.md) | 提 PR 之前：开发环境、检查清单、代码风格 |
-| [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | 参与社区的行为准则 |
-| [SECURITY.md](SECURITY.md) | 报安全问题（**不要**开公开 issue）；以及这个工具会改你系统的边界 |
-| [CHANGELOG.md](CHANGELOG.md) | 每个版本的用户可见变化 |
+| [docs/commands.md](docs/commands.md) | Every command, option, and exit code |
+| [docs/apps.md](docs/apps.md) | Wiring apps up: `expose`, the two ways to use `$PORT`, caveats |
+| [docs/dns-and-certs.md](docs/dns-and-certs.md) | The DNS route, certificate trust (including Firefox), `doctor` vs `setup` |
+| [docs/configuration.md](docs/configuration.md) | Every `config.toml` setting, the domain-suffix allowlist, the storage archive |
+| [docs/project-config.md](docs/project-config.md) | `devproxy.toml`: the declarative `up` / `down` workflow |
+| [docs/platforms.md](docs/platforms.md) | Directories and files, platform differences, `devproxy run` without systemd |
+| [docs/migration-and-uninstall.md](docs/migration-and-uninstall.md) | Migration and rollback, uninstall |
+| [docs/troubleshooting.md](docs/troubleshooting.md) | Troubleshooting |
+| [docs/development.md](docs/development.md) | Development and CI, code structure |
 
-## 许可
+Find documents by scenario: [docs/README.md](docs/README.md).
+Real-machine verification checklist: [docs/verification-checklist.md](docs/verification-checklist.md).
+
+**Docs in Chinese:** [README.zh-CN.md](README.zh-CN.md) and [docs/zh-CN/](docs/zh-CN/).
+
+---
+
+## Contributing
+
+| File | When to read it |
+|---|---|
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Before a PR: dev environment, checklist, code style |
+| [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | The community's code of conduct |
+| [SECURITY.md](SECURITY.md) | Reporting security issues (**do not** open a public issue); also the boundaries of what this tool changes |
+| [CHANGELOG.md](CHANGELOG.md) | User-visible changes in every release |
+
+## License
 
 [MIT](LICENSE) © 2026 Ye Wenbin

@@ -1,196 +1,184 @@
-# 命令详解
+# Command reference
 
-devproxy 的全部命令。命名对齐 **docker compose**：项目级操作用 `up` / `down` / `ps` / `logs`，
-机器级操作（装环境、体检、信任证书）保留自己的名字。
+All devproxy commands. The naming follows **docker compose**: project-level operations use `up` / `down` / `ps` / `logs`, while machine-level operations (installing the environment, health checks, trusting certificates) keep their own names.
 
-| 命令 | 一句话 |
+| Command | One-liner |
 |---|---|
-| [`up`](#up) | 起服务：单个应用（前台）或本项目全部（后台） |
-| [`expose`](#expose) | 给**已在运行**的服务开域名 |
-| [`down`](#down) | 停服务：单条路由或本项目全部 |
-| [`ls` / `ps`](#ls--ps) | 列出路由 |
-| [`logs`](#logs) | 跟随日志 |
-| [`init`](#init) | 生成 `devproxy.toml` |
-| [`setup`](#setup) | 部署本地开发环境（Caddy、dnsmasq、DNS、证书、自启） |
-| [`doctor`](#doctor) | 体检：缺什么给什么修复命令 |
-| [`trust`](#trust) | 把 CA 根证书装进系统信任库与 NSS 库 |
-| [`config`](#config) | 显示当前生效配置 |
-| [`selftest`](#selftest) | 隔离实例端到端自检 |
-| [`run`](#run) | 前台托管 Caddy（没有 systemd 的环境用） |
-| [`uninstall`](#uninstall) | 卸载：停服务、移除单元、DNS 路由与（可选）CA |
-| [`--install-completion`](#shell-补全) | 装 shell 补全（bash / zsh / fish / powershell） |
+| [`up`](#up) | Start services: a single app (foreground) or everything this project declares (background) |
+| [`expose`](#expose) | Give an **already-running** service a domain |
+| [`down`](#down) | Stop services: a single route or everything this project declares |
+| [`ls` / `ps`](#ls--ps) | List routes |
+| [`logs`](#logs) | Follow logs |
+| [`init`](#init) | Generate `devproxy.toml` |
+| [`setup`](#setup) | Deploy the local dev environment (Caddy, dnsmasq, DNS, certificates, autostart) |
+| [`doctor`](#doctor) | Health check: report whatever is missing and the command that fixes it |
+| [`trust`](#trust) | Install the CA root certificate into the system trust store and the NSS DB |
+| [`config`](#config) | Show the configuration currently in effect |
+| [`selftest`](#selftest) | End-to-end self-check against an isolated instance |
+| [`run`](#run) | Supervise Caddy in the foreground (for environments without systemd) |
+| [`uninstall`](#uninstall) | Uninstall: stop services, remove units, the DNS route, and (optionally) the CA |
+| [`--install-completion`](#shell-completion) | Install shell completion (bash / zsh / fish / powershell) |
 
 ---
 
 ## up
 
-起服务。**带路由名** = 前台起单个应用（命令跟着应用跑，Ctrl-C 一起结束）；
-**不带路由名** = 在项目目录里应用 `devproxy.toml` 的全部声明（后台跑，compose 的 `up -d`）。
+Start services. **With a route name** = start a single app in the foreground (the command runs alongside the app, and Ctrl-C ends both); **without a route name** = apply every declaration in `devproxy.toml` in the project directory (runs in the background, compose's `up -d`).
 
 ```bash
 devproxy up web -- sh -c 'npx vite --port $PORT --host 127.0.0.1'
-devproxy up                       # 项目模式：应用 devproxy.toml 的全部声明
+devproxy up                       # project mode: apply every declaration in devproxy.toml
 ```
 
-| 选项 | 说明 |
+| Option | Description |
 |---|---|
-| `<name>` | 路由名，单标签 `[a-z0-9-]`。省略 = 项目模式 |
-| `--port N` | 显式指定端口（默认自动分配）；被占用时直接失败 |
-| `--ready-timeout S` | 就绪等待秒数（默认取 `config.toml` 的 `ready_timeout`） |
-| `--file <路径>` | *[项目模式]* 显式指定 `devproxy.toml`（默认从当前目录向上查找） |
-| `--prune` | *[项目模式]* 移除本文件里已删掉的路由（非交互时须加 `--yes`） |
-| `--yes` | *[项目模式]* 非交互模式，不询问 |
+| `<name>` | Route name, a single label `[a-z0-9-]`. Omit it for project mode |
+| `--port N` | Explicit port (allocated automatically by default); an out-of-range value is a usage error, e.g. `devproxy: invalid port 99999: must be between 1 and 65535`; fails outright if it is already in use |
+| `--ready-timeout S` | Ready timeout in seconds (defaults to `ready_timeout` in `config.toml`) |
+| `--file <path>` | *[project mode]* Explicit `devproxy.toml` (searched upwards from the current directory by default) |
+| `--prune` | *[project mode]* Remove routes deleted from this file (needs `--yes` when non-interactive) |
+| `--yes` | *[project mode]* Non-interactive mode; do not ask |
 
-- `--` 之后的一切**原样**交给子进程，devproxy 不解析（应用自己的 `--port` 才不会被抢走）。
-- 项目模式是**幂等**的：再跑一次，已在跑的跳过，**死掉的应用会被重建**。
-- 端口每次可能不同（自动分配）；域名不变。
-- 详见 [项目级配置](project-config.md)。
+- Everything after `--` is passed to the child process **verbatim**; devproxy does not parse it (so the app's own `--port` is not stolen).
+- Project mode is **idempotent**: run it again and apps that are already running are skipped, while **dead apps are recreated**.
+- The port may differ each time (automatic allocation); the domain does not change.
+- See [Project-level configuration](project-config.md).
 
 ## expose
 
-给**已经在跑**的服务开一个域名（数据库管理台、mock 服务、docker 里的东西……）。
+Give an **already-running** service a domain (a database admin console, a mock service, something in Docker, ...).
 
 ```bash
 devproxy expose datahub --port 9002
-# ✅ https://datahub.test  (上游 127.0.0.1:9002)
+# ✅ https://datahub.test  (upstream 127.0.0.1:9002)
+#    Remove with: devproxy down datahub
 ```
 
-| 选项 | 说明 |
+| Option | Description |
 |---|---|
-| `<name>` | 路由名（必填） |
-| `--port N` | 上游已在监听的端口（必填） |
+| `<name>` | Route name (required) |
+| `--port N` | Port the upstream is already listening on (required) |
 
-- 上游必须是 **`127.0.0.1`**：devproxy 代理到**本机**端口。容器里的 `localhost` 是容器自己。
-- 上游没起也能注册：提示「上游无响应」，但路由照样写进路由表（常驻，等服务起来就通）。
-- 路由是**常驻**的：Caddy 重启、机器重启都还在。要删：`devproxy down <name>`。
+- The upstream must be **`127.0.0.1`**: devproxy proxies to a port on **this machine**. `localhost` inside a container is the container itself.
+- You can register even when the upstream is not running: it prints `⚠️  upstream 127.0.0.1:9002 is not responding right now (the route is registered and will work once it is up)`, but the route is still written to the route table (persistent, and it works as soon as the service comes up).
+- Routes are **persistent**: they survive Caddy restarts and machine reboots. To remove one: `devproxy down <name>`.
 
 ## down
 
-注销路由；子进程还在则一并收掉。**带路由名** = 只停那一条；**不带** = 停掉本项目
-（`devproxy.toml`）声明的所有应用。
+Unregister a route (on success it prints `Unregistered <name>`), taking its child process with it if still running. **With a route name** = stop only that route; **without** = stop every app declared in this project (`devproxy.toml`).
 
 ```bash
-devproxy down web            # 停一条
-devproxy down                # 停本项目全部
+devproxy down web            # stop one route
+devproxy down                # stop everything this project declares
 ```
 
-- 项目外不带名字执行会退 2（不知道该停哪些），并提示用 `devproxy down <名字>`。
-- 手工 `up` 出来的路由**不会**被项目模式的 `down` 碰（只有本文件声明过的才停）。
-- 停了之后 `devproxy up` 一条命令再拉起来。
+- Running it without a name outside a project exits 2 (it does not know what to stop) and tells you to use `devproxy down <name>`.
+- Routes started manually with `up` are **not** touched by project-mode `down` (only routes declared in this file are stopped).
+- After stopping, one `devproxy up` brings them back.
 
 ## ls / ps
 
-列出所有已注册路由（含可达性）。两个名字等价，`ps` 对齐 docker compose。
+List every registered route (including reachability). The two names are equivalent; `ps` follows docker compose.
 
 ```bash
 devproxy ls
 devproxy ps
 ```
 
-- **按应用名升序** —— 路由表是集合，输出稳定可预期（与注册顺序无关）。
+- **Sorted ascending by app name** — the route table is a set, so the output is stable and predictable (independent of registration order). An empty route table prints `(no routes)`.
 
 ## logs
 
-跟随日志：服务本身（`caddy` / `dnsmasq`）或 **sync 起的应用**。
+Follow logs: the service itself (`caddy` / `dnsmasq`) or **a route** (an app started by `up`).
 
 ```bash
-devproxy logs              # 默认跟 caddy
+devproxy logs              # follow caddy by default
 devproxy logs caddy
 devproxy logs dnsmasq
-devproxy logs my-app       # sync 起的应用
-devproxy logs --list       # 列出能跟的目标，不跟随
-devproxy logs my-app -e    # 用 $EDITOR 打开日志文件（= --edit）
+devproxy logs my-app       # an app started by up
+devproxy logs --list       # list the targets that can be followed, without following
+devproxy logs my-app -e    # open the log file with $EDITOR (= --edit)
 ```
 
-| 选项 | 说明 |
+| Option | Description |
 |---|---|
-| `--list` | 列出能跟的目标，不跟随。路由日志**逐条给出完整路径**（不用自己拼） |
-| `--edit` / `-e` | 用 `$EDITOR`（没有就 `$VISUAL`，再没有就依次找 `vim` / `vi` / `nano`）打开该路由的日志文件 |
+| `--list` | List the log targets that can be followed (only this project's when inside one); do not follow. For route logs it gives the **full path of each one** (no need to assemble it yourself) |
+| `--edit` / `-e` | Open that route's log file with `$EDITOR` (falling back to `$VISUAL`, then looking for `vim` / `vi` / `nano` in that order) |
 
-- 只读，不改任何东西；**Ctrl-C 退出**（命令自己不会结束）。
-- 项目目录里裸跑 `devproxy logs` = 跟**本项目全部应用**，多个应用时每行带彩色标签
-  （标签就是应用名）。
-- 路由日志从**末尾**开始跟（不倒历史）；文件被轮转会自动接上。
-- `--edit` 只对**路由日志**有效：服务日志（caddy / dnsmasq）是 journalctl 里的滚动日志，
-  不是文件，编辑器打不开 —— 会明确报错让你改用跟随。
-- `--edit` 与 `--list` 互斥；`EDITOR` / `VISUAL` 都没设且 PATH 里找不到
-  `vim` / `vi` / `nano` 时报错退出 2。
-- 详见 [项目级配置 · 后台进程与日志](project-config.md#后台进程与日志)。
+- Read-only; changes nothing. **Ctrl-C exits** (the command does not end on its own).
+- Running `devproxy logs` bare inside a project directory = follow **every app in this project**; with several apps every line carries a coloured tag (the tag is the app name).
+- Route logs are followed **from the end** (no history replay); if the file is rotated it reattaches automatically.
+- `--edit` only works on **route logs**: service logs (caddy / dnsmasq) are rolling logs in journalctl, not files, so an editor cannot open them — it reports this explicitly and tells you to follow them instead.
+- `--edit` and `--list` are mutually exclusive; if neither `EDITOR` nor `VISUAL` is set and `vim` / `vi` / `nano` cannot be found on `PATH`, it errors and exits 2.
+- See [Project-level configuration · Background processes and logs](project-config.md#background-processes-and-logs).
 
 ## init
 
-在项目里生成 `devproxy.toml`。
+Generate `devproxy.toml` in the project.
 
 ```bash
 devproxy init
 devproxy init --name web --command "npm run dev"
-devproxy init --from my-running-svc   # 从已注册的同名路由导入它的启动命令
+devproxy init --from my-running-svc   # import the start command from an already-registered route with this name
 ```
 
-| 选项 | 说明 |
+| Option | Description |
 |---|---|
-| `--name <名字>` | 路由名（默认取项目目录名） |
-| `--command <命令>` | 启动命令（按 shell 的词法拆，引号和空格都认） |
-| `--from <路由名>` | 从已注册的同名路由导入它的启动命令 |
-| `--force` | 覆盖已存在的 `devproxy.toml` |
+| `--name <name>` | Route name (defaults to the project directory name) |
+| `--command <command>` | Start command (split with shell lexing; quotes and spaces are both honoured) |
+| `--from <route name>` | Import the start command from an already-registered route with this name (the route table is global, so the name must be given) |
+| `--force` | Overwrite an existing `devproxy.toml` |
 
-启动命令的来源优先级：`--command` > `--from` > 按项目类型猜（Node / PHP / Makefile）。
-**没有明确证据就不猜** —— 猜错比不猜更糟。详见
-[项目级配置 · 快速创建](project-config.md#快速创建devproxy-init)。
+The start command comes from, in priority order: `--command` > `--from` > a guess based on the project type (Node / PHP / Makefile). **No clear evidence means no guess** — guessing wrong is worse than not guessing. See [Project-level configuration · Quick start: `devproxy init`](project-config.md#quick-start-devproxy-init).
 
 ## setup
 
-部署本地开发环境：Caddy + dnsmasq + DNS 路由 + 证书信任 + 开机自启。**幂等**，可重复执行。
+Deploy the local dev environment: Caddy + dnsmasq + DNS route + certificate trust + autostart. It is **idempotent** and can be run repeatedly.
 
 ```bash
 devproxy setup
-devproxy setup --yes                 # 非交互（需要提权时必须加）
+devproxy setup --yes                 # non-interactive (required when elevation is needed)
 ```
 
-| 选项 | 说明 |
+| Option | Description |
 |---|---|
-| `--dns-backend auto\|resolved\|system` | 强制 DNS 后端（默认取 `config.toml`） |
-| `--domain-suffix <后缀>` | 临时覆盖域名后缀（会过校验，非法值退 2） |
-| `--no-trust` | 跳过证书信任 |
-| `--yes` | 非交互模式，不询问（需要提权的场景必须加） |
-| `--rollback <目录>` | 从指定备份目录回滚（见 [迁移与回滚](migration-and-uninstall.md)） |
+| `--dns-backend auto\|resolved\|system` | Force the DNS backend (defaults to `config.toml`) |
+| `--domain-suffix <suffix>` | Temporarily override the domain suffix (validated; an invalid value exits 2) |
+| `--no-trust` | Skip CA trust |
+| `--yes` | Non-interactive mode; do not ask (required in scenarios that need elevation) |
+| `--rollback <directory>` | Roll back from the given backup directory (see [Migration and rollback](migration-and-uninstall.md)) |
 
-它会**写系统目录、装服务单元、改 DNS 解析路径、把自签 CA 装进系统信任库** ——
-动手前先读 [README 的警告](../README.md#%EF%B8%8F-这个工具会修改你的系统)。
+It **writes to system directories, installs service units, changes the DNS resolution path, and installs the self-signed CA into the system trust store** — read [the warning in the README](../README.md#%EF%B8%8F-this-tool-changes-your-system) before you start.
 
 ## doctor
 
-体检：检查所有前置条件，缺什么给什么修复命令。
+Health check: verify every precondition and report the command that fixes whatever is missing.
 
 ```bash
 devproxy doctor
 devproxy doctor --dns-backend system
 ```
 
-**只做静态检查**（文件在不在、服务在不在跑、证书装没装、单元指向谁）——
-**不做 DNS 解析**，不发起任何 `resolvectl` / `dig` 查询。全部就绪退 0，否则退 3。
+**Static checks only** (whether the file exists, whether the service is running, whether the certificate is installed, what the unit points at) — **it does not resolve DNS** and issues no `resolvectl` / `dig` queries. When everything is ready (every row reads `✔ ready`) it exits 0; otherwise it exits 3.
 
 ## trust
 
-把 CA 根证书装进系统信任库与 NSS 库（macOS 是系统钥匙串）。
+Install the CA root certificate into the system trust store and the NSS DB (on macOS, the system keychain).
 
 ```bash
 devproxy trust
 devproxy trust --yes
 ```
 
-| 选项 | 说明 |
+| Option | Description |
 |---|---|
-| `--yes` | 非交互模式，不询问（需要提权时必须加） |
+| `--yes` | Non-interactive mode; do not ask (required when elevation is needed) |
 
-**什么时候需要跑**：第一次注册路由后（Caddy 这时才有 CA）。
-**Firefox 不读 NSS 库也不读系统信任库**（默认）—— 需手动导入或开
-`security.enterprise_roots.enabled`，详见
-[DNS 与证书](dns-and-certs.md#证书精确站点块不是通配符)。
+**When you need to run it**: after the first route is registered (that is when Caddy creates the CA). **Firefox reads neither the NSS DB nor the system trust store** (by default) — you must import the certificate manually or enable `security.enterprise_roots.enabled`; see [DNS and certificates](dns-and-certs.md#certificates-exact-site-blocks-not-wildcards).
 
 ## config
 
-显示当前生效配置（含 storage 留档的解析结果）。
+Show the configuration currently in effect (including the result of resolving the storage archive).
 
 ```bash
 devproxy config
@@ -198,8 +186,7 @@ devproxy config
 
 ## selftest
 
-隔离 Caddy 实例做端到端自检：注册 → 转发 → 跳转 → 注销 → 证书策略。
-**不碰生产的 443/2019**，也不会把沙箱 CA 装进宿主信任库。
+Run an end-to-end self-check against an isolated Caddy instance: register → forward → redirect → unregister → certificate policy. **It does not touch the production 443/2019 ports**, and it does not install the sandbox CA into the host trust store.
 
 ```bash
 devproxy selftest
@@ -207,78 +194,68 @@ devproxy selftest
 
 ## run
 
-**前台**托管 Caddy —— 给没有 systemd 的环境（容器、WSL、精简发行版）用。
-那里装不了 user 服务，路由就没人加载。
+Supervise Caddy **in the foreground** — for environments without systemd (containers, WSL, minimal distributions), where a user-scope service cannot be installed and nothing loads the routes.
 
 ```bash
 devproxy run
 devproxy run --config /path/to/Caddyfile
 ```
 
-| 选项 | 说明 |
+| Option | Description |
 |---|---|
-| `--config <路径>` | 要加载的 Caddyfile（默认主 Caddyfile） |
+| `--config <path>` | Caddyfile to load (the main Caddyfile by default) |
 
-- **stdio 直通终端** —— Caddy 日志实时打出来；Ctrl-C 退出。
-- 不装服务、不写任何状态；退出后路由不再被服务（路由表是文件，但得有个 Caddy 进程去加载）。
-- 与 `setup` 互斥：服务在跑时 `run` 会退 3（端口冲突），提示先停服务。
-- 详见 [平台支持与差异](platforms.md#没有-systemd-的环境用-devproxy-run-托管)。
+- **stdio goes straight to the terminal** — Caddy logs are printed in real time; Ctrl-C exits.
+- It installs no service and writes no state; after it exits, the routes are no longer served (the route table is a file, but a Caddy process has to load it).
+- Mutually exclusive with `setup`: while the service is running, `run` exits 3 (port conflict) and tells you to stop the service first.
+- See [Platform support and differences](platforms.md#environments-without-systemd-supervise-with-devproxy-run).
 
 ## uninstall
 
-卸载：停止服务、移除单元、DNS 路由与（可选）CA。
+Uninstall: stop services, remove units, the DNS route, and (optionally) the CA.
 
 ```bash
-devproxy uninstall --dry-run     # 只预览，不做任何变更、不需要 sudo
-devproxy uninstall               # 交互确认后执行
+devproxy uninstall --dry-run     # preview only; changes nothing and needs no sudo
+devproxy uninstall               # execute after interactive confirmation
 ```
 
-| 选项 | 说明 |
+| Option | Description |
 |---|---|
-| `--dry-run` | 只打印将要执行的步骤，不做任何变更、不需要 sudo |
-| `--yes` | 非交互模式，不询问 |
-| `--purge` | 直接删除 Caddy 存储、备份目录与下载的 caddy 二进制（不给就在交互时问） |
-| `--remove-ca` | 直接卸载 CA（不给就在交互时问；迁移来的 CA 默认保留） |
+| `--dry-run` | Only print the steps that would run; change nothing and need no sudo |
+| `--yes` | Non-interactive mode; do not ask |
+| `--purge` | Also delete the Caddy storage, backups, and the downloaded caddy binary (asked interactively when omitted) |
+| `--remove-ca` | Also remove the CA (asked interactively when omitted; a migrated CA is kept by default) |
 
-**默认保守**：只删工具自己的东西（服务、单元、DNS 路由、状态文件），
-保留你的 `sites.caddy`、`config.toml`、Caddy 存储、备份目录、linger。
-详见 [迁移、回滚与卸载](migration-and-uninstall.md)。
+**Conservative by default**: it deletes only the tool's own things (services, units, DNS route, state files), and keeps your `sites.caddy`, `config.toml`, Caddy storage, backup directory, and linger. See [Migration, rollback, and uninstall](migration-and-uninstall.md).
 
-## shell 补全
+## Shell completion
 
 ```bash
-devproxy --install-completion        # 装当前 shell 的补全（bash / zsh / fish / powershell）
-devproxy --show-completion bash      # 只打印脚本，不落盘
+devproxy --install-completion        # install completion for the current shell (bash / zsh / fish / powershell)
+devproxy --show-completion bash      # only print the script; write nothing to disk
 ```
 
-- **命令名与选项**的补全是 Typer/Click 自带的，不用额外配置。
-- bash 装到 `~/.bash_completions/devproxy.sh`，并在 `~/.bashrc` 里加一行 `source`；
-  **要重开一个终端**才生效。
-- **参数值**由 devproxy 自己补：`logs <名字>` 补服务名（`caddy` / `dnsmasq`）与
-  **已注册的路由名**，`down <名字>` 补路由名。
-- 补全是**动态**的 —— 每次按 <TAB> 都会跑一次 devproxy 去读路由表；
-  路由表读不到（还没 setup、文件损坏）就当没有候选，**不会报错**。
-- `up` / `expose` 的名字是**新建**的路由名，不补（补了会让人以为能复用旧名字）。
-- `--` 之后的内容原样交给应用，devproxy 不知道应用有哪些参数，因此不补。
+- Completion for **command names and options** is built into Typer/Click; no extra configuration is needed.
+- On bash it installs to `~/.bash_completions/devproxy.sh` and adds a `source` line to `~/.bashrc`; **you must open a new terminal** for it to take effect.
+- **Argument values** are completed by devproxy itself: `logs <name>` completes service names (`caddy` / `dnsmasq`) and **registered route names**; `down <name>` completes route names.
+- Completion is **dynamic** — every `<TAB>` runs devproxy once to read the route table. If the route table cannot be read (not set up yet, corrupt file), it treats that as no candidates and **does not error**.
+- The names for `up` / `expose` are **new** route names and are not completed (completing them would make people think old names can be reused).
+- Everything after `--` is passed to the app verbatim; devproxy does not know the app's arguments, so it does not complete them.
 
 ---
 
-## 退出码
+## Exit codes
 
-| 码 | 含义 |
+| Code | Meaning |
 |---|---|
-| 0 | 成功 |
-| 1 | 运行失败（子进程退出、reload 失败、路由表损坏、迁移被拒绝、`up` 发现路由与声明冲突、`run` 的 Caddy 配置校验失败……） |
-| 2 | 参数错误（非法路由名 / 非法端口、缺少 `--`、未知日志服务名、`logs --edit` 缺目标或找不到任何编辑器、非法 `dns_backend`、非法 `--domain-suffix`、`up` 的配置文件缺失或非法、`run --config` 指定的文件不存在） |
-| 3 | 前置条件不满足（Caddy 未运行、主 Caddyfile 不存在、`doctor` 体检不通过） |
-| 4 | 需要提权但当前非交互（未加 `--yes`），**或用户在确认提示上选择了「否」** |
+| 0 | Success |
+| 1 | Runtime failure (child process exited, reload failed, corrupt route table, migration rejected, `up` found a route that conflicts with a declaration, `run`'s Caddy config validation failed, ...) |
+| 2 | Usage error (invalid route name / invalid port, missing `--`, unknown log service name, `logs --edit` with no target or no editor found, invalid `dns_backend`, invalid `--domain-suffix`, `up`'s config file missing or invalid, the file given to `run --config` does not exist) |
+| 3 | Precondition unmet (Caddy is not running, the main Caddyfile does not exist, `doctor` health check fails) |
+| 4 | Elevation is needed but the session is non-interactive (no `--yes`), **or the user answered "no" at a confirmation prompt** |
 
-注意两个特例：`up` 缺少 `--` 或 `--` 后没有命令，按「参数错误」退出 **2**；
-`up` 的退出码在命令正常结束时**就是子进程的退出码**。
+Two special cases: if `up` is missing `--`, or there is no command after `--`, it exits **2** as a usage error; when `up`'s command ends normally, its exit code **is the child process's exit code**.
 
-退出码 4 表示「**需要人来拍板，但这次没有人拍**」——要么环境非交互且没加 `--yes`，
-要么用户在确认提示上答了「否」。这两种情况下**工具什么都没改**，终端上也会明确说明。
+Exit code 4 means **"a human needs to make the call, but no human did this time"** — either the environment is non-interactive and `--yes` was not passed, or the user answered "no" at a confirmation prompt. In both cases **the tool changed nothing**, and the terminal says so explicitly.
 
-还有一处不对称容易踩：同一个非法值，写在 `config.toml` 里与用命令行传，退出码不同 ——
-写在 `config.toml` 里属于**配置错误**（退出码 **1**），用 `--domain-suffix` /
-`--dns-backend` 传属于**参数错误**（退出码 **2**）。
+One more asymmetry that is easy to trip over: the same invalid value exits with a different code when written in `config.toml` than when passed on the command line — in `config.toml` it is a **configuration error** (exit code **1**), while passing it via `--domain-suffix` / `--dns-backend` is a **usage error** (exit code **2**).

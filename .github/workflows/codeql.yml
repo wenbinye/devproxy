@@ -1,13 +1,13 @@
 name: CodeQL
 
-# GitHub 的默认代码安全分析：每次推到 main 都扫一遍。
-# 面向使用者的开源项目，这是最省事也最被期待的一道。
+# GitHub's default code security analysis: scan on every push to main.
+# For an open-source project people depend on, this is the cheapest guard there is.
 on:
   push:
     branches: [main]
   pull_request:
   schedule:
-    - cron: "17 3 * * 1" # 每周一 03:17 UTC
+    - cron: "17 3 * * 1" # Mondays 03:17 UTC
   workflow_dispatch:
 
 jobs:

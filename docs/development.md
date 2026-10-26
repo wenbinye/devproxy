@@ -1,95 +1,108 @@
-# 开发与 CI
+# Development and CI
 
 
-单元测试基本上是**封闭的**：不碰真实系统、不需要 caddy 二进制、不需要网络，
-也不会写进你的家目录（`HOME` 在测试里被指向临时目录）。
+The unit tests are essentially **hermetic**: they do not touch the real system, do not
+need the caddy binary, do not need the network, and do not write into your home
+directory (`HOME` points at a temporary directory in tests).
 
-唯一的例外是 NSS 那组用例：它需要用**真实的 `certutil`**（`libnss3-tools`）在临时目录里
-建一个真的 NSS 库，验证「按证书内容判定信任」这类只有真工具才验得了的行为。
-机器上没有 `certutil` 时整组自动跳过，不影响其余用例；CI 因此专门装了 `libnss3-tools`。
+The one exception is the NSS test group: it needs the **real `certutil`**
+(`libnss3-tools`) to create a real NSS DB in a temporary directory, verifying behavior
+such as "decide trust by certificate content" that only the real tool can verify. When
+`certutil` is not on the machine the whole group is skipped automatically and the rest
+are unaffected; CI therefore installs `libnss3-tools` specifically.
 
-开发环境按锁文件装（`uv.lock` 必须提交）：
+Set up the development environment from the lockfile (`uv.lock` must be committed):
 
 ```bash
-uv sync --locked --all-groups          # 装齐（含 dev 依赖）
-uv run pytest -q                       # 单元套件（= just test）
-uv run pytest -q tests/test_integration.py   # 真机集成（需要真实 caddy）
+uv sync --locked --all-groups          # install everything (including dev dependencies)
+uv run pytest -q                       # unit suite (= just test)
+uv run pytest -q tests/test_integration.py   # real-machine integration (needs a real caddy)
 uv run ruff check src/ tests/          # lint
-uv run ruff format --check src/ tests/ # 格式
-uv run mypy                            # 类型（61 个源文件 0 问题）
+uv run ruff format --check src/ tests/ # format
+uv run mypy                            # types (61 source files, 0 issues)
 ```
 
-`just test` / `just lint` / `just fix` / `just sync` 是上面几条的简写。
+`just test` / `just lint` / `just fix` / `just sync` are shorthand for the commands above.
 
-CI 在 `.github/workflows/ci.yml`，两个作业：
+CI lives in `.github/workflows/ci.yml` and has two jobs:
 
-| 作业 | 内容 |
+| Job | Contents |
 |---|---|
-| `lint` | `ruff check` + `ruff format --check` + `mypy`，**阻断** |
-| `test` | Linux 与 **macOS** × Python 3.11 / 3.12 / 3.13 跑单元套件 |
+| `lint` | `ruff check` + `ruff format --check` + `mypy`, **blocking** |
+| `test` | unit suite on Linux and **macOS** × Python 3.11 / 3.12 / 3.13 |
 
-依赖按 `uv sync --locked` 装：锁文件与 `pyproject.toml` 不一致时直接失败
-（typer 0.27 起不再依赖 click，这类变动必须由锁文件挡住）。
+Dependencies are installed with `uv sync --locked`: if the lockfile and `pyproject.toml`
+disagree it fails immediately (typer 0.27 no longer depends on click; such changes must
+be caught by the lockfile).
 
-真机集成测试**不进 CI** —— 它依赖真实 caddy 二进制与真实网络。
+Real-machine integration tests **do not run in CI** — they depend on a real caddy binary
+and a real network.
 
-## 仓库里的历史文件
+## Historical files in the repository
 
-根目录**不再有** `Caddyfile` 与 `caddy.service`：它们曾是**迁移前**的手工配置与手工单元，
-迁移跑过之后现役单元指向 `~/.config/devproxy/Caddyfile`，它们只剩历史价值。
-现在它们躺在 [design/legacy/](design/legacy/)（连同 [design/](design/) 下的建造期
-规格与决策记录）—— 那是**这台机器当时的状态**，不是项目资产。
+The root directory **no longer contains** `Caddyfile` or `caddy.service`: they were the
+hand-written config and hand-written unit from **before the migration**. After the
+migration ran, the live unit points at `~/.config/devproxy/Caddyfile`, so they have only
+historical value. They now live in [superpowers/legacy/](superpowers/legacy/) (together with the
+build-time specs and decision records under [superpowers/](superpowers/)) — that is **the state
+of this machine at the time**, not a project asset.
 
-根目录的 `devp` 脚本**已删除** —— 它是 `devproxy` 的 1.0 前身：直接 PATCH 现役
-Caddy 的 Admin API 注册路由，注册的东西新工具既看不见也删不掉。它的来龙去脉
-记在 [legacy-devp.md](legacy-devp.md)。`Justfile` 里转发到 `uv run devproxy`
-的那部分是兼容壳（跑的是**当前源码**，不是已安装的那份）；`test` / `lint`
-这类配方是仓库自己的开发动作。
-## 代码结构
+The `devp` script at the repository root **has been deleted** — it is the pre-1.0
+predecessor of `devproxy`: it PATCHed the live Caddy Admin API directly to register
+routes, and the new tool could neither see nor delete what it registered. Its story is
+recorded in [legacy-devp.md](legacy-devp.md). The part of the `Justfile` that forwards to
+`uv run devproxy` is a compatibility shell (it runs **the current source**, not the
+installed copy); recipes such as `test` / `lint` are the repository's own development
+actions.
+
+## Code structure
 
 ```
 src/devproxy/
-├── cli/          # 命令层：一命令一文件（up / expose / down / ls / logs / trust /
-│   │             #   config / selftest / setup / doctor / uninstall / sync / run）
-│   ├── _shared.py   # 命令模块的公共接缝（console、退出码、build_context、组件装配）；
-│   │                #   命令经它**在调用时查找**依赖，测试打桩才能生效
-│   ├── _runtime.py  # 退出码常量与 app 入口
-│   ├── _context.py  # 上下文组装（build_context：配置、路由表、Caddy 客户端）
-│   ├── _render.py   # 表格与提示的渲染
-│   ├── _typer.py    # Typer 参数切分组（把 `--` 之后的参数原样交给子命令）
-│   ├── _migrate.py  # 迁移与回滚的命令层编排
-│   └── _worker.py   # 后台 up 工作进程（sync 拉起应用时用它托管子进程）
-├── core/         # 基础设施：config（配置加载与校验）、paths（目录与状态文件）、
-│                 #   backup（迁移备份）、caddy_env（单元环境变量留档）
-├── gateway/      # 运行期网关：routes（路由模型与确定性渲染）、store（事务写入：
-│                 #   flock → 渲染 → validate → 落盘 → reload → 失败回滚）、
-│                 #   runner（up 的子进程监管）、caddy（Admin API）、names（域名与路由名）、
-│                 #   selftest（隔离自检）、project / sync（项目级声明）、
-│                 #   foreground（run 的前台托管）
-├── lifecycle/    # 环境生命周期：setup、doctor、uninstall、
-│                 #   migrate/{caddyfile, legacy, install, rollback}（迁移与回滚）
-├── components/   # 四个可部署组件：caddy / certs / dns / dnsmasq；
-│                 #   base 定义组件协议 —— check() -> Status（永不抛异常）、
-│                 #   plan() -> list[Action]（空 = 无变更）、apply(actions)
-└── platform/     # 平台接缝：base（协议：Platform / Action / Status / ElevatedSession）、
-                  #   linux（systemd + resolved）、macos（launchd + /etc/resolver）、
-                  #   fake（测试假平台，写入一律进沙箱目录）
+├── cli/          # command layer: one command per file (up / expose / down / ls / logs / trust /
+│   │             #   config / selftest / setup / doctor / uninstall / sync / run)
+│   ├── _shared.py   # shared seams for command modules (console, exit codes, build_context, component wiring);
+│   │                #   commands look up dependencies **at call time** through it, so test doubles take effect
+│   ├── _runtime.py  # exit-code constants and the app entry point
+│   ├── _context.py  # context assembly (build_context: config, route table, Caddy client)
+│   ├── _render.py   # rendering of tables and hints
+│   ├── _typer.py    # Typer argument splitting group (passes arguments after `--` verbatim to the subcommand)
+│   ├── _migrate.py  # command-layer orchestration for migration and rollback
+│   └── _worker.py   # background up worker process (sync uses it to supervise child processes when starting apps)
+├── core/         # infrastructure: config (config loading and validation), paths (directories and state files),
+│                 #   backup (migration backups), caddy_env (archive of unit environment variables)
+├── gateway/      # runtime gateway: routes (route model and deterministic rendering), store (transactional writes:
+│                 #   flock → render → validate → write to disk → reload → rollback on failure),
+│                 #   runner (supervision of up's child processes), caddy (Admin API), names (domains and route names),
+│                 #   selftest (isolated self-check), project / sync (project-level declarations),
+│                 #   foreground (run's foreground supervision)
+├── lifecycle/    # environment lifecycle: setup, doctor, uninstall,
+│                 #   migrate/{caddyfile, legacy, install, rollback} (migration and rollback)
+├── components/   # four deployable components: caddy / certs / dns / dnsmasq;
+│                 #   base defines the component protocol — check() -> Status (never raises),
+│                 #   plan() -> list[Action] (empty = no change), apply(actions)
+└── platform/     # platform seams: base (protocol: Platform / Action / Status / ElevatedSession),
+                  #   linux (systemd + resolved), macos (launchd + /etc/resolver),
+                  #   fake (fake platform for tests; all writes go into a sandbox directory)
 ```
 
-依赖方向（每层只依赖它下方的层，没有反向依赖）：
+Dependency direction (each layer depends only on the layers below it; there are no
+reverse dependencies):
 
 ```
 cli → lifecycle / gateway / components → platform / core
 ```
 
-- `core` 不依赖任何内部模块 —— 最底层；
-- `platform` 只依赖 `core`（用它的路径工具）；
-- `components` 依赖 `core` + `platform`，另有一处**函数内**延迟 import
-  `gateway.caddy`（渲染主 Caddyfile 的模板，避开循环依赖）；
-- `lifecycle` 依赖 `core` / `gateway` / `components` / `platform`；
-- `cli` 依赖全部。
+- `core` depends on no internal module — it is the bottom layer;
+- `platform` depends only on `core` (using its path utilities);
+- `components` depend on `core` + `platform`, plus one **function-local** delayed import
+  of `gateway.caddy` (the template that renders the main Caddyfile, avoiding a circular
+  dependency);
+- `lifecycle` depends on `core` / `gateway` / `components` / `platform`;
+- `cli` depends on all of them.
 
-测试是**镜像结构**的：`tests/test_component_certs.py` 对着 `components/certs.py`，
-以此类推；跨层的端到端行为在 `tests/test_integration.py` 与 `devproxy selftest`。
+Tests have a **mirrored structure**: `tests/test_component_certs.py` corresponds to
+`components/certs.py`, and so on; cross-layer end-to-end behavior is covered by
+`tests/test_integration.py` and `devproxy selftest`.
 
 ---

@@ -1,39 +1,51 @@
-# 更新日志
+# Changelog
 
-本文件记录 devproxy 的**用户可见**变化。格式参考
-[Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
-版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
+User-visible changes to devproxy. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version numbers follow
+[Semantic Versioning](https://semver.org/).
 
-> 0.1.0 之前没有正式发布，本文件从 0.1.0 起记。
+> There was no formal release before 0.1.0; this file starts at 0.1.0.
 
-## [未发布]
+中文版：[CHANGELOG.zh-CN.md](CHANGELOG.zh-CN.md)
 
-### 新增
+## [Unreleased]
 
-- `devproxy logs <名字> --edit`（短选项 `-e`）：用 `$EDITOR` 打开日志文件。
-  没设 `EDITOR` / `VISUAL` 时依次探测 `vim` / `vi` / `nano`。
-- `devproxy logs --list` 逐条给出日志文件的**完整路径**（不用自己拼）。
-- `devproxy ls` / `ps` 按**应用名升序**输出 —— 路由表是集合，输出稳定可预期。
-- shell 补全：`devproxy --install-completion`（bash / zsh / fish / powershell），
-  并补上参数值域（`logs` / `down` 补路由名与服务名）。
-- `devproxy uninstall`：停服务、移除单元、删 DNS 路由，可选连 CA 一起卸
-  （`--remove-ca` / `--purge`），默认保守保留你的配置与站点。
-- `devproxy init`：在项目里生成 `devproxy.toml`（PHP / Node / Makefile 项目都能用）。
+### Added
 
-### 变更
+- `devproxy logs <name> --edit` (short option `-e`): open the log file with `$EDITOR`.
+  When neither `EDITOR` nor `VISUAL` is set it probes `vim` / `vi` / `nano` in turn.
+- `devproxy logs --list` prints the **full path** of every log file (no more assembling
+  it by hand).
+- `devproxy ls` / `ps` sort by **app name** — the route table is a set, so the output is
+  now stable and predictable.
+- Shell completion: `devproxy --install-completion` (bash / zsh / fish / powershell), with
+  value completion for `logs` / `down` (route names and service names).
+- `devproxy uninstall`: stop services, remove units, delete the DNS route, optionally the
+  CA too (`--remove-ca` / `--purge`); conservative by default, keeping your config and
+  personal sites.
+- `devproxy init`: generate a `devproxy.toml` in the project (works for PHP / Node /
+  Makefile projects).
 
-- 命令面对齐 **docker compose**：项目级操作统一为 `up` / `down` / `ps` / `logs`，
-  原来的 `sync` / `stop` 并入 `up` / `down`。
-- `devproxy logs` 在项目目录里裸跑 = 跟**本项目全部应用**（多个应用时每行带彩色标签）。
+### Changed
 
-### 修复
+- **The default language is now English**: CLI output, error messages, comments, and
+  documentation are all English. Chinese documentation is still maintained as a full
+  mirror under `docs/zh-CN/` (and `README.zh-CN.md`).
+- The command surface now mirrors **docker compose**: project-level operations are
+  `up` / `down` / `ps` / `logs`; the old `sync` / `stop` were folded into `up` / `down`.
+- Bare `devproxy logs` inside a project follows **every app in the project** (with a
+  coloured tag per line when there are several).
 
-- 站点块补 `X-Forwarded-Port` —— 应用的绝对 URL 不再带动态端口。
-- 子进程调用加超时：`certutil` 之类卡在密码提示上的进程不再无限写盘
-  （曾把 `/home` 撑到 100%）。
-- 域名后缀白名单：阻止把整机解析劫持到非预期后缀（如 `.com`）。
+### Fixed
+
+- Site blocks now carry `X-Forwarded-Port`, so an app's absolute URLs no longer include
+  the dynamic port.
+- Subprocess calls have a timeout: something like `certutil` stuck on a password prompt
+  can no longer write to disk without bound (it once filled `/home` to 100%).
+- Domain-suffix allowlist: prevents hijacking all machine-wide resolution onto an
+  unexpected suffix (such as `.com`).
 
 ## [0.1.0]
 
-- 首个版本：`setup` / `up` / `expose` / `down` / `ls` / `logs` / `trust` /
-  `doctor` / `config` / `selftest`。
+- First version: `setup` / `up` / `expose` / `down` / `ls` / `logs` / `trust` / `doctor` /
+  `config` / `selftest`.

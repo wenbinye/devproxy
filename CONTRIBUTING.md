@@ -1,74 +1,85 @@
-# 贡献指南
+# Contributing
 
-感谢你愿意为 devproxy 花时间。这个工具会**修改使用者的机器**（装 CA 进系统信任库、
-改整机 DNS 解析路径、写服务单元），所以改动要格外克制：**宁可少做，不要做一半**。
+Thanks for spending time on devproxy. This tool **modifies the user's machine** (it
+installs a CA into the system trust store, changes the machine-wide DNS resolution path,
+and writes service units), so changes call for extra restraint: **rather do less than
+half a thing**.
 
-## 开发环境
+中文版：[CONTRIBUTING.zh-CN.md](CONTRIBUTING.zh-CN.md)
 
-项目用 [uv](https://docs.astral.sh/uv/) 管理依赖（锁文件 `uv.lock` 必须提交）。
+## Development environment
+
+Dependencies are managed with [uv](https://docs.astral.sh/uv/) (the `uv.lock` file must
+be committed).
 
 ```bash
-uv sync --locked --all-groups   # 按锁文件装齐（含 dev 依赖）
-uv run pytest -q                # 单元测试（不需要 root，不碰真实系统）
+uv sync --locked --all-groups   # install everything per the lock file (incl. dev deps)
+uv run pytest -q                # unit tests (no root, never touches the real system)
 uv run ruff check src/ tests/   # lint
-uv run ruff format src/ tests/  # 格式化
-uv run mypy                     # 类型检查
+uv run ruff format src/ tests/  # formatting
+uv run mypy                     # type checking
 ```
 
-本地安装成可编辑模式（跑的是当前源码，不是已安装的那份）：
+Install locally in editable mode (runs the current source, not an installed copy):
 
 ```bash
 uv tool install -e .
 ```
 
-## 提交之前
+## Before committing
 
-CI 会跑这四条，本地先跑一遍省得来回：
+CI runs these four; run them locally to save a round trip:
 
-| 检查 | 命令 |
+| Check | Command |
 |---|---|
-| 单元测试 | `uv run pytest -q` |
-| lint | `uv run ruff check src/ tests/` |
-| 格式 | `uv run ruff format --check src/ tests/` |
-| 类型 | `uv run mypy` |
+| Unit tests | `uv run pytest -q` |
+| Lint | `uv run ruff check src/ tests/` |
+| Formatting | `uv run ruff format --check src/ tests/` |
+| Types | `uv run mypy` |
 
-改了行为还要同步：
+When you change behaviour, also update:
 
-- `docs/` 里对应的说明（命令、配置、退出码表）；
-- `CHANGELOG.md` 的「未发布」段；
-- 改了 CLI 就**别改退出码语义** —— `docs/commands.md` 的退出码表是公开契约，
-  外部脚本靠它判断结果。
+- the matching prose under `docs/` (commands, configuration, the exit-code table);
+- the "Unreleased" section of `CHANGELOG.md`;
+- if you touch the CLI, **do not change exit-code semantics** — the exit-code table in
+  `docs/commands.md` is a public contract that external scripts branch on.
 
-## 代码风格
+## Code style
 
-- 命令层**一命令一文件**（`src/devproxy/cli/*.py`），共享逻辑放 `_shared.py`；
-  命令模块经 `from devproxy.cli import _shared as s` **在调用时**查找依赖
-  （`s.build_context(...)`），这样测试对 `_shared.<名字>` 打桩才生效。
-- 注释与 docstring 写中文，说清**为什么**（约束、坑、边界），不复述代码。
-- 领域异常必须映射成可读信息 + 退出码，**绝不让 traceback 漏到终端**。
-- 新增依赖前先问：这个功能能不能用标准库做？
+- One command per file (`src/devproxy/cli/*.py`), with shared logic in `_shared.py`.
+  Command modules look dependencies up **at call time** via
+  `from devproxy.cli import _shared as s` (`s.build_context(...)`), so patching
+  `_shared.<name>` in tests takes effect.
+- Comments and docstrings are in English; they explain **why** (constraints, traps,
+  boundaries) rather than restating the code.
+- Domain exceptions must be mapped to a readable message plus an exit code — **never let
+  a traceback reach the terminal**.
+- Before adding a dependency, ask whether the standard library can do it.
 
-## 提 PR 之前确认
+## Before opening a PR
 
-- [ ] 上面四条检查都过了
-- [ ] 文档同步了
-- [ ] 新行为有测试覆盖；改 bug 的话，**先写能复现的失败测试**
-- [ ] 碰过平台层（`src/devproxy/platform/`）的，说明在 Linux 与 macOS 上分别怎么验的
-- [ ] 碰过真机行为的（装服务、改 `/etc`、动证书），在
-      `docs/verification-checklist.md` 里补一条真机检查项
+- [ ] All four checks above pass
+- [ ] Documentation is updated
+- [ ] New behaviour is covered by tests; for a bug fix, **write the failing test first**
+- [ ] If you touched the platform layer (`src/devproxy/platform/`), say how you verified
+      it on Linux and on macOS
+- [ ] If you touched real-machine behaviour (installing services, editing `/etc`,
+      certificate handling), add an entry to `docs/verification-checklist.md`
 
-## 需要提权的改动
+## Changes that need elevation
 
-`devproxy setup` / `trust` / `uninstall` 会动系统。这类改动要特别注意：
+`devproxy setup` / `trust` / `uninstall` touch the system. Pay extra attention:
 
-- 提权一律走 `sudo -n`（绝不弹密码框），非交互时明确报错退出；
-- 任何写操作前先把「要改什么」打印出来，让用户能拒绝；
-- 失败必须可回滚（`devproxy setup --rollback <目录>`）。
+- elevation always goes through `sudo -n` (never pop a password prompt); fail with a
+  clear message when non-interactive;
+- print what is about to change before writing anything, so the user can decline;
+- failures must be recoverable (`devproxy setup --rollback <dir>`).
 
-## 报告 Bug
+## Reporting bugs
 
-用仓库的 **Bug 模板**（新建 issue 时会弹出来）。最有用的是
-**完整命令 + 退出码 + `devproxy doctor` 的输出** —— 这个工具的报错大量靠退出码
-语义定位（见 `docs/commands.md` 的退出码表）。
+Use the repository's **bug template** (it appears when you open an issue). The most
+useful parts are the **full command, the exit code, and `devproxy doctor` output** — most
+errors in this tool are diagnosed through exit-code semantics (see the exit-code table in
+`docs/commands.md`).
 
-安全问题请看 [SECURITY.md](SECURITY.md)，**不要**开公开 issue。
+For security issues see [SECURITY.md](SECURITY.md); **do not** open a public issue.

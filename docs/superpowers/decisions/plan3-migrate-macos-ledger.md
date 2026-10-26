@@ -1,6 +1,6 @@
-# SDD ledger — plan: docs/design/plans/2026-10-22-devproxy-migrate-and-macos.md
+# SDD ledger — plan: docs/superpowers/plans/2026-10-22-devproxy-migrate-and-macos.md
 
-- 规格（权威）：`docs/design/specs/2026-10-22-devproxy-local-dev-env-tool-design.md`
+- 规格（权威）：`docs/superpowers/specs/2026-10-22-devproxy-local-dev-env-tool-design.md`
 - 前置：Plan 1（核心网关）与 Plan 2（基础设施自举）均已 COMPLETE（HEAD 4e4b89c，422 tests）
 - 工作区：`.superpowers/sdd/2026-10-22-devproxy-migrate-and-macos/`
 - 计划修正提交：（Dnsmasq 后端重启目标，Plan 2 期已修 c3bb4ac）
@@ -26,7 +26,7 @@ Plan 3 Task 15/16 的派发必须携带对应条目；若 Plan 3 结束时仍有
 
 ### 跨计划接口差距（本次扫描的主要发现）
 
-Plan 3 的 `docs/design/plans/2026-10-22-devproxy-migrate-and-macos.md` 写于 Plan 1/2 之前，
+Plan 3 的 `docs/superpowers/plans/2026-10-22-devproxy-migrate-and-macos.md` 写于 Plan 1/2 之前，
 它描述的 `Platform` 协议是 **11 个方法**。当前代码库的协议已累积到 **17 个方法**：
 
 ```

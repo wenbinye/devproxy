@@ -8,9 +8,9 @@
 
 **Tech Stack:** Python ≥ 3.11、Typer ≥ 0.12、Rich ≥ 13、pytest ≥ 8、Caddy 2.11.7、dnsmasq、systemd（user scope）
 
-**Spec:** `docs/design/specs/2026-10-22-devproxy-local-dev-env-tool-design.md` —— 重点看 §6（setup 流程）、§2 D1/D2/D12/D13/D16/D19、§9（错误处理）
+**Spec:** `docs/superpowers/specs/2026-10-22-devproxy-local-dev-env-tool-design.md` —— 重点看 §6（setup 流程）、§2 D1/D2/D12/D13/D16/D19、§9（错误处理）
 
-**前置条件：** Plan 1（`docs/design/plans/2026-10-22-devproxy-core-gateway.md`）已完成并通过测试。本计划在其上叠加基础设施层，不改动 Plan 1 的路由模型。
+**前置条件：** Plan 1（`docs/superpowers/plans/2026-10-22-devproxy-core-gateway.md`）已完成并通过测试。本计划在其上叠加基础设施层，不改动 Plan 1 的路由模型。
 
 ---
 

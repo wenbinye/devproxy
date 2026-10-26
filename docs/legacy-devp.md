@@ -1,68 +1,74 @@
-# 旧脚本 `devp` 的去向
+# What happened to the old `devp` script
 
-`devp` 是 `devproxy` 的 **1.0 前身**：一个单文件 Python 脚本，只做一件事 ——
-把本地跑起来的服务挂到 `https://<name>.test` 上。
+`devp` is the **pre-1.0 predecessor** of `devproxy`: a single-file Python script that did
+exactly one thing — put services running locally behind `https://<name>.test`.
 
-它已于本轮收尾中从仓库删除（连同它的测试 `tests/test_devp.py`）。这份说明
-留在仓库里，是为了让"它为什么不见了"可追溯，而不是无声消失。
+It was deleted from the repository during this round's cleanup (along with its tests
+`tests/test_devp.py`). This note stays in the repository so that "why it is gone" is
+traceable, rather than it disappearing silently.
 
-## `devp` 做过什么
+## What `devp` did
 
-- `devp up <name> -- CMD...`：分配一个空闲端口、启动子进程（独立进程组），
-  通过 Caddy Admin API 把路由插进 `/config/apps/http/servers/srv0/routes`
-- `devp down <name>`：删掉路由，并把子进程组一起收掉
-- `devp ls`：列出已注册的路由
-- `devp selftest`：起一个隔离的 Caddy 实例做端到端自检
-- 路由状态存在 `~/.local/state/devp/` 下的一个 JSON 文件里，用 flock 串行化
+- `devp up <name> -- CMD...`: allocate a free port, start the child process (in its own
+  process group), and insert the route into
+  `/config/apps/http/servers/srv0/routes` through the Caddy Admin API
+- `devp down <name>`: delete the route and tear down the child process group with it
+- `devp ls`: list the registered routes
+- `devp selftest`: start an isolated Caddy instance for an end-to-end self-check
+- Route state lived in a JSON file under `~/.local/state/devp/`, serialized with flock
 
-设计文档留在 `docs/design/specs/2026-10-21-devp-dynamic-domain-gateway-design.md`。
+The design document is at `docs/superpowers/specs/2026-10-21-devp-dynamic-domain-gateway-design.md`.
 
-## 为什么被 `devproxy` 取代
+## Why `devproxy` replaced it
 
-`devp` 直接 PATCH **现役 Caddy** 的 Admin API 配置：
+`devp` PATCHed the Admin API configuration of the **live Caddy** directly:
 
 ```
 PATCH /config/apps/http/servers/srv0/routes
 ```
 
-这带来两个结构性问题：
+This caused two structural problems:
 
-1. **它注册的东西，别的工具看不见也删不掉。** 路由藏在 Caddy 的内存配置里，
-   没有独立的状态文件；`devproxy` 只能看到自己写进 `routes.json` 的路由。
-   两套工具同时用同一台机器的 Caddy，路由就会分裂。
-2. **它不碰系统。** 没有部署、没有 DNS 路由、没有证书信任、没有开机自启 ——
-   这些都得手工来。新工具把这些一次性做完。
+1. **Other tools cannot see or delete what it registered.** Routes hide in Caddy's
+   in-memory config, with no independent state file; `devproxy` can only see the routes
+   it wrote to `routes.json`. When both tools use the same machine's Caddy, routes split
+   into two worlds.
+2. **It does not touch the system.** No deployment, no DNS route, no certificate trust,
+   no autostart — all of that was manual. The new tool does these once and for all.
 
-`devproxy` 用**文件即真相**的方式取代它：路由写在 `~/.local/state/devproxy/routes.json`，
-渲染成 `~/.local/state/devproxy/routes.caddy`，由主 Caddyfile `import`；改动走
-"加锁 → 改表 → 渲染 → 校验 → 落盘 → reload" 的事务，reload 失败会回滚。
+`devproxy` replaces it with **the file as the source of truth**: routes are written to
+`~/.local/state/devproxy/routes.json`, rendered into
+`~/.local/state/devproxy/routes.caddy`, and `import`ed by the main Caddyfile; changes go
+through a "lock → mutate table → render → validate → write to disk → reload" transaction,
+and a failed reload rolls back.
 
-## 迁移到 `devproxy` 之后
+## After migrating to `devproxy`
 
-| 旧命令 | 新命令 |
+| Old command | New command |
 |---|---|
 | `devp up <name> -- CMD...` | `devproxy up <name> -- CMD...` |
 | `devp down <name>` | `devproxy down <name>` |
 | `devp ls` | `devproxy ls` |
 | `devp selftest` | `devproxy selftest` |
 
-命令名与参数语义保持一致，行为上的主要差别：
+Command names and argument semantics stay the same; the main behavioral differences:
 
-- `devproxy up` 的路由会**常驻**在 `routes.json` 里（`devp` 的心跳机制
-  会在上游挂掉时自动注销路由）；
-- `devproxy` 首次注册路由时会让 Caddy 生成内部 CA，需要再跑一次
-  `devproxy trust` 才能让 curl / Chrome 信任；
-- `devproxy` 需要先跑一次 `devproxy setup`（部署 dnsmasq、DNS 路由、
-  证书信任、开机自启）。
+- `devproxy up` routes **persist** in `routes.json` (`devp`'s heartbeat mechanism
+  automatically unregistered a route when the upstream died);
+- on first route registration, `devproxy` makes Caddy generate an internal CA; run
+  `devproxy trust` once more so curl / Chrome trust it;
+- `devproxy` needs `devproxy setup` to run once first (deploy dnsmasq, DNS route,
+  certificate trust, autostart).
 
-旧的 `devp` 状态目录 `~/.local/state/devp/` 可以直接删掉 —— 它不再被读取。
+The old `devp` state directory `~/.local/state/devp/` can be deleted directly — it is no
+longer read.
 
-## 环境侧的收尾（不在仓库范围内）
+## Environment-side cleanup (outside the repository)
 
-仓库里删掉了脚本，但**机器上**还可能留着：
+The script is gone from the repository, but it may still remain **on the machine**:
 
-- `~/.local/bin/devp`（PATH 上的旧副本）
-- 旧 `devp` 往 Caddy 里插的路由（需要手工从 Caddy Admin API 里删掉，
-  或直接跑 `devproxy setup` 让新工具接管整份配置）
+- `~/.local/bin/devp` (the old copy on PATH)
+- routes the old `devp` inserted into Caddy (they must be removed manually from the Caddy
+  Admin API, or just run `devproxy setup` so the new tool takes over the whole config)
 
-这两件事由机器的主人处理。
+These two things are for the machine's owner to handle.

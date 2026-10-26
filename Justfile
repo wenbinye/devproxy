@@ -1,87 +1,88 @@
-# 两类配方，各管一摊：
+# Two kinds of recipes, two different jobs:
 #
-# **一、开发者用的**（test / lint / format / typecheck）—— 这些是仓库自己的
-#     工程动作，不属于 devproxy 命令本身。CI 跑的就是这几条。
+# **1. Developer recipes** (test / lint / fix / sync) -- the repository's own engineering
+#    tasks, not devproxy commands. These are exactly what CI runs.
 #
-# **二、转发给 devproxy 的兼容壳** —— 全部逻辑都在 devproxy 命令里，这里
-#     不做任何实现，只是兼容旧的 `just` 习惯：
-#         just setup   →  devproxy setup
-#         just doctor  →  devproxy doctor
+# **2. A compatibility shell that forwards to devproxy** -- all the logic lives in the
+#    devproxy command; nothing is implemented here. It only keeps the old `just` habits:
+#         just setup   ->  devproxy setup
+#         just doctor  ->  devproxy doctor
 #
-# 注意：转发壳不提供 `up` 目标。just 的 variadic `{{args}}` 确实会把 `--`
-# 原样带过去，但**引号在转发时会被丢掉**（'sh -c "…"' 被拆成一个个独立的词，
-# 交给子进程时语义已经变了）；而定长 recipe 遇到 `--` 会被 just 当成目标名
-# 直接报错（Justfile does not contain recipe '--'）。两种做法都会改变
-# `devproxy up` 的语义，因此请直接执行 `devproxy up <name> -- CMD...`。
+# Note: the forwarding shell deliberately has no `up` target. just's variadic `{{args}}`
+# does pass `--` through, but **quotes are lost in the forward** ('sh -c "..."' is split
+# into separate words, so the child gets different semantics); and a fixed-arity recipe
+# treats `--` as a target name and errors out (Justfile does not contain recipe '--').
+# Either approach would change what `devproxy up` means, so run
+# `devproxy up <name> -- CMD...` directly.
 
-# -- 开发者用的配方 -------------------------------------------------------
+# -- Developer recipes ----------------------------------------------------
 
-# 单元测试（不需要 root，不碰真实系统）
+# Unit tests (no root needed; never touches the real system)
 test:
     uv run pytest -q
 
-# lint（ruff check + 格式检查 + 类型检查）
+# Lint (ruff check + format check + type check)
 lint:
     uv run ruff check src/ tests/
     uv run ruff format --check src/ tests/
     uv run mypy
 
-# 自动修（格式 + 可自动修的 lint 问题）
+# Auto-fix (formatting plus the lint issues that can be fixed automatically)
 fix:
     uv run ruff check --fix src/ tests/
     uv run ruff format src/ tests/
 
-# 按锁文件装齐开发环境
+# Install the development environment from the lock file
 sync:
     uv sync --locked --all-groups
 
-# 默认：显示 devproxy 的帮助
+# Default: show devproxy's help
 default:
     @uv run devproxy --help
 
-# 部署本地开发环境（Caddy + dnsmasq + DNS 路由 + 证书信任 + 自启）
+# Deploy the local dev environment (Caddy + dnsmasq + DNS route + CA trust + autostart)
 setup:
     uv run devproxy setup
 
-# 体检所有前置条件
+# Check every precondition
 doctor:
     uv run devproxy doctor
 
-# 跟随服务日志（默认 caddy）
+# Follow a service log (caddy by default)
 logs service="caddy":
     uv run devproxy logs {{service}}
 
-# 健康检查（等价于 doctor）
+# Health check (the same as doctor)
 status:
     uv run devproxy doctor
 
-# 注销路由
+# Unregister a route
 down name:
     uv run devproxy down {{name}}
 
-# 列出已注册路由
+# List the registered routes
 ls:
     uv run devproxy ls
 
-# 安装 CA 根证书
+# Install the CA root certificate
 trust:
     uv run devproxy trust
 
-# 显示当前生效配置
+# Show the effective configuration
 config:
     uv run devproxy config
 
-# 隔离 Caddy 实例端到端自检
+# End-to-end self-check against an isolated Caddy instance
 selftest:
     uv run devproxy selftest
 
-# 本地开发安装（可编辑）
+# Local development install (editable)
 install:
     uv tool install -e .
 
-# 旧名保留：过去装的是 devp 脚本，现在装的是 devproxy 包
+# Old name kept: the `devp` script used to be installed; now it is the devproxy package
 install-devp: install
 
-# 干净 ubuntu 容器里的端到端验证（验证清单 F10；需要 docker 与网络）
+# End-to-end verification in a clean ubuntu container (checklist F10; needs docker and network)
 verify-clean:
     bash scripts/verify-clean-machine.sh

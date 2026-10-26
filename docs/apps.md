@@ -1,43 +1,48 @@
-# 应用接入
+# Wiring apps up
 
-## 服务已经在跑？给它开域名就行
+## Service already running? Just give it a domain
 
-不是所有服务都由 devproxy 启动 —— 数据库管理台、mock 服务、docker 里的东西，
-往往早就在跑了。这类用 `expose`：
+Not every service is started by devproxy -- database admin consoles, mock services,
+things running in Docker are often already up. For those, use `expose`:
 
 ```bash
 devproxy expose datahub --port 9002
-# ✅ https://datahub.test  (上游 127.0.0.1:9002)
-#    移除: devproxy down datahub
+# ✅ https://datahub.test  (upstream 127.0.0.1:9002)
+#    Remove with: devproxy down datahub
 ```
 
-要点：
+Key points:
 
-- **上游写 `127.0.0.1`**：devproxy 代理到**本机**端口。容器里的 `localhost`
-  是容器自己 —— 那种情况要用宿主 IP 或 `host.docker.internal`；
-- **上游没起也能注册**：会提示「上游无响应」，但路由照样写进 `routes.json`
-  （路由常驻，等服务起来就通）；
-- **路由是常驻的**：Caddy 重启、机器重启都还在（"文件即真相"）；
-- 想让它进版本库共享，写进 `devproxy.toml`（见「项目级配置」一节）：
+- **Write `127.0.0.1` for the upstream**: devproxy proxies to a port on **this machine**.
+  `localhost` inside a container is the container itself -- in that case use the host IP
+  or `host.docker.internal`;
+- **You can register even when the upstream is not running**: it prints "upstream ... is
+  not responding right now", but the route is still written to `routes.json` (routes are
+  persistent; they work once the service is up);
+- **Routes are persistent**: they survive a Caddy restart and a machine reboot
+  ("the file is the source of truth");
+- To put it in the repository and share it, write it into `devproxy.toml` (see
+  [Project-level configuration](project-config.md)):
 
   ```toml
   [[routes]]
   name = "datahub"
-  mode = "expose"     # 不起进程，只给已在跑的服务开域名
+  mode = "expose"     # do not start a process; only give an already-running service a domain
   port = 9002
   ```
-## 两种应用，两种写法
+## Two kinds of app, two ways to write them
 
-**1. 原生读 `PORT` 环境变量的应用**（Next.js / CRA 等）——直接写命令：
+**1. Apps that natively read the `PORT` environment variable** (Next.js / CRA, etc.) --
+just write the command:
 
 ```bash
 devproxy up next-app -- npx next dev
 ```
 
-devproxy 会把分配到的端口放进子进程的 `PORT` 环境变量。
+devproxy puts the allocated port into the child process's `PORT` environment variable.
 
-**2. 需要显式端口参数的应用**（Vite / uvicorn / gunicorn 等）——用 `sh -c` 包一层，
-让 shell 在 devproxy 注入 `PORT` **之后**再展开：
+**2. Apps that need an explicit port argument** (Vite / uvicorn / gunicorn, etc.) -- wrap
+them in `sh -c` so the shell expands `PORT` **after** devproxy injects it:
 
 ```bash
 devproxy up codeup-web -- sh -c 'npx vite --port $PORT --host 127.0.0.1'
@@ -45,22 +50,30 @@ devproxy up codeup-api -- sh -c 'uv run uvicorn app:app --host 127.0.0.1 --port 
 devproxy up codeup-api -- sh -c 'gunicorn app:app --bind 127.0.0.1:$PORT'
 ```
 
-**不要直接写 `--port $PORT`**：devproxy 用 `subprocess.Popen(argv)` 直接执行、**不经过 shell**，
-命令里的 `$PORT` 会被你自己的 shell 提前展开（此时 devproxy 还没分配端口，值是空串），
-应用会收到缺值的参数。用单引号包住 `sh -c` 的脚本即可把展开推迟到子进程启动后。
+**Do not write `--port $PORT` directly**: devproxy executes the command directly with
+`subprocess.Popen(argv)` and **does not go through a shell**, so the `$PORT` in the command
+is expanded by your own shell first (at this point devproxy has not allocated a port yet,
+so the value is an empty string), and the app receives an argument with a missing value.
+Wrapping the `sh -c` script in single quotes defers expansion until after the child
+process starts.
 
-**`--` 是必须的**：`--` 之前是 devproxy 自己的参数（`name`、`--port`、`--ready-timeout`），
-`--` 之后的一切**原样**交给子进程，devproxy 不解析。这样应用自己的 `--port`
-不会被 devproxy 抢走。缺少 `--` 时工具直接报错退出（码 2）。
-## 应用侧的其它注意点
+**`--` is mandatory**: everything before `--` is devproxy's own arguments (`name`, `--port`,
+`--ready-timeout`); everything after `--` is passed to the child process **verbatim**, and
+devproxy does not parse it. This keeps the app's own `--port` from being stolen by devproxy.
+Without `--`, the tool exits with an error (code 2).
+## Other caveats on the app side
 
-- **Host 校验放行**：请求的 Host 头是 `<name>.test`。Vite 需要 `server.allowedHosts`、
-  Django 需要 `ALLOWED_HOSTS` 里加上该域名。
-- **子进程脱离控制终端**：devproxy 以 `start_new_session=True` 启动子进程（独立进程组，
-  便于退出时按组清理孙进程）。代价是子进程**没有控制终端**，依赖 stdin 的交互式启动语义会变；
-  stdout/stderr 仍直透当前终端。
-- **就绪判定**：devproxy 轮询「端口是否可连接」，最多等 `ready_timeout` 秒（默认 60）。
-  超时会提示「应用可能未使用 `$PORT`，可用 `--port` 显式指定」。
-- **同名路由会被替换**：再次 `up` 同一个名字时，旧路由先注销、旧子进程先收掉。
+- **Allow the Host header**: the request's Host header is `<name>.test`. Vite needs
+  `server.allowedHosts`, and Django needs the domain added to `ALLOWED_HOSTS`.
+- **The child process detaches from the controlling terminal**: devproxy starts the child with
+  `start_new_session=True` (its own process group, so descendant processes can be cleaned
+  up by group on exit). The cost is that the child has **no controlling terminal**, so
+  interactive startup semantics that rely on stdin change; stdout/stderr still go straight
+  to the current terminal.
+- **Readiness check**: devproxy polls "is the port connectable", waiting at most
+  `ready_timeout` seconds (default 60). On timeout it reports
+  `ready timeout (<seconds>s) -- the app may not be using $PORT; specify one explicitly with --port`.
+- **A route with the same name is replaced**: running `up` again with the same name first
+  unregisters the old route and then stops the old child process.
 
 ---

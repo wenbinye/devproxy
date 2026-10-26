@@ -1,7 +1,7 @@
 [project]
 name = "devproxy"
 version = "0.1.0"
-description = "本地开发环境一键部署与域名网关"
+description = "One-command local dev environment and domain gateway"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
