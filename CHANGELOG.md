@@ -38,6 +38,12 @@ User-visible changes to devproxy. The format follows
 
 ### Fixed
 
+- **macOS**: `sync` no longer tears down and rebuilds apps that are still running --
+  the liveness check read `/proc`, which macOS does not have, so every live app looked
+  dead.
+- **macOS**: grandchildren of a backgrounded app are cleaned up again. The group
+  cleanup was skipped entirely there (no `WNOWAIT`, so the leader was reaped before
+  the group was signaled), leaving stray processes behind.
 - Site blocks now carry `X-Forwarded-Port`, so an app's absolute URLs no longer include
   the dynamic port.
 - Subprocess calls have a timeout: something like `certutil` stuck on a password prompt

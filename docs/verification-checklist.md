@@ -1,6 +1,6 @@
 # devproxy real-machine verification checklist
 
-Behavior that the automated tests (997 cases) do not cover and that **must be run once on
+Behavior that the automated tests (1084 cases) do not cover and that **must be run once on
 a real machine**. Tick each item before a release; for anything you cannot tick, write
 "not verified + reason".
 
@@ -25,6 +25,11 @@ Conventions:
 - Confirm before running steps that involve sudo.
 - Group A (macOS) needs a **real Mac**; this project's development machine is Linux, so
   most A items have **not been verified on a real machine** to date.
+- Since 2026-10-26 the **unit suite runs in CI on macOS as well** (Linux + macOS x
+  Python 3.11/3.12/3.13). That covers the *code* on macOS -- it is not a substitute
+  for the items below: the suite runs against a fake platform and a fake home
+  directory, so real launchd, a real keychain, a real `/etc/resolver` and a real
+  `/Library/LaunchDaemons` are still untested. See the note at the top of group A.
 
 **Revision history**
 
@@ -32,6 +37,7 @@ Conventions:
 |---|---|
 | 2026-10-24 | Added group F (real-machine checks for new features); marked C1 as fixed at the code level; updated the test count; removed dangling references to a gitignored directory |
 | 2026-10-25 | **F10 complete**: the full chain ran in an ubuntu:24.04 container (no systemd) — install → init → graceful failure of setup → run supervision → sync → trust → `curl https://demo.test` 200 (without -k) → down |
+| 2026-10-26 | The unit suite entered CI on **macOS** and immediately turned up three real platform gaps, all fixed: `app_process_alive` read `/proc` (no such thing on macOS — every live app looked dead, so sync tore down and rebuilt running apps), the process-group cleanup was skipped entirely on macOS (no `WNOWAIT`, so the leader was reaped before the group was signaled and grandchildren survived), and two tests raced the machine's load. The suite is now green on both platforms; the items in group A are still pending -- CI runs against fakes, not a real Mac. |
 
 ---
 
@@ -40,6 +46,13 @@ Conventions:
 > The behavior in this group is implemented and unit-tested in the code (using fake
 > subprocesses to verify "what was called and with which arguments"), but **feedback from
 > the real system** can only be obtained on a Mac. Run each item and record the result.
+>
+> **Since 2026-10-26 the unit suite also runs in CI on macOS** (it is green there). That
+> is not a substitute for the items below: the suite drives a fake platform, a fake home
+> directory and fake processes, so the real launchd / keychain / `/etc/resolver` /
+> `/Library/LaunchDaemons` behaviour is still unverified. What CI *did* find on macOS were
+> three code-level gaps (process liveness probing, process-group cleanup, and two
+> timing-sensitive tests) -- all fixed; the items below are about the system, not the code.
 
 ### A1. launchd plist key semantics and effect
 

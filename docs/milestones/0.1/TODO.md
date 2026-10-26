@@ -109,3 +109,29 @@ Tracks the work items of this milestone. Format:
   - Verification: `tests/test_completion.py` (6 cases driving Click's completion entry point);
     a real-machine simulation of `_DEVPROXY_COMPLETE=complete_bash` covering subcommands /
     options / route names / prefix filtering / the `--` boundary; full suite 1080 passed.
+
+- [x] #5: **macOS 进 CI，并修掉它翻出来的三处平台缺口**（2026-10-26, registered and done by Claude）：
+  - 起因：仓库第一次在 GitHub Actions 上跑，CI 加了 macOS 矩阵 —— 头一天就红了三个用例。
+    查下来是**三处真的平台缺口**，不是测试写错。
+  - **#5-1 `app_process_alive` 硬编码读 `/proc/{pid}`**（`gateway/sync.py`）：macOS 没有
+    /proc，于是**每一个活着的应用都被判成「已死」**，sync 会把还在跑的应用拆了重建。
+    这是 macOS 用户的实际故障，不只是测试问题；在 Linux 上也是错的，只是 /proc 恰好存在
+    把它掩盖了。改用平台无关的 `pid_is_running`（Linux 走 /proc、macOS 走 ps）。
+  - **#5-2 macOS 上进程组清理整组被跳过**（`gateway/runner.py`）：macOS 没有 `WNOWAIT`，
+    `proc.poll()` 会顺手回收 leader，pgid 于是失去保护（pid 可能被复用），代码按
+    「宁可漏杀也不误杀」的原则放弃整组 —— 结果孙子进程留在后台。改成**回收之前先清组**：
+    没有 WNOWAIT 时用 `ps` 看僵尸态（ps 不回收，leader 一直是僵尸，pgid 一直有保护），
+    清完组再回收；退出码在回收之后才读得到，用 `_EXIT_CODE_PENDING` 标记这个
+    「已知退出、码待读」的状态。
+  - **#5-3 两个测试在跟机器的忙闲赛跑**：子进程用 `sleep(0.5)` 撑到「就绪」被看见，
+    慢机器上这半秒根本不够，子进程先退出，run 报 "child exited first"（是机器的忙闲，
+    不是被测行为）。改成**等就绪探针真的连上来再退**（用裸 socket：HTTP server 自己的
+    accept 会把探针的连接抢走）。
+  - 顺带修掉 CI 暴露的**渲染环境假设**：设了 `FORCE_COLOR` 的环境里 typer 给选项名
+    逐字符上样式，把 `--dry-run` 拆成三段，断言恒假（`NO_COLOR` 只去色不去粗体，
+    最后是把 `typer.rich_utils.COLOR_SYSTEM` 置 None 才拿到纯文本）；一条提示文本被
+    Rich 按宽度折行，换个路径长度就折在别处（改成断言行为，不盯折行文本）；
+    `test_sync` 的真 worker 用例断言的文案取决于本机有没有 Caddy（改成环境无关的形状断言）。
+  - 现状：CI 在 Linux 与 macOS × Python 3.11/3.12/3.13 上全绿（2026-10-26）。
+    **但 A 组的真机条目仍然待跑** —— 套件跑在假平台、假家目录、假进程上，
+    真的 launchd / 钥匙串 / `/etc/resolver` 仍然没验过。
