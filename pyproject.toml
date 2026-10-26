@@ -25,11 +25,10 @@ dependencies = [
 ]
 
 [project.urls]
-# 代码托管在阿里云 Codeup；若日后镜像到 GitHub，把这四行改成镜像地址。
-Homepage = "https://codeup.aliyun.com/msy/tools/devproxy"
-Repository = "https://codeup.aliyun.com/msy/tools/devproxy.git"
-Issues = "https://codeup.aliyun.com/msy/tools/devproxy/issues"
-Changelog = "https://codeup.aliyun.com/msy/tools/devproxy/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/wenbinye/devproxy"
+Repository = "https://github.com/wenbinye/devproxy"
+Issues = "https://github.com/wenbinye/devproxy/issues"
+Changelog = "https://github.com/wenbinye/devproxy/blob/main/CHANGELOG.md"
 
 [project.scripts]
 devproxy = "devproxy.cli:main"

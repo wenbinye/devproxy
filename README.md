@@ -5,6 +5,7 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/wenbinye/devproxy/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/wenbinye/devproxy/actions/workflows/ci.yml/badge.svg"></a>
   <a href="https://pypi.org/project/devproxy/"><img alt="PyPI" src="https://img.shields.io/pypi/v/devproxy.svg"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-blue.svg"></a>
   <img alt="Python" src="https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue.svg">
@@ -81,14 +82,14 @@
 装好入口：
 
 ```bash
-uv tool install 'git+ssh://git@codeup.aliyun.com/msy/tools/devproxy.git'
+uv tool install 'git+https://github.com/wenbinye/devproxy.git'
 ```
 
-需要能通过 SSH 访问该仓库（密钥已登记）。想钉住分支 / 标签 / 提交：
+想钉住分支 / 标签 / 提交：
 
 ```bash
-uv tool install 'git+ssh://git@codeup.aliyun.com/msy/tools/devproxy.git@main'
-uv tool install 'git+ssh://git@codeup.aliyun.com/msy/tools/devproxy.git@<commit>'
+uv tool install 'git+https://github.com/wenbinye/devproxy.git@main'
+uv tool install 'git+https://github.com/wenbinye/devproxy.git@<tag 或 commit>'
 ```
 
 不写 `@…` 时取仓库的默认分支（当前是 `main`）。升级到远端最新：
@@ -102,13 +103,13 @@ uv tool upgrade devproxy
 不想用 uv，也可以用 pipx（同样的 git 地址）：
 
 ```bash
-pipx install 'git+ssh://git@codeup.aliyun.com/msy/tools/devproxy.git'
+pipx install 'git+https://github.com/wenbinye/devproxy.git'
 ```
 
 **本地开发**用可编辑安装 —— 改源码即生效，不必每次重装：
 
 ```bash
-git clone git@codeup.aliyun.com:msy/tools/devproxy.git
+git clone https://github.com/wenbinye/devproxy.git
 cd devproxy
 uv tool install -e .
 ```
