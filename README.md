@@ -176,6 +176,7 @@ Caddy 的内部 CA **在第一次加载 `tls internal` 站点时**才生成 —�
 | `devproxy down` | 在项目里：停掉本项目声明的**所有**应用；带路由名则只停那一条 |
 | `devproxy run` | **前台**托管 Caddy（不装服务、不留状态，Ctrl-C 退出）。没有 systemd 的环境（容器 / WSL）用它替代服务 |
 | `devproxy init` | 在项目里生成 `devproxy.toml`（路由名取目录名，启动命令按项目类型猜或用 `--command` / `--from` 指定） |
+| `devproxy --install-completion` | 装 shell 补全：命令、选项，以及 `logs` / `down` 里的**路由名**（bash / zsh / fish / powershell） |
 
 常用选项与各命令的全部选项：见 [docs/commands.md](docs/commands.md)。
 

@@ -9,6 +9,7 @@ from rich.text import Text
 import typer
 
 from devproxy.cli import app
+from devproxy.cli import _completion
 from devproxy.cli._shared import EXIT_FAIL
 from devproxy.cli._shared import EXIT_SUDO
 from devproxy.cli._shared import EXIT_USAGE
@@ -262,7 +263,11 @@ def _print_list(project_names: set[str] | None, project_path: Path | None) -> No
 
 @app.command()
 def logs(
-    service: str = typer.Argument(None, help="caddy|dnsmasq|<路由名>（默认 caddy）"),
+    service: str = typer.Argument(
+        None,
+        help="caddy|dnsmasq|<路由名>（默认 caddy）",
+        autocompletion=_completion.log_targets,
+    ),
     list_all: bool = typer.Option(
         False, "--list", help="列出能跟的日志目标（项目里只列本项目的），不跟随"
     ),

@@ -65,3 +65,21 @@
     与 --list 互斥 / 编辑器非 0 退出码 / 编辑器不存在）；
     `tests/test_platform_linux.py::test_linux_open_in_editor_splits_command_and_streams`；
     全量 1074 passed。
+
+- [x] #4: **bash 补全**（2026-10-26 Ye Wenbin 登记；2026-10-26，Claude 执行）：
+  - 需求：`devproxy` 在 bash 里有 Tab 补全。
+  - **落定**：命令名与选项的补全 Typer/Click **本来就带**（`--install-completion` /
+    `--show-completion`，支持 bash / zsh / fish / powershell），自定义的 `--` 切分组
+    没有破坏它 —— 实测子命令、选项、前缀过滤都正常，`--` 之后不再补（正确）。
+    本次补的是**参数值域**：新增 `src/devproxy/cli/_completion.py`，
+    `logs <名字>` 补服务名 + **已注册路由名**、`down <名字>` 补路由名。
+    候选来源直接读 `routes.json`（不走 `build_context`，也不打日志）——
+    补全每次 <TAB> 都会跑一遍，必须又快又不能炸：读不到路由表就当没有候选，
+    绝不往 stdout 打报错（bash 会把每行输出都当成补全项）。
+    `up` / `expose` 的名字是新建路由名，不补；路径类选项（`--file` / `--config`）
+    靠生成脚本里的 `-o default` 回退到 bash 的文件名补全。
+  - 使用：`devproxy --install-completion`（bash 装到 `~/.bash_completions/devproxy.sh`
+    并在 `~/.bashrc` 加 source，重开终端生效）。
+  - 验证：`tests/test_completion.py`（6 个用例，直接驱动 Click 的 ShellComplete）；
+    真机模拟 `_DEVPROXY_COMPLETE=complete_bash` 验证子命令 / 选项 / 路由名 /
+    前缀过滤 / `--` 边界；全量 1080 passed。

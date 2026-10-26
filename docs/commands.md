@@ -18,6 +18,7 @@ devproxy 的全部命令。命名对齐 **docker compose**：项目级操作用 
 | [`selftest`](#selftest) | 隔离实例端到端自检 |
 | [`run`](#run) | 前台托管 Caddy（没有 systemd 的环境用） |
 | [`uninstall`](#uninstall) | 卸载：停服务、移除单元、DNS 路由与（可选）CA |
+| [`--install-completion`](#shell-补全) | 装 shell 补全（bash / zsh / fish / powershell） |
 
 ---
 
@@ -242,6 +243,23 @@ devproxy uninstall               # 交互确认后执行
 **默认保守**：只删工具自己的东西（服务、单元、DNS 路由、状态文件），
 保留你的 `sites.caddy`、`config.toml`、Caddy 存储、备份目录、linger。
 详见 [迁移、回滚与卸载](migration-and-uninstall.md)。
+
+## shell 补全
+
+```bash
+devproxy --install-completion        # 装当前 shell 的补全（bash / zsh / fish / powershell）
+devproxy --show-completion bash      # 只打印脚本，不落盘
+```
+
+- **命令名与选项**的补全是 Typer/Click 自带的，不用额外配置。
+- bash 装到 `~/.bash_completions/devproxy.sh`，并在 `~/.bashrc` 里加一行 `source`；
+  **要重开一个终端**才生效。
+- **参数值**由 devproxy 自己补：`logs <名字>` 补服务名（`caddy` / `dnsmasq`）与
+  **已注册的路由名**，`down <名字>` 补路由名。
+- 补全是**动态**的 —— 每次按 <TAB> 都会跑一次 devproxy 去读路由表；
+  路由表读不到（还没 setup、文件损坏）就当没有候选，**不会报错**。
+- `up` / `expose` 的名字是**新建**的路由名，不补（补了会让人以为能复用旧名字）。
+- `--` 之后的内容原样交给应用，devproxy 不知道应用有哪些参数，因此不补。
 
 ---
 

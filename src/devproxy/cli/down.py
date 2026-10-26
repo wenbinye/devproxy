@@ -3,6 +3,7 @@ from __future__ import annotations
 import typer
 
 from devproxy.cli import app
+from devproxy.cli import _completion
 from devproxy.cli._shared import EXIT_OK
 from devproxy.cli._shared import EXIT_USAGE
 from devproxy.gateway.names import InvalidNameError
@@ -16,7 +17,9 @@ from devproxy.cli import _shared as s
 @app.command()
 def down(
     name: str = typer.Argument(
-        None, help="路由名。省略 = 停掉本项目（devproxy.toml）声明的所有应用"
+        None,
+        help="路由名。省略 = 停掉本项目（devproxy.toml）声明的所有应用",
+        autocompletion=_completion.route_names,
     ),
 ) -> None:
     """注销路由；子进程还在则一并收掉。不带名字 = 停掉本项目全部应用。"""
