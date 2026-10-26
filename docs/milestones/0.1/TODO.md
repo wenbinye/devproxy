@@ -147,7 +147,12 @@ Tracks the work items of this milestone. Format:
     [docs/verification-checklist.md](../../verification-checklist.md)). Three findings
     worth keeping:
     - **the bundled curl does not trust the keychain** (exit 60) -- the keychain covers
-      Safari/Chrome; for curl the CA has to go into `/etc/ssl/cert.pem`;
+      Safari/Chrome; for curl the CA has to go into `/etc/ssl/cert.pem`.
+      **Corrected in the third round (2026-10-27)**: after `devproxy trust` was run in the
+      Mac's own graphical terminal, the bundled curl gets HTTP 200 on `https://demo.test`
+      (a throwaway self-signed cert still fails with exit 60, so curl really is reading
+      the keychain). The E5 failure was a side effect of the trust flag never having been
+      set -- nothing has to be added to `/etc/ssl/cert.pem`;
     - **the `port 5300` directive in `/etc/resolver/<suffix>` IS honoured** by
       mDNSResponder -- that was the group's biggest open question;
     - **the sudo timestamp cache is per-tty**: it hits within one session but **not across
@@ -158,6 +163,14 @@ Tracks the work items of this milestone. Format:
     interaction was possible`) -- the certificate lands in the keychain, the trust flag does
     not. Making the browser actually trust it requires running `devproxy trust` in the
     Mac's own terminal.
+  - **Third real-machine round (2026-10-27)**: `devproxy trust` was run in the Mac's own
+    graphical terminal, and that closes the loop: `security verify-cert` now exits **0**,
+    `devproxy doctor` reports all four components ready and exits **0**, and the bundled
+    `curl` gets **HTTP 200** on `https://demo.test` (a throwaway self-signed cert still
+    fails with exit 60, so curl really is reading the keychain). **The E5 conclusion
+    "the bundled curl does not trust the keychain" was wrong** -- it was a side effect of
+    the trust flag never having been set. The keychain is the single trust store on
+    macOS; nothing has to be added to `/etc/ssl/cert.pem`.
   - Side effect: that machine's devproxy was re-installed from the **public GitHub repo**
     (it had come from the internal Codeup mirror, so it was still the pre-translation
     build).

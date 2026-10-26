@@ -435,7 +435,7 @@ devproxy: 1 个步骤失败：把 CA 根证书加入系统钥匙串（…）
 | A7 `security verify-cert`（不受信证书） | ✅ 同样 `CSSMERR_TP_NOT_TRUSTED`，exit 1 |
 | A8 root 能绑 80/443 | ✅ caddy（root，pid 29141）**同时** LISTEN 80 与 443。注意：**普通用户的 lsof 看不到 root 进程**，这条要 sudo 才查得到 |
 | A9 `dscacheutil -q host` | ✅ 输出里有 `name/ipv6_address` 与 `name/ip_address` 块，与代码预期一致 |
-| A10 自带 curl | ❌ **不认钥匙串信任**：`curl https://demo.test` → exit 60「unable to get local issuer certificate」。未注册域名正确拿不到证书（TLS alert）✓。要让 curl 信任，CA 得进 `/etc/ssl/cert.pem`（钥匙串只管 Safari/Chrome） |
+| A10 自带 curl | ❌ **不认钥匙串信任**（此结论在 E6 被更正）：`curl https://demo.test` → exit 60「unable to get local issuer certificate」。未注册域名正确拿不到证书（TLS alert）✓。要让 curl 信任，CA 得进 `/etc/ssl/cert.pem`（钥匙串只管 Safari/Chrome） |
 | A11 Homebrew 的 dnsmasq | ✅ `/usr/local/sbin/dnsmasq` → Cellar 2.91（Intel Mac 的位置） |
 | A13 `devproxy logs <服务>` | ✅ 3 秒后仍在跟随 —— 它不会自己结束。Ctrl-C 需要真终端，这半条在这里验不了 |
 | A14 + A16 sudo 时间戳缓存 | ✅ **同一会话内命中**（第二次 `sudo -n` 直接过）；✗ **跨会话不命中** —— 缓存按 tty 记，每开一个新 SSH 会话都要再输一次 |
@@ -445,11 +445,38 @@ devproxy: 1 个步骤失败：把 CA 根证书加入系统钥匙串（…）
 | A19 日志目录归属 | ✅ 目录本身是**用户属主**（工具建的）；caddy（root）只往里写文件；`caddy.log` 是 root 属主但 0644 |
 | A21 家目录里的 root 文件 | ✅ `root.crt` 是**用户属主**；`caddy.log` root 属主但可读 —— 两个用户都删得掉 |
 | A22 dnsmasq 配置 | ✅ 本工具写的（`port=5300`、`address=/.test/…`）；Homebrew 自己那份没掺和 |
-| A6 钥匙串信任 | ❌ **仍然没法非交互完成**：`security add-trusted-cert -d -r trustRoot` 即使有 sudo 也报 `SecTrustSettingsSetTrustSettings: The authorization was denied since no user interaction was possible`。证书确实进了钥匙串，但**信任标志没设上** —— `verify-cert` 仍报 NOT_TRUSTED，`doctor` 仍报 cert 缺失。与 E2b 同一个结论，现在定位到了「设信任标志」这一步 |
+| A6 钥匙串信任 | ❌ **仍然没法非交互完成**（此结论在 E6 被更正）：`security add-trusted-cert -d -r trustRoot` 即使有 sudo 也报 `SecTrustSettingsSetTrustSettings: The authorization was denied since no user interaction was possible`。证书确实进了钥匙串，但**信任标志没设上** —— `verify-cert` 仍报 NOT_TRUSTED，`doctor` 仍报 cert 缺失。与 E2b 同一个结论，现在定位到了「设信任标志」这一步 |
 
 **A 组 22 条现在全部有结论**（A6 的结论是「非交互下做不到」，这本身就是结论）。
 其中要动运行中作业或写 `/etc/resolver` 的三条，是在明确授权后跑的；
 那台机器的最终状态与开始时一致（dnsmasq 作业照常在跑，探针文件已删）。
+
+### E6. 第三轮真机（2026-10-27）—— 信任标志终于设上了
+
+起因：`devproxy trust` **在那台 Mac 自己的终端里**（图形会话）跑了一遍 ——
+这是设上信任标志的唯一途径（E2b / E5 A6）。这一轮看它到底改变了什么。
+所有检查都是只读的，机器上没有改动任何东西。
+
+| 项 | 结论 |
+|---|---|
+| A6 钥匙串信任 | ✅ **现在可以了**：`security verify-cert -c <ca> -p ssl` → 「certificate verification successful」，**exit 0**（E5 是 `CSSMERR_TP_NOT_TRUSTED`，exit 1） |
+| A6b 证书在哪 | ✅ 根 CA（SHA-256 `F6:B5:46:77:…:AA:FD:4D`）就在 `/Library/Keychains/System.keychain` 里，指纹与文件 `~/.local/share/caddy/pki/authorities/local/root.crt` 完全一致 —— 是同一张证书，不是副本 |
+| A17 `devproxy doctor` | ✅ 四个组件全部 `ready`（caddy / dnsmasq / dns / cert），**exit 0**（E5 是 exit 3，报「CA root certificate is missing」） |
+| A10 自带 curl | ✅ **E5 的结论是错的** —— 自带 curl **确实认钥匙串**。正反例对照：临时用 `openssl s_server` 在 `127.0.0.1:18443` 上一张自签证书 → curl **exit 60**「self signed certificate」；`curl https://demo.test` → **HTTP 200，exit 0**。这张 CA 并不在 `/etc/ssl/cert.pem` 里，所以 curl 只可能是读了钥匙串。E5 里 A10 失败只是**信任标志一直没设上**的副作用 —— 不是钥匙串的局限 |
+
+两条值得记住的附带结论：
+
+- 这个 CA 就是 **caddy 自己的本地根**：根证书的 subject 是
+  `CN=Caddy Local Authority - 2026 ECC Root`，且放在 caddy 的存储目录里
+  （`~/.local/share/caddy/pki/authorities/local/root.crt`）—— 工具的 `storage`
+  默认值*就是*那个目录，所以工具与 caddy 共用同一个 CA。
+- `security dump-trust-settings -d` 里 `Caddy Local Authority - 2026 ECC Root` 的
+  trust settings 是 **0 条**，而同一台机器上另一个无关的 `… - 2025 ECC Root` 反而带着
+  `SSL` + `Apple X509 Basic` / `trustRoot`。所以这份 dump **不能**当作「CA 是否被信任」
+  的判据 —— 判据用 `security verify-cert`（或 `devproxy doctor`）。
+
+仍未验证：浏览器一环（Safari / Chrome）。它依赖的是同一份钥匙串信任，按理应该没问题，
+但隔着 SSH 验不了。
 
 ## F. 新增功能的真机检查（12 项）
 

@@ -13,6 +13,11 @@
   Chrome 只认 NSS 库，装完必须**完全退出并重启 Chrome**。
 - **`doctor` 说「CA 根证书未被信任（缺少：系统信任库、NSS 库）」**：跑 `devproxy trust`。
   Linux 上若报缺 `certutil`，先 `sudo apt install libnss3-tools`。
+- **macOS：`devproxy trust` 报 `SecTrustSettingsSetTrustSettings: The authorization was denied since no user interaction was possible`**：
+  信任标志只能在**图形会话**里设，sudo 也不够 —— 要在**那台 Mac 自己的终端**里跑
+  `devproxy trust`（走 SSH 会失败）。证书无论如何都会进
+  `/Library/Keychains/System.keychain`，但没有信任标志就没人认它 ——
+  此时 curl 仍 exit 60，`doctor` 仍报缺失。
 - **Chrome 正常但 Firefox 仍报证书错误**：Firefox 有自己的证书库
   （`~/.mozilla/firefox/<profile>/cert9.db`），**不读** NSS 库也不读系统信任库。
   手动导入 CA，或在 `about:config` 打开 `security.enterprise_roots.enabled`，

@@ -12,13 +12,26 @@
   <img alt="Platform" src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS-lightgrey.svg">
 </p>
 
-One-command local dev environment and domain gateway. Expose whatever runs on your
-machine as `https://<name>.test` — developers remember domains, not ports.
+<p align="center">
+  <img src="assets/demo.gif" width="820" alt="devproxy demo: the route table, starting an app under a domain, and curl over HTTPS without -k">
+</p>
 
-- One command deploys **Caddy + dnsmasq + the DNS route + CA trust + autostart** (`devproxy setup`)
-- One command puts a service behind a domain (`devproxy up <name> -- CMD...`)
-- The route table is a **file** (`routes.json`), so routes survive a Caddy restart with no
-  resident daemon
+## Local services under real HTTPS domains
+
+`devproxy` puts whatever runs on your machine behind `https://<name>.test` — developers
+remember domains, not ports.
+
+```bash
+devproxy up api -- npm run dev
+# ✅ https://api.test
+```
+
+| What you get | Why it matters |
+|---|---|
+| **One command for the whole stack** | `devproxy setup` installs Caddy + dnsmasq, points `*.test` at your machine, trusts the CA in the system store and enables autostart. No config files to write. |
+| **A domain per app, not a port** | `https://api.test` instead of `https://localhost:3000` — shareable with the team, and the browser stops warning about the certificate. |
+| **The route table is a file** | `routes.json` — routes survive a Caddy restart, with no resident daemon to babysit. |
+| **Shareable with the team** | Commit a `devproxy.toml` and everyone runs the same domains. |
 
 ---
 
@@ -87,8 +100,23 @@ In a non-interactive environment (CI, scripts), `setup` / `trust` need an explic
 
 ## Install
 
-**The project is not on PyPI yet**, so install from the source repository. The easiest
-line — `uv` builds an isolated environment and wires up the entry point for you:
+**macOS / Linux, one line:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/wenbinye/devproxy/main/scripts/install.sh | sh
+```
+
+The script picks the latest release, verifies its sha256 and drops the CLI into
+`~/.local/bin` — it never needs sudo (`devproxy setup` elevates on demand, when it
+must).
+
+**Once it is on PyPI**, the usual suspects work too:
+
+```bash
+uv tool install devproxy     # or: pipx install devproxy
+```
+
+**From the source repository** (any version, no release needed):
 
 ```bash
 uv tool install 'git+https://github.com/wenbinye/devproxy.git'

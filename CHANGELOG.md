@@ -46,10 +46,10 @@ User-visible changes to devproxy. The format follows
   the group was signaled), leaving stray processes behind.
 - **Verified on a real Mac** (2026-10-26 / 10-27): the whole real-machine checklist for
   macOS was run against a macOS 26.1 machine, and every item now has a conclusion. Two
-  behaviour notes came out of it: the bundled `curl` does **not** trust the keychain (it
-  wants the CA in `/etc/ssl/cert.pem`), and `security add-trusted-cert` cannot set the
-  trust flag without a graphical session -- so `devproxy trust` has to be run in the
-  Mac's own terminal.
+  behaviour notes came out of it: `security add-trusted-cert` cannot set the trust flag
+  without a graphical session -- so `devproxy trust` has to be run in the Mac's own
+  terminal -- and once it has been, the keychain is the **single** trust store: the
+  bundled `curl` trusts the CA from it too (no need to touch `/etc/ssl/cert.pem`).
 - Site blocks now carry `X-Forwarded-Port`, so an app's absolute URLs no longer include
   the dynamic port.
 - Subprocess calls have a timeout: something like `certutil` stuck on a password prompt

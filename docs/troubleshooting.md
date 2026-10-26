@@ -14,6 +14,11 @@
   Chrome only reads the NSS DB, so after installing you must **fully quit and restart Chrome**.
 - **`doctor` says "CA root certificate is not trusted (missing: system trust store, NSS DB)"**: run `devproxy trust`.
   On Linux, if it reports `certutil` missing, first run `sudo apt install libnss3-tools`.
+- **macOS: `devproxy trust` fails with `SecTrustSettingsSetTrustSettings: The authorization was denied since no user interaction was possible`**:
+  the trust flag can only be set in a **graphical session**, so `sudo` is not enough -- run
+  `devproxy trust` in the Mac's own terminal (over SSH it fails). The certificate does land
+  in `/Library/Keychains/System.keychain` either way, but without the trust flag nothing
+  trusts it -- `curl` then still fails with exit 60 and `doctor` still reports it missing.
 - **Chrome works but Firefox still reports a certificate error**: Firefox has its own certificate store
   (`~/.mozilla/firefox/<profile>/cert9.db`), which **does not read** the NSS DB or the system trust store.
   Import the CA manually, or enable `security.enterprise_roots.enabled` in `about:config`;

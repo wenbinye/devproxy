@@ -530,7 +530,7 @@ password piped from a local `.env.local` (never in argv, never echoed).
 | A7 `security verify-cert` (untrusted cert) | ✅ same `CSSMERR_TP_NOT_TRUSTED`, exit 1 |
 | A8 root binds 80/443 | ✅ caddy (root, pid 29141) LISTENs on **both** 80 and 443. Note: a plain user's `lsof` cannot see root processes — this check needs sudo |
 | A9 `dscacheutil -q host` | ✅ output carries `name/ipv6_address` and `name/ip_address` blocks, as the code expects |
-| A10 bundled curl | ❌ **does not trust the keychain**: `curl https://demo.test` → exit 60 "unable to get local issuer certificate". An unregistered domain correctly gets no certificate (TLS alert) ✓. To make curl trust it, the CA has to go into `/etc/ssl/cert.pem` (the keychain only covers Safari/Chrome) |
+| A10 bundled curl | ❌ **does not trust the keychain** (this conclusion is corrected in E6): `curl https://demo.test` → exit 60 "unable to get local issuer certificate". An unregistered domain correctly gets no certificate (TLS alert) ✓. To make curl trust it, the CA has to go into `/etc/ssl/cert.pem` (the keychain only covers Safari/Chrome) |
 | A11 brew's dnsmasq | ✅ `/usr/local/sbin/dnsmasq` → Cellar 2.91 (the Intel-Mac location) |
 | A13 `devproxy logs <service>` | ✅ still following after 3 s — it never ends on its own. Ctrl-C needs a real terminal, so that half stays unverified here |
 | A14 + A16 sudo timestamp cache | ✅ **hits within one session** (second `sudo -n` succeeds); ✗ **does not hit across sessions** — the cache is per-tty, so every new SSH session asks again |
@@ -540,13 +540,41 @@ password piped from a local `.env.local` (never in argv, never echoed).
 | A19 log directory | ✅ the directory itself is **user-owned** (the tool creates it); caddy (root) only writes files into it; `caddy.log` is root-owned but 0644 |
 | A21 root files in the home dir | ✅ `root.crt` is **user-owned**; `caddy.log` is root-owned but readable — the user can delete both |
 | A22 dnsmasq config | ✅ written by this tool (`port=5300`, `address=/.test/…`); Homebrew's own config is not involved |
-| A6 keychain trust | ❌ **still impossible without a graphical session**: `security add-trusted-cert -d -r trustRoot` fails with `SecTrustSettingsSetTrustSettings: The authorization was denied since no user interaction was possible` **even with sudo**. The certificate does land in the keychain, but the **trust flag** does not — so `verify-cert` still reports NOT_TRUSTED and `doctor` still reports the cert missing. Same conclusion as E2b, now pinned to the trust-settings step |
+| A6 keychain trust | ❌ **still impossible without a graphical session** (this conclusion is corrected in E6): `security add-trusted-cert -d -r trustRoot` fails with `SecTrustSettingsSetTrustSettings: The authorization was denied since no user interaction was possible` **even with sudo**. The certificate does land in the keychain, but the **trust flag** does not — so `verify-cert` still reports NOT_TRUSTED and `doctor` still reports the cert missing. Same conclusion as E2b, now pinned to the trust-settings step |
 
 **All 22 items of group A now have a conclusion** (A6 is a "cannot be done
 non-interactively", which is itself the conclusion). The three that touch a running
 job or write under `/etc/resolver` were run with explicit authorization; the machine
 was left exactly as it was found (the dnsmasq job is running again, the probe file is
 gone).
+
+### E6. Third real-machine round (2026-10-27) — the trust flag at last
+
+Trigger: `devproxy trust` was run **in the Mac's own terminal** (a graphical session) —
+the only way the trust flag can be set (E2b / E5 A6). This round checks what that
+actually changed. All checks are read-only; nothing on the machine was modified.
+
+| Item | Result |
+|---|---|
+| A6 keychain trust | ✅ **now works**: `security verify-cert -c <ca> -p ssl` → "certificate verification successful", **exit 0** (E5: `CSSMERR_TP_NOT_TRUSTED`, exit 1) |
+| A6b where the certificate sits | ✅ the root CA (SHA-256 `F6:B5:46:77:…:AA:FD:4D`) is in `/Library/Keychains/System.keychain`, and the same fingerprint is the file at `~/.local/share/caddy/pki/authorities/local/root.crt` — one and the same certificate, not a copy |
+| A17 `devproxy doctor` | ✅ all four components `ready` (caddy / dnsmasq / dns / cert), **exit 0** (E5: exit 3, "CA root certificate is missing") |
+| A10 bundled curl | ✅ **the E5 conclusion was wrong** — the bundled curl **does** read the keychain. Positive/negative control: a throwaway self-signed cert served by `openssl s_server` on `127.0.0.1:18443` → curl **exit 60** "self signed certificate"; `curl https://demo.test` → **HTTP 200, exit 0**. The CA is not in `/etc/ssl/cert.pem`, so curl can only be reading the keychain. The A10 failure in E5 was a side effect of the trust flag never having been set — not a keychain limitation |
+
+Two side notes worth keeping:
+
+- The CA is **caddy's own local authority**: the root's subject is
+  `CN=Caddy Local Authority - 2026 ECC Root`, and it lives in the caddy storage
+  directory (`~/.local/share/caddy/pki/authorities/local/root.crt`) — the tool's
+  `storage` default *is* that directory, so the tool and caddy share one CA.
+- `security dump-trust-settings -d` lists `Caddy Local Authority - 2026 ECC Root` with
+  **0 trust settings**, while an unrelated `… - 2025 ECC Root` on the same machine does
+  carry `SSL` + `Apple X509 Basic` / `trustRoot`. The dump is therefore **not** a
+  reliable indicator of whether the CA is trusted — use `security verify-cert` (or
+  `devproxy doctor`) for that.
+
+Still unverified: the browser check (Safari / Chrome). It rests on the same keychain
+trust, so it is expected to work, but it cannot be done over SSH.
 
 ## F. Real-machine checks for new features (12 items)
 

@@ -87,7 +87,7 @@ Trusting the CA requires installing it in different places:
 |---|---|---|
 | Linux | System trust store (`/usr/local/share/ca-certificates/` + `update-ca-certificates`) | curl / Go / Java, etc. |
 | Linux | NSS DB `~/.pki/nssdb` | **Chrome / Chromium only read the NSS DB** |
-| macOS | System keychain `/Library/Keychains/System.keychain` | Safari / Chrome both read it |
+| macOS | System keychain `/Library/Keychains/System.keychain` | Safari / Chrome / the bundled `curl` all read it (verified on macOS 26, see E6 of the verification checklist) |
 | Any | **Firefox reads none of the above** | Firefox only reads `cert9.db` in its own profile |
 
 The two steps are independent: install only the system trust store and Chrome still reports

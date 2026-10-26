@@ -77,7 +77,7 @@ codeup.test {
 |---|---|---|
 | Linux | 系统信任库（`/usr/local/share/ca-certificates/` + `update-ca-certificates`） | curl / Go / Java 等 |
 | Linux | NSS 库 `~/.pki/nssdb` | **Chrome / Chromium 只认 NSS 库** |
-| macOS | 系统钥匙串 `/Library/Keychains/System.keychain` | Safari / Chrome 都读 |
+| macOS | 系统钥匙串 `/Library/Keychains/System.keychain` | Safari / Chrome / 自带 `curl` 都读（macOS 26 真机已验，见验证清单 E6） |
 | 任意 | **Firefox 不读上面任何一处** | Firefox 只认自己 profile 里的 `cert9.db` |
 
 两步是独立的：只装系统信任库，Chrome 照样报 `net::ERR_CERT_AUTHORITY_INVALID`；

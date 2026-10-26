@@ -35,10 +35,10 @@
 - **macOS**：后台应用的孙子进程又能被清理了。那边整个进程组清理被跳过
   （没有 `WNOWAIT`，leader 在清组之前就被回收），结果留下一堆野进程。
 - **已在真 Mac 上验证**（2026-10-26 / 10-27）：macOS 的整份真机验证清单在一台
-  macOS 26.1 上跑完，每一条都有了结论。顺带记下两个行为差异：自带 `curl`
-  **不认钥匙串信任**（它要 CA 在 `/etc/ssl/cert.pem` 里）；`security add-trusted-cert`
+  macOS 26.1 上跑完，每一条都有了结论。顺带记下两个行为差异：`security add-trusted-cert`
   在**没有图形会话**时设不上信任标志 —— 所以 `devproxy trust` 得在那台 Mac 自己的
-  终端里跑。
+  终端里跑；跑过之后，钥匙串就是**唯一**的信任库 —— 自带 `curl` 也认它
+  （不需要往 `/etc/ssl/cert.pem` 里塞 CA）。
 - 站点块补 `X-Forwarded-Port` —— 应用的绝对 URL 不再带动态端口。
 - 子进程调用加超时：`certutil` 之类卡在密码提示上的进程不再无限写盘
   （曾把 `/home` 撑到 100%）。

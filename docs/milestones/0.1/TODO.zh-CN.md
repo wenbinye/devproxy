@@ -113,10 +113,18 @@
     三个真发现：
     - **macOS 自带 curl 不认钥匙串里的信任**（exit 60）—— 钥匙串只管 Safari/Chrome；
       要让 curl 信任，CA 得进 `/etc/ssl/cert.pem`。
+      ⚠️ **这条在第三轮真机（2026-10-27）被推翻**：那次在**图形终端**里跑过
+      `devproxy trust` 之后，自带 curl 对 `https://demo.test` 直接 **HTTP 200**，
+      而临时自签证书仍然 exit 60 —— 说明 curl 一直在读钥匙串；E5 的失败只是
+      「信任标志一直没设上」的副作用，**不需要**往 `/etc/ssl/cert.pem` 里塞 CA。
     - **`/etc/resolver/<suffix>` 里的 `port 5300` 被 mDNSResponder 认了** —— 当初最大的疑问。
     - **sudo 时间戳缓存按 tty 记**：同一会话内命中、**跨会话不命中** —— 自动化时每开一个新
       SSH 会话都得再喂一次密码。
   - 另有一条定论：**`security add-trusted-cert -d` 有 sudo 也设不上信任标志**
     （`SecTrustSettingsSetTrustSettings` 要用户交互）—— 证书进得了钥匙串、信任标志设不上；
     要让浏览器真信任，只能在**图形终端**里跑一次 `devproxy trust`。
+  - **第三轮真机（2026-10-27）**：在那台 Mac 自己的图形终端里跑过一次 `devproxy trust`
+    之后，这条链就通了 —— `security verify-cert` 退出码 **0**，`devproxy doctor`
+    四个组件全 ready、退出码 **0**，自带 curl 访问 `https://demo.test` 直接 **HTTP 200**
+    （而临时自签证书仍 exit 60，证明 curl 读的就是钥匙串）。
   - 顺带把那台机器的 devproxy 从内网 Codeup 镜像换成公开 GitHub 仓库（之前是英文化前的旧版）。

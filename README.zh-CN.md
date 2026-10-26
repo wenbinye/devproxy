@@ -18,9 +18,26 @@
 > **注意**：本项目的默认语言是英文 —— CLI 输出、错误提示与代码注释均为英文；
 > 本页与 `docs/zh-CN/` 是完整的中文镜像文档。
 
-- 一条命令部署 **Caddy + dnsmasq + DNS 路由 + 证书信任 + 开机自启**（`devproxy setup`）
-- 一条命令把服务挂到域名上（`devproxy up <name> -- CMD...`）
-- 路由表是**文件**（`routes.json`），Caddy 重启后路由仍在，不需要常驻守护进程
+<p align="center">
+  <img src="assets/demo.gif" width="820" alt="devproxy 演示：路由表、把应用挂到域名下、以及不用 -k 的 HTTPS curl">
+</p>
+
+## 本地服务，用真正的 HTTPS 域名访问
+
+`devproxy` 把本地跑起来的服务放到 `https://<name>.test` 后面 —— 开发者只记域名，
+不记端口。
+
+```bash
+devproxy up api -- npm run dev
+# ✅ https://api.test
+```
+
+| 得到什么 | 为什么重要 |
+|---|---|
+| **整套环境一条命令** | `devproxy setup` 装好 Caddy + dnsmasq、把 `*.test` 指向本机、把 CA 装进系统信任库、开好自启 —— 不用自己写配置文件 |
+| **一个应用一个域名，不是端口** | `https://api.test` 而不是 `https://localhost:3000` —— 能直接发给同事，浏览器也不再报证书警告 |
+| **路由表是文件** | `routes.json` —— Caddy 重启后路由还在，不需要常驻守护进程 |
+| **能和全组共享** | 提交一份 `devproxy.toml`，所有人跑同一套域名 |
 
 ---
 
@@ -81,8 +98,22 @@
 
 ## 安装
 
-**当前项目尚未发布到 PyPI**，从源码仓库安装。最省事的一条 —— `uv` 会自己建隔离环境、
-装好入口：
+**macOS / Linux，一条命令：**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/wenbinye/devproxy/main/scripts/install.sh | sh
+```
+
+脚本会取最新 release、校验 sha256、把 CLI 装进 `~/.local/bin` —— **全程不需要 sudo**
+（需要提权时由 `devproxy setup` 自己在需要的那一步提）。
+
+**发布到 PyPI 之后**，常规装法也可以用：
+
+```bash
+uv tool install devproxy     # 或者：pipx install devproxy
+```
+
+**从源码仓库装**（任意版本，不需要 release）：
 
 ```bash
 uv tool install 'git+https://github.com/wenbinye/devproxy.git'
