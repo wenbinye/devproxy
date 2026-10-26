@@ -5,9 +5,11 @@ description = "本地开发环境一键部署与域名网关"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "Ye Wenbin" }]
 keywords = ["caddy", "dnsmasq", "localhost", "https", "reverse-proxy", "dev-server"]
 classifiers = [
+    "Development Status :: 3 - Alpha",
     "Environment :: Console",
     "Intended Audience :: Developers",
     "Operating System :: MacOS :: MacOS X",
@@ -22,11 +24,21 @@ dependencies = [
     "rich>=13",
 ]
 
+[project.urls]
+Homepage = "https://github.com/winwin/devproxy"
+Repository = "https://github.com/winwin/devproxy"
+Issues = "https://github.com/winwin/devproxy/issues"
+Changelog = "https://github.com/winwin/devproxy/blob/main/CHANGELOG.md"
+
 [project.scripts]
 devproxy = "devproxy.cli:main"
 
 [dependency-groups]
-dev = ["pytest>=8"]
+dev = [
+    "pytest>=8",
+    "ruff>=0.14",
+    "mypy>=1.11",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -38,3 +50,38 @@ packages = ["src/devproxy"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+
+# -- lint / format --------------------------------------------------------
+# 规则集是「能真正拦住问题」的那一档：语法与未用名（E/F）、import 顺序（I）、
+# 现代写法（UP）、常见 bug 模式（B，如 raise ... from）。E501 不开——
+# 行宽交给 formatter，代码里已有不少超长行（多为中文注释与提示文案）。
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.isort]
+# 本项目的 import 风格：一行一个（force-single-line），组间空行。
+force-single-line = true
+
+[tool.ruff.lint.per-file-ignores]
+# 测试里大量「import 了但只用一次」是留给读者看依赖的；_shared 是刻意的再导出。
+"tests/*" = ["F401"]
+# typer 的参数声明本身就是「默认值里放函数调用」（typer.Option(...)）——
+# B008 在这里是误报，typer 全家都这么写。
+"src/devproxy/cli/*.py" = ["B008"]
+
+# -- 类型检查 -------------------------------------------------------------
+# 目前只是**报告**（CI 里不阻断）：存量注解还没清干净，
+# 等清零后把 CI 那一步的 continue-on-error 去掉即可。
+[tool.mypy]
+python_version = "3.11"
+files = ["src/devproxy"]
+ignore_missing_imports = true
+warn_unused_configs = true
+warn_redundant_casts = true
+no_implicit_optional = true
+check_untyped_defs = true
