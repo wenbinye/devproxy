@@ -8,24 +8,43 @@
 建一个真的 NSS 库，验证「按证书内容判定信任」这类只有真工具才验得了的行为。
 机器上没有 `certutil` 时整组自动跳过，不影响其余用例；CI 因此专门装了 `libnss3-tools`。
 
+开发环境按锁文件装（`uv.lock` 必须提交）：
+
 ```bash
-python3 -m pytest -q --ignore=tests/test_integration.py   # 单元套件
-python3 -m pytest -q tests/test_integration.py             # 真机集成（需要真实 caddy）
+uv sync --locked --all-groups          # 装齐（含 dev 依赖）
+uv run pytest -q                       # 单元套件（= just test）
+uv run pytest -q tests/test_integration.py   # 真机集成（需要真实 caddy）
+uv run ruff check src/ tests/          # lint
+uv run ruff format --check src/ tests/ # 格式
+uv run mypy                            # 类型（61 个源文件 0 问题）
 ```
 
-CI 在 `.github/workflows/ci.yml`：push 到 `main`、提 PR 或手动触发时，
-在 Python 3.11 / 3.12 / 3.13 上跑**单元套件**（真机集成测试不进 CI ——
-它依赖真实 caddy 二进制与真实网络）。
+`just test` / `just lint` / `just fix` / `just sync` 是上面几条的简写。
+
+CI 在 `.github/workflows/ci.yml`，两个作业：
+
+| 作业 | 内容 |
+|---|---|
+| `lint` | `ruff check` + `ruff format --check` + `mypy`，**阻断** |
+| `test` | Linux 与 **macOS** × Python 3.11 / 3.12 / 3.13 跑单元套件 |
+
+依赖按 `uv sync --locked` 装：锁文件与 `pyproject.toml` 不一致时直接失败
+（typer 0.27 起不再依赖 click，这类变动必须由锁文件挡住）。
+
+真机集成测试**不进 CI** —— 它依赖真实 caddy 二进制与真实网络。
+
 ## 仓库里的历史文件
 
-仓库根目录的 `Caddyfile` 是**迁移前**的手工配置。**在 `devproxy setup` 的迁移真正跑过之前，
-现役的 `caddy.service` 仍然指向它**（迁移会先备份它、再把单元改指向
-`~/.config/devproxy/Caddyfile`）；迁移完成后它才只剩历史参考价值。
+根目录**不再有** `Caddyfile` 与 `caddy.service`：它们曾是**迁移前**的手工配置与手工单元，
+迁移跑过之后现役单元指向 `~/.config/devproxy/Caddyfile`，它们只剩历史价值。
+现在它们躺在 [design/legacy/](design/legacy/)（连同 [design/](design/) 下的建造期
+规格与决策记录）—— 那是**这台机器当时的状态**，不是项目资产。
 
 根目录的 `devp` 脚本**已删除** —— 它是 `devproxy` 的 1.0 前身：直接 PATCH 现役
 Caddy 的 Admin API 注册路由，注册的东西新工具既看不见也删不掉。它的来龙去脉
-记在 [legacy-devp.md](legacy-devp.md)。`Justfile` 现在只是转发到
-`uv run devproxy` 的兼容壳（跑的是**当前源码**，不是已安装的那份）。
+记在 [legacy-devp.md](legacy-devp.md)。`Justfile` 里转发到 `uv run devproxy`
+的那部分是兼容壳（跑的是**当前源码**，不是已安装的那份）；`test` / `lint`
+这类配方是仓库自己的开发动作。
 ## 代码结构
 
 ```
