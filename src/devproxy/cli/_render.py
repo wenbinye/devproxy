@@ -6,9 +6,9 @@
 
 from __future__ import annotations
 
+import typer
 from rich.markup import escape
 from rich.table import Table
-import typer
 
 from devproxy.cli._runtime import EXIT_FAIL
 from devproxy.cli._runtime import EXIT_SUDO
@@ -244,17 +244,12 @@ def print_uninstall_results(results) -> bool:
 def print_uninstall_kept(plan, *, dry_run: bool = False) -> None:
     """打印"默认不动"的清单与迁移回滚提示。"""
     if plan.kept:
-        heading = (
-            "以下内容将保留（不会删除）："
-            if dry_run
-            else "以下内容已保留（未删除）："
-        )
+        heading = "以下内容将保留（不会删除）：" if dry_run else "以下内容已保留（未删除）："
         console.print(heading)
         for item in plan.kept:
             console.print(f"  · {escape(item)}")
     if plan.migration_backup is not None:
         path = escape(str(plan.migration_backup))
         console.print(
-            f"原始 caddy.service 与 Caddyfile 在 {path}，"
-            f"可用 devproxy setup --rollback {path} 还原"
+            f"原始 caddy.service 与 Caddyfile 在 {path}，可用 devproxy setup --rollback {path} 还原"
         )

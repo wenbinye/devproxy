@@ -1,7 +1,9 @@
 from pathlib import Path
 
-from devproxy.platform.base import Action, Status
-from devproxy.lifecycle.setup import apply_plan, build_plan
+from devproxy.lifecycle.setup import apply_plan
+from devproxy.lifecycle.setup import build_plan
+from devproxy.platform.base import Action
+from devproxy.platform.base import Status
 
 
 class FakeComponent:
@@ -195,9 +197,7 @@ def _patch_cli(monkeypatch, tmp_path, components):
     monkeypatch.setattr(
         "devproxy.cli._shared.build_context", lambda *a, **k: (paths, cfg, None, None)
     )
-    monkeypatch.setattr(
-        "devproxy.cli._shared._components", _fake_components_seam(components)
-    )
+    monkeypatch.setattr("devproxy.cli._shared._components", _fake_components_seam(components))
     # 平台也必须换成假的：setup 的迁移检测会去看真实单元目录，
     # 迁移一旦跑起来就会改写用户机器上的 caddy.service
     monkeypatch.setattr("devproxy.cli._shared._platform", lambda: FakePlatform())
@@ -264,9 +264,7 @@ def test_cli_setup_reports_failure_with_exit_1(tmp_path, monkeypatch):
         FakeCliComponent(
             "bad", Status(ok=False, detail="缺"), [Action(description="x")], fail=True
         ),
-        FakeCliComponent(
-            "good", Status(ok=False, detail="缺"), [Action(description="y")]
-        ),
+        FakeCliComponent("good", Status(ok=False, detail="缺"), [Action(description="y")]),
     ]
     _patch_cli(monkeypatch, tmp_path, comps)
     result = CliRunner().invoke(app, ["setup", "--yes"])
@@ -294,9 +292,7 @@ def test_cli_setup_domain_suffix_override(tmp_path, monkeypatch):
 
     seen = {}
 
-    def fake_components(
-        paths, config, dns_backend="auto", platform=None, *, include_cert=True
-    ):
+    def fake_components(paths, config, dns_backend="auto", platform=None, *, include_cert=True):
         seen["suffix"] = config.domain_suffix
         seen["backend"] = dns_backend
         return [FakeCliComponent("caddy")]
@@ -336,9 +332,7 @@ def test_cli_setup_rejects_invalid_dns_backend(tmp_path, monkeypatch):
     assert comps[0].applied is None
 
 
-def test_cli_setup_noop_with_unhealthy_component_exits_precondition(
-    tmp_path, monkeypatch
-):
+def test_cli_setup_noop_with_unhealthy_component_exits_precondition(tmp_path, monkeypatch):
     """没有可执行的动作、但组件本身不健康 —— 不能谎报「已就绪」。"""
     from typer.testing import CliRunner
 
@@ -362,7 +356,9 @@ class FakeCertComponent(FakeCliComponent):
 def _write_ca(storage: Path) -> Path:
     ca = Path(storage) / "pki" / "authorities" / "local" / "root.crt"
     ca.parent.mkdir(parents=True, exist_ok=True)
-    ca.write_text("-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n", encoding="utf-8")
+    ca.write_text(
+        "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n", encoding="utf-8"
+    )
     return ca
 
 
@@ -430,9 +426,7 @@ def test_cli_setup_permission_error_during_apply_exits_4(tmp_path, monkeypatch):
         def apply(self, actions):
             raise PermissionError("sudo 需要密码且当前不可用")
 
-    comps = [
-        SudoFail("caddy", Status(ok=False, detail="缺"), [Action(description="写 /etc")])
-    ]
+    comps = [SudoFail("caddy", Status(ok=False, detail="缺"), [Action(description="写 /etc")])]
     _patch_cli(monkeypatch, tmp_path, comps)
     result = CliRunner().invoke(app, ["setup", "--yes"])
     assert result.exit_code == 4, result.output
@@ -452,9 +446,7 @@ def test_components_include_cert_flag_controls_cert_component(tmp_path):
     config = Config(storage=str(paths.data_dir))
     platform = FakePlatform()
 
-    without = _components(
-        paths, config, "auto", platform, include_cert=False
-    )
+    without = _components(paths, config, "auto", platform, include_cert=False)
     assert [type(c).__name__ for c in without] == [
         "CaddyComponent",
         "DnsmasqComponent",
@@ -516,9 +508,7 @@ def test_cli_setup_macos_rejects_resolved_backend(tmp_path, monkeypatch):
 
     comps = [FakeCliComponent("caddy")]
     _patch_cli(monkeypatch, tmp_path, comps)
-    monkeypatch.setattr(
-        "devproxy.cli._shared._platform", lambda: SimpleNamespace(name="mac")
-    )
+    monkeypatch.setattr("devproxy.cli._shared._platform", lambda: SimpleNamespace(name="mac"))
     result = CliRunner().invoke(app, ["setup", "--dns-backend", "resolved", "--yes"])
     assert result.exit_code == 2, result.output
     assert "macOS 不支持 resolved" in result.output
@@ -622,9 +612,7 @@ def test_cli_setup_prints_global_scope_disclosure(tmp_path, monkeypatch):
     assert "dnsmasq 起不来" in result.stdout
 
 
-def test_cli_setup_without_global_scope_component_prints_no_disclosure(
-    tmp_path, monkeypatch
-):
+def test_cli_setup_without_global_scope_component_prints_no_disclosure(tmp_path, monkeypatch):
     """组件不涉及整机时不多嘴。"""
     from typer.testing import CliRunner
 

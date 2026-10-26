@@ -115,9 +115,7 @@ def _valid_admin_addr(addr: object) -> bool:
 def _valid_label(value: object) -> bool:
     """是否是单个合法的 DNS 标签（与 domain_suffix 同一套判据）。"""
     return (
-        isinstance(value, str)
-        and len(value) <= MAX_LABEL_LEN
-        and bool(DNS_LABEL_RE.match(value))
+        isinstance(value, str) and len(value) <= MAX_LABEL_LEN and bool(DNS_LABEL_RE.match(value))
     )
 
 
@@ -131,7 +129,7 @@ def _check_allowed_domain_suffixes(cfg: Config) -> tuple[str, ...]:
     if isinstance(raw, str) or not isinstance(raw, (list, tuple)):
         raise _bad(
             "allowed_domain_suffixes",
-            f"必须是字符串数组（TOML 写成 [\"dev\"]），当前值 {raw!r}",
+            f'必须是字符串数组（TOML 写成 ["dev"]），当前值 {raw!r}',
         )
     allowed: list[str] = []
     for item in raw:
@@ -182,15 +180,10 @@ def validate_config(cfg: Config) -> None:
             f"不含点、≤{MAX_LABEL_LEN} 字符），当前值 {cfg.domain_suffix!r}",
         )
     allowed = _check_allowed_domain_suffixes(cfg)
-    if (
-        cfg.domain_suffix not in RESERVED_LOCAL_TLDS
-        and cfg.domain_suffix not in allowed
-    ):
+    if cfg.domain_suffix not in RESERVED_LOCAL_TLDS and cfg.domain_suffix not in allowed:
         raise _bad("domain_suffix", _domain_suffix_rejection(cfg.domain_suffix))
     if cfg.dns_backend not in DNS_BACKENDS:
-        raise _bad(
-            "dns_backend", f"必须是 {' | '.join(DNS_BACKENDS)}，当前值 {cfg.dns_backend!r}"
-        )
+        raise _bad("dns_backend", f"必须是 {' | '.join(DNS_BACKENDS)}，当前值 {cfg.dns_backend!r}")
     for key in ("http_port", "https_port"):
         value = getattr(cfg, key)
         if not _is_int(value) or not PORT_MIN <= value <= PORT_MAX:

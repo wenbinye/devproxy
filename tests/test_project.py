@@ -155,7 +155,7 @@ def test_toml_syntax_error_reports_file_and_position(tmp_path):
 
 
 def test_unknown_top_level_key_is_rejected(tmp_path):
-    path = _write(tmp_path / PROJECT_FILE_NAME, 'routesx = []\n')
+    path = _write(tmp_path / PROJECT_FILE_NAME, "routesx = []\n")
     with pytest.raises(ProjectFileError) as cm:
         load_project_file(path)
     assert "routesx" in str(cm.value)
@@ -180,9 +180,7 @@ def test_missing_name_is_rejected(tmp_path):
 
 
 def test_invalid_name_is_rejected(tmp_path):
-    path = _write(
-        tmp_path / PROJECT_FILE_NAME, '[[routes]]\nname = "Bad_Name"\ncommand = ["x"]\n'
-    )
+    path = _write(tmp_path / PROJECT_FILE_NAME, '[[routes]]\nname = "Bad_Name"\ncommand = ["x"]\n')
     with pytest.raises(ProjectFileError) as cm:
         load_project_file(path)
     assert "Bad_Name" in str(cm.value)
@@ -196,9 +194,7 @@ def test_up_mode_requires_command(tmp_path):
 
 
 def test_expose_mode_requires_port(tmp_path):
-    path = _write(
-        tmp_path / PROJECT_FILE_NAME, '[[routes]]\nname = "web"\nmode = "expose"\n'
-    )
+    path = _write(tmp_path / PROJECT_FILE_NAME, '[[routes]]\nname = "web"\nmode = "expose"\n')
     with pytest.raises(ProjectFileError) as cm:
         load_project_file(path)
     assert "port" in str(cm.value)

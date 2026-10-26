@@ -15,15 +15,13 @@ from pathlib import Path
 from devproxy.components.base import probe_url
 from devproxy.core.config import Config
 from devproxy.core.paths import Paths
-from devproxy.platform.base import (
-    CA_NICKNAME,
-    NSS_DIR,
-    SYSTEM_CA_DEST,
-    SYSTEM_KEYCHAIN,
-    Action,
-    Platform,
-    Status,
-)
+from devproxy.platform.base import CA_NICKNAME
+from devproxy.platform.base import NSS_DIR
+from devproxy.platform.base import SYSTEM_CA_DEST
+from devproxy.platform.base import SYSTEM_KEYCHAIN
+from devproxy.platform.base import Action
+from devproxy.platform.base import Platform
+from devproxy.platform.base import Status
 
 CA_NAME = CA_NICKNAME
 
@@ -122,10 +120,7 @@ def _accepts_keyword(func, name: str) -> bool:
         return False
     if name in parameters:
         return True
-    return any(
-        parameter.kind is inspect.Parameter.VAR_KEYWORD
-        for parameter in parameters.values()
-    )
+    return any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
 
 
 @dataclass(frozen=True)
@@ -273,8 +268,7 @@ class CertComponent:
         flags_resolver = getattr(self.platform, "nss_trust_flags", None)
         if flags_resolver is None:
             raise RuntimeError(
-                "平台未提供 nss_trust_flags，无法在保留 S/MIME/JAR 信任列的"
-                "前提下补 SSL 标志"
+                "平台未提供 nss_trust_flags，无法在保留 S/MIME/JAR 信任列的前提下补 SSL 标志"
             )
         try:
             return str(flags_resolver(flags))
@@ -335,9 +329,7 @@ class CertComponent:
             return "检查系统钥匙串是否已解锁、security 是否可用；devproxy trust"
         return "检查 certutil 是否可用、NSS 库是否被锁或不可读；devproxy trust"
 
-    def _unverifiable_labels(
-        self, system: _TrustProbe, nss: _TrustProbe
-    ) -> list[str]:
+    def _unverifiable_labels(self, system: _TrustProbe, nss: _TrustProbe) -> list[str]:
         """哪些信任点"判不了"（附上探测错误原文）。"""
         labels = []
         if system.trusted is None:
@@ -367,10 +359,7 @@ class CertComponent:
         if not self.ca_path.exists():
             # 还没有 CA —— 没有可导入的东西，也就没有提示
             return None
-        return (
-            f"{FIREFOX_HINT}（CA 路径：{self.ca_path}；"
-            f"你的 Firefox profile：{profiles[0]}）"
-        )
+        return f"{FIREFOX_HINT}（CA 路径：{self.ca_path}；你的 Firefox profile：{profiles[0]}）"
 
     def _with_firefox(self, hint: str) -> str:
         """把 Firefox 的提示接到 hint 后面（没有 Firefox 就原样返回）。"""
@@ -387,9 +376,7 @@ class CertComponent:
         # CA 根证书是 Caddy 的内部 CA：只有在有站点用 tls internal 时才生成。
         # 首次部署时它还不存在 —— 这是"还没到那一步"，不是缺陷。
         if not self.ca_path.exists():
-            return Status(
-                ok=True, detail="尚无 CA 根证书（将在首条路由注册时由 Caddy 生成）"
-            )
+            return Status(ok=True, detail="尚无 CA 根证书（将在首条路由注册时由 Caddy 生成）")
         system = self._system_trusted()
         nss = self._nss_trusted()
         unknown = self._unverifiable_labels(system, nss)
@@ -600,9 +587,7 @@ class CertComponent:
         code, msg = elevated.run(["update-ca-certificates"])
         if code != 0:
             # 不检查返回码的话，CA 只是躺在暂存目录里，系统并不认它
-            raise RuntimeError(
-                f"update-ca-certificates 失败（CA 未进入系统信任库）: {msg}"
-            )
+            raise RuntimeError(f"update-ca-certificates 失败（CA 未进入系统信任库）: {msg}")
 
     def _remove_stale_nss_ca(self, command: list[str]) -> None:
         """清理工具自有昵称下的陈旧 CA 条目。"""
@@ -648,9 +633,7 @@ class CertComponent:
         nss.mkdir(parents=True, exist_ok=True)
         if (nss / "cert9.db").exists():
             return
-        code, msg = self.platform.run(
-            ["certutil", "-N", "-d", f"sql:{nss}", "--empty-password"]
-        )
+        code, msg = self.platform.run(["certutil", "-N", "-d", f"sql:{nss}", "--empty-password"])
         if code != 0:
             raise RuntimeError(f"创建 NSS 库失败: {msg}")
 
@@ -677,9 +660,7 @@ class CertComponent:
         if self._nss_trusted(src).trusted is True:
             return
         # 还是不行 → 库里有这张 CA 但缺 SSL 信任标志，补标志后再复查
-        self._repair_flags(
-            src, nss, self._nss_entries(src, nss_dir=nss), initial_output=msg
-        )
+        self._repair_flags(src, nss, self._nss_entries(src, nss_dir=nss), initial_output=msg)
 
     @staticmethod
     def _nss_command_targets(command: list[str]) -> tuple[Path, Path]:
@@ -716,9 +697,7 @@ class CertComponent:
         """标志串的 SSL 列是否受信任（"C" 开头）。"""
         return bool(flags) and flags[0] == "C"
 
-    def _drop_stale_own_entry(
-        self, ca: Path, nss: Path, *, unconditional: bool = False
-    ) -> None:
+    def _drop_stale_own_entry(self, ca: Path, nss: Path, *, unconditional: bool = False) -> None:
         """删掉工具自有昵称下的**陈旧** CA 条目。
 
         `unconditional=True` 用在"库里没有当前 CA"的安装路径上：
@@ -741,12 +720,9 @@ class CertComponent:
             if stale is None:
                 # 不能把"判不了"当成"没有"：那会让陈旧根永久留在库里。
                 raise RuntimeError(
-                    "无法判定 NSS 库中是否存在陈旧 CA 条目"
-                    "（库可能被锁或不可读），拒绝静默跳过清理"
+                    "无法判定 NSS 库中是否存在陈旧 CA 条目（库可能被锁或不可读），拒绝静默跳过清理"
                 )
-        code, msg = self.platform.run(
-            ["certutil", "-d", f"sql:{nss}", "-D", "-n", CA_NAME]
-        )
+        code, msg = self.platform.run(["certutil", "-d", f"sql:{nss}", "-D", "-n", CA_NAME])
         if code != 0:
             has_probe = getattr(self.platform, "nss_has_nickname", None) is not None
             present = self._nss_has_nickname(nss, CA_NAME)
@@ -765,8 +741,7 @@ class CertComponent:
         after = self._nss_stale(ca, nss)
         if after is None:
             raise RuntimeError(
-                "无法确认 NSS 库中的陈旧 CA 条目是否已删除"
-                f"（库可能被锁或不可读）: {msg}"
+                f"无法确认 NSS 库中的陈旧 CA 条目是否已删除（库可能被锁或不可读）: {msg}"
             )
         if after is True:
             raise RuntimeError(
@@ -840,9 +815,7 @@ class CertComponent:
         if url is None:
             # 没有任何可探站点（迁移来的 CA、尚未注册路由）—— 这里验不了
             # 信任链，保持 ok + 说明，而不是拿 localhost 去制造假失败。
-            return Status(
-                ok=True, detail="CA 已信任（暂无可探测站点，跳过 HTTPS 验证）"
-            )
+            return Status(ok=True, detail="CA 已信任（暂无可探测站点，跳过 HTTPS 验证）")
         if not self.platform.http_ok(url):
             return Status(
                 ok=False,

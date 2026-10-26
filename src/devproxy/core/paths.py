@@ -90,9 +90,7 @@ def atomic_write_text(path: Path, text: str) -> None:
         mode = path.stat().st_mode & 0o777
     except FileNotFoundError:
         mode = 0o644
-    fd, tmp_name = tempfile.mkstemp(
-        prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
-    )
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
     tmp = Path(tmp_name)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -124,11 +122,7 @@ def default_state_dir(home: Path | None = None) -> Path:
 def default_paths() -> Paths:
     """默认路径；环境变量可整体覆盖（测试与多实例场景用）。"""
     home = Path.home()
-    config_dir = Path(
-        os.environ.get("DEVPROXY_CONFIG_DIR", home / ".config" / "devproxy")
-    )
+    config_dir = Path(os.environ.get("DEVPROXY_CONFIG_DIR", home / ".config" / "devproxy"))
     state_dir = default_state_dir(home)
-    data_dir = Path(
-        os.environ.get("DEVPROXY_DATA_DIR", home / ".local" / "share" / "caddy")
-    )
+    data_dir = Path(os.environ.get("DEVPROXY_DATA_DIR", home / ".local" / "share" / "caddy"))
     return Paths(config_dir=config_dir, state_dir=state_dir, data_dir=data_dir)

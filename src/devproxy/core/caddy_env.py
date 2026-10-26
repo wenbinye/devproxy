@@ -3,11 +3,13 @@
 迁移时把遗留单元里的 `Environment=` 抄下来，后续 setup 重装单元要带上 ——
 否则用户站点里的 `{$MINIKUBE_IP:…}` 会指向错误的网关。
 """
+
 from __future__ import annotations
 
 import json
 
-from devproxy.core.paths import Paths, atomic_write_text
+from devproxy.core.paths import Paths
+from devproxy.core.paths import atomic_write_text
 
 
 class CaddyEnvArchiveError(RuntimeError):
@@ -29,9 +31,7 @@ def save_extra_env(paths: Paths, env: dict[str, str]) -> None:
     if not env:
         path.unlink(missing_ok=True)
         return
-    atomic_write_text(
-        path, json.dumps(env, ensure_ascii=False, indent=2) + "\n"
-    )
+    atomic_write_text(path, json.dumps(env, ensure_ascii=False, indent=2) + "\n")
 
 
 def _archive_error(path, exc: Exception) -> CaddyEnvArchiveError:

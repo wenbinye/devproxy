@@ -61,6 +61,4 @@ class ElevatedReader:
 
     def copy(self, src, dest):
         target = Path(str(dest))
-        target.write_text(
-            Path(str(src)).read_text(encoding="utf-8"), encoding="utf-8"
-        )
+        target.write_text(Path(str(src)).read_text(encoding="utf-8"), encoding="utf-8")

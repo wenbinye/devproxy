@@ -5,9 +5,10 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 
-from rich.markup import escape
 import typer
+from rich.markup import escape
 
+from devproxy.cli import _shared as s
 from devproxy.cli import app
 from devproxy.cli._migrate import MigrateRequest
 from devproxy.cli._migrate import _do_rollback
@@ -18,11 +19,10 @@ from devproxy.cli._shared import EXIT_PRECONDITION
 from devproxy.cli._shared import EXIT_SUDO
 from devproxy.cli._shared import EXIT_USAGE
 from devproxy.cli._shared import UP_EXAMPLE
+from devproxy.core.config import Config
 from devproxy.core.config import ConfigError
 from devproxy.core.config import validate_config
 from devproxy.lifecycle.migrate import detect_legacy
-
-from devproxy.cli import _shared as s
 
 
 def _handle_rollback(raw: str | None) -> bool:
@@ -44,8 +44,8 @@ def _handle_rollback(raw: str | None) -> bool:
 
 
 def _apply_cli_overrides(
-    config, dns_backend: str | None, domain_suffix: str | None
-) -> tuple[object, str]:
+    config: Config, dns_backend: str | None, domain_suffix: str | None
+) -> tuple[Config, str]:
     """把 CLI 覆盖折进配置并校验；返回 (配置, 生效的 DNS 后端)。"""
     backend = s._dns_backend(dns_backend, config)
     if domain_suffix is not None:
@@ -88,9 +88,7 @@ def _maybe_migrate(platform, paths, config, backend: str, yes: bool):
 def _confirm_or_exit(plan, yes: bool) -> None:
     """提权披露、非交互拒绝与交互确认。"""
     if plan.needs_sudo:
-        s.console.print(
-            f"[yellow]以下步骤需要 sudo（共 {len(plan.needs_sudo)} 项）：[/yellow]"
-        )
+        s.console.print(f"[yellow]以下步骤需要 sudo（共 {len(plan.needs_sudo)} 项）：[/yellow]")
         for a in plan.needs_sudo:
             s.console.print(f"  · {escape(a.description)}")
         if not yes and not s._interactive():
@@ -145,9 +143,7 @@ def setup(
     paths.ensure_files()
     config = _maybe_migrate(platform, paths, config, backend, yes)
 
-    components = s._components(
-        paths, config, backend, platform, include_cert=not no_trust
-    )
+    components = s._components(paths, config, backend, platform, include_cert=not no_trust)
     # 记录 apply 阶段被 apply_plan 吞掉的 PermissionError，退出码才能区分
     # “需要提权”（4）与普通失败（1）
     components, elevation_errors = s.track_elevation_errors(components)

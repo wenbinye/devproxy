@@ -5,10 +5,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from dataclasses import field
 
 from devproxy.components.base import Component
-from devproxy.platform.base import Action, Status
+from devproxy.platform.base import Action
+from devproxy.platform.base import Status
 
 
 @dataclass
@@ -69,9 +71,7 @@ def build_plan(components: list[Component]) -> SetupPlan:
             actions = c.plan()
         except Exception as e:  # noqa: BLE001 —— 同上
             actions = []
-            report.status = Status(
-                ok=False, detail=f"计算变更失败: {e}", hint="查看上面的报错"
-            )
+            report.status = Status(ok=False, detail=f"计算变更失败: {e}", hint="查看上面的报错")
         report.actions = actions
         reports.append(report)
     return SetupPlan(reports=reports)
@@ -109,7 +109,5 @@ def apply_plan(plan: SetupPlan) -> list[tuple[str, Status]]:
                 continue
             results.append((report.name, _verify(component, report.status)))
         except Exception as e:  # noqa: BLE001 —— 组件失败不应中断 setup
-            results.append(
-                (report.name, Status(ok=False, detail=str(e), hint="查看上面的报错"))
-            )
+            results.append((report.name, Status(ok=False, detail=str(e), hint="查看上面的报错")))
     return results

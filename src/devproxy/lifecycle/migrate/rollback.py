@@ -1,14 +1,17 @@
 """备份与回滚：迁移前的快照，以及失败/手动回滚。"""
+
 from __future__ import annotations
 
 import shutil
 from pathlib import Path
 
-from devproxy.core.backup import Backup, BackupManager, BackupRestoreError
+from devproxy.core.backup import Backup
+from devproxy.core.backup import BackupManager
+from devproxy.core.backup import BackupRestoreError
 from devproxy.core.paths import Paths
+from devproxy.lifecycle.migrate.legacy import MigrationError
 from devproxy.platform.base import Platform
 
-from devproxy.lifecycle.migrate.legacy import MigrationError
 
 def _make_copier(platform: Platform):
     """备份用的复制函数：普通文件直接复制，读不到的（/etc 下的）走提权会话。"""
@@ -24,6 +27,7 @@ def _make_copier(platform: Platform):
 
     return copy
 
+
 def _make_restorer(platform: Platform):
     """还原用的文件操作：src 为 None 表示删除 dest。
 
@@ -35,10 +39,10 @@ def _make_restorer(platform: Platform):
             try:
                 dest.unlink(missing_ok=True)
                 return
-            except PermissionError:
+            except PermissionError as e:
                 code, msg = platform.privilege().run(["rm", "-f", str(dest)])
                 if code != 0:
-                    raise OSError(f"删除 {dest} 失败: {msg}")
+                    raise OSError(f"删除 {dest} 失败: {msg}") from e
                 return
         try:
             shutil.copy2(src, dest)
@@ -47,22 +51,18 @@ def _make_restorer(platform: Platform):
 
     return restore
 
-def _create_backup(
-    platform: Platform, paths: Paths, targets: list[Path]
-) -> Backup:
+
+def _create_backup(platform: Platform, paths: Paths, targets: list[Path]) -> Backup:
     """备份全部待改动的文件。失败即中止迁移。"""
     try:
-        return BackupManager(paths.backup_dir, copier=_make_copier(platform)).create(
-            targets
-        )
+        return BackupManager(paths.backup_dir, copier=_make_copier(platform)).create(targets)
     except ValueError as e:
         raise MigrationError(
             f"备份目标不是普通文件（可能是符号链接或目录），迁移已中止：{e}"
         ) from e
     except OSError as e:
-        raise MigrationError(
-            f"备份失败，迁移已中止（未改动任何文件）：{e}"
-        ) from e
+        raise MigrationError(f"备份失败，迁移已中止（未改动任何文件）：{e}") from e
+
 
 def _restore_after_failure(
     platform: Platform,
@@ -85,21 +85,17 @@ def _restore_after_failure(
     else:
         reason = f"迁移失败：{exc}"
     hint = (
-        f"备份目录：{backup.directory}"
-        f"（可手动还原：devproxy setup --rollback {backup.directory}）"
+        f"备份目录：{backup.directory}（可手动还原：devproxy setup --rollback {backup.directory}）"
     )
     try:
         backup.restorer = _make_restorer(platform)
         backup.restore()
     except BackupRestoreError as restore_exc:
-        raise MigrationError(
-            f"{reason}，且还原不完整：{restore_exc}；{hint}", notes=notes
-        ) from exc
+        raise MigrationError(f"{reason}，且还原不完整：{restore_exc}；{hint}", notes=notes) from exc
     except OSError as restore_exc:
-        raise MigrationError(
-            f"{reason}，且还原失败：{restore_exc}；{hint}", notes=notes
-        ) from exc
+        raise MigrationError(f"{reason}，且还原失败：{restore_exc}；{hint}", notes=notes) from exc
     raise MigrationError(f"{reason}，已按备份还原；{hint}", notes=notes) from exc
+
 
 def rollback(backup: Backup, *, platform: Platform | None = None) -> list[Path]:
     """按备份还原。返回被还原（或被删除）的原始路径。

@@ -5,7 +5,8 @@ import pytest
 from devproxy.core.config import Config
 from devproxy.gateway.caddy import CaddyConfig
 from devproxy.gateway.routes import Route
-from devproxy.gateway.store import RouteStore, RouteStoreError
+from devproxy.gateway.store import RouteStore
+from devproxy.gateway.store import RouteStoreError
 
 
 class FakeCaddy:

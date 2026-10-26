@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import typer
 
+from devproxy.cli import _shared as s
 from devproxy.cli import app
 from devproxy.cli._shared import EXIT_FAIL
 
-from devproxy.cli import _shared as s
 
 @app.command()
 def selftest() -> None:

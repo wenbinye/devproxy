@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+from devproxy.cli import _shared as s
 from devproxy.cli import app
 from devproxy.gateway.routes import RouteTableError
 from devproxy.gateway.routes import load_table
 from devproxy.gateway.routes import render_caddyfile
 
-from devproxy.cli import _shared as s
 
 @app.command()
 def config() -> None:

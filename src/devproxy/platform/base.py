@@ -6,9 +6,11 @@ import base64
 import binascii
 import hashlib
 import plistlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from dataclasses import field
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Protocol
+from typing import runtime_checkable
 
 # 证书信任的全局约定：组件与平台实现共用同一份，避免两边对不上。
 CA_NICKNAME = "devproxy Local CA"
@@ -133,7 +135,7 @@ def unit_exec_argv(text: str) -> list[str] | None:
         line = raw.strip()
         if not line.startswith("ExecStart="):
             continue
-        args = line[len("ExecStart="):].split()
+        args = line[len("ExecStart=") :].split()
         if args:
             return args
     return None

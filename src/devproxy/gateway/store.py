@@ -6,23 +6,25 @@
 
 from __future__ import annotations
 
+import builtins
 import fcntl
-import os
+from collections.abc import Callable
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Callable, Iterator, NoReturn
+from typing import NoReturn
 
 from devproxy.core.config import Config
 from devproxy.core.paths import Paths
-from devproxy.gateway.caddy import CaddyConfig, MainCaddyfileSpec, build_main_caddyfile
-from devproxy.gateway.routes import (
-    Route,
-    RouteTable,
-    atomic_write,
-    load_table,
-    render_caddyfile,
-    save_table,
-)
+from devproxy.gateway.caddy import CaddyConfig
+from devproxy.gateway.caddy import MainCaddyfileSpec
+from devproxy.gateway.caddy import build_main_caddyfile
+from devproxy.gateway.routes import Route
+from devproxy.gateway.routes import RouteTable
+from devproxy.gateway.routes import atomic_write
+from devproxy.gateway.routes import load_table
+from devproxy.gateway.routes import render_caddyfile
+from devproxy.gateway.routes import save_table
 
 
 class RouteStoreError(RuntimeError):
@@ -95,9 +97,7 @@ class RouteStore:
 
                     ok, msg = self.caddy.reload()
                     if not ok:
-                        raise RouteStoreError(
-                            f"Caddy reload 失败，已回滚路由表：\n{msg}"
-                        )
+                        raise RouteStoreError(f"Caddy reload 失败，已回滚路由表：\n{msg}")
                 except Exception as e:
                     self._rollback(old_json, old_caddy, e)
             finally:
@@ -105,9 +105,7 @@ class RouteStore:
                 # 还会让人以为线上有两份配置。
                 self._cleanup_temp()
 
-    def _rollback(
-        self, old_json: str | None, old_caddy: str | None, cause: Exception
-    ) -> NoReturn:
+    def _rollback(self, old_json: str | None, old_caddy: str | None, cause: Exception) -> NoReturn:
         """落盘事务失败：恢复两份文件，并把原因统一包装成 RouteStoreError。"""
         try:
             self._restore(old_json, old_caddy)
@@ -123,7 +121,7 @@ class RouteStore:
         for path in self._temp_paths():
             path.unlink(missing_ok=True)
 
-    def _temp_paths(self) -> list[Path]:
+    def _temp_paths(self) -> builtins.list[Path]:
         return [
             self.paths.state_dir / "routes.caddy.new",
             self.paths.state_dir / "Caddyfile.new",

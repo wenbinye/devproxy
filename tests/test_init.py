@@ -12,12 +12,12 @@ import pytest
 from typer.testing import CliRunner
 
 from devproxy.cli import app
+from devproxy.gateway.project import ProjectRoute
 from devproxy.gateway.project import detect_project_root
 from devproxy.gateway.project import load_project_file
 from devproxy.gateway.project import render_project_file
 from devproxy.gateway.project import route_name_from_dir
 from devproxy.gateway.project import suggest_command
-from devproxy.gateway.project import ProjectRoute
 
 
 def _invoke(args: list[str]):
@@ -84,22 +84,16 @@ def test_suggest_command_survives_broken_package_json(tmp_path):
 
 
 def test_render_project_file_escapes_quotes():
-    content = render_project_file(
-        [ProjectRoute(name="web", command=["sh", "-c", 'echo "hi"'])]
-    )
+    content = render_project_file([ProjectRoute(name="web", command=["sh", "-c", 'echo "hi"'])])
     assert r'"echo \"hi\""' in content
 
 
 def test_render_project_file_marks_expose():
-    content = render_project_file(
-        [ProjectRoute(name="legacy", mode="expose", port=3000)]
-    )
+    content = render_project_file([ProjectRoute(name="legacy", mode="expose", port=3000)])
     assert 'mode = "expose"' in content
     assert "port = 3000" in content
     # 没有 command 行（不是靠全文找 "command" —— 头部注释里就有这个词）
-    assert not any(
-        line.strip().startswith("command") for line in content.splitlines()
-    )
+    assert not any(line.strip().startswith("command") for line in content.splitlines())
 
 
 # -- 命令层 -------------------------------------------------------------

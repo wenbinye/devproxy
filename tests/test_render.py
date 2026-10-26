@@ -3,15 +3,13 @@ import os
 
 import pytest
 
-from devproxy.gateway.routes import (
-    Route,
-    RouteTable,
-    RouteTableError,
-    atomic_write,
-    load_table,
-    render_caddyfile,
-    save_table,
-)
+from devproxy.gateway.routes import Route
+from devproxy.gateway.routes import RouteTable
+from devproxy.gateway.routes import RouteTableError
+from devproxy.gateway.routes import atomic_write
+from devproxy.gateway.routes import load_table
+from devproxy.gateway.routes import render_caddyfile
+from devproxy.gateway.routes import save_table
 
 
 def _route(name="codeup", port=42133, mode="up"):

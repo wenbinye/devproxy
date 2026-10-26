@@ -1,6 +1,8 @@
 from pathlib import Path
 
-from devproxy.core.paths import Paths, default_paths, default_state_dir
+from devproxy.core.paths import Paths
+from devproxy.core.paths import default_paths
+from devproxy.core.paths import default_state_dir
 
 
 def test_derived_paths(tmp_path):
@@ -64,4 +66,3 @@ def test_default_state_dir_defaults_under_home(tmp_path, monkeypatch):
     monkeypatch.delenv("DEVPROXY_STATE_DIR", raising=False)
     assert default_state_dir(tmp_path) == tmp_path / ".local" / "state" / "devproxy"
     assert default_state_dir() == Path.home() / ".local" / "state" / "devproxy"
-

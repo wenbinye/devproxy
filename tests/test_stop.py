@@ -55,8 +55,9 @@ class _FakeCaddy:
 
 
 def _seed(store, name: str, source: str | None, pid: int | None = None) -> None:
-    from devproxy.gateway.routes import Route
     import time
+
+    from devproxy.gateway.routes import Route
 
     route = Route(
         name=name,
@@ -101,8 +102,8 @@ def test_stop_never_touches_other_projects(project_env, monkeypatch):
     _, paths, store = project_env
     source = str(paths.state_dir / "devproxy.toml")
     _seed(store, "web", source, pid=111)
-    _seed(store, "manual", None, pid=333)               # 手工 up 的
-    _seed(store, "other", "/elsewhere/devproxy.toml")   # 别的项目的
+    _seed(store, "manual", None, pid=333)  # 手工 up 的
+    _seed(store, "other", "/elsewhere/devproxy.toml")  # 别的项目的
     monkeypatch.setattr("devproxy.cli._shared.kill_pid_group", lambda *a, **k: None)
 
     result = _invoke([])

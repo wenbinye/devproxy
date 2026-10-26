@@ -8,9 +8,9 @@ from __future__ import annotations
 import sys
 from typing import NoReturn
 
+import typer
 from rich.console import Console
 from rich.markup import escape
-import typer
 
 console = Console()
 

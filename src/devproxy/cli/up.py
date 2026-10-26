@@ -4,7 +4,9 @@ from pathlib import Path
 
 import typer
 
+from devproxy.cli import _shared as s
 from devproxy.cli import app
+from devproxy.cli._shared import EXIT_OK
 from devproxy.cli._shared import EXIT_PRECONDITION
 from devproxy.cli._shared import EXIT_USAGE
 from devproxy.core.config import READY_TIMEOUT_MAX
@@ -15,8 +17,6 @@ from devproxy.gateway.routes import RouteTableError
 from devproxy.gateway.runner import PreconditionError
 from devproxy.gateway.runner import UpError
 from devproxy.gateway.store import RouteStoreError
-
-from devproxy.cli import _shared as s
 
 
 def _validate_cli_args(name: str, port: int | None, ready_timeout: int | None) -> None:
@@ -31,12 +31,9 @@ def _validate_cli_args(name: str, port: int | None, ready_timeout: int | None) -
         s.fail(str(e), EXIT_USAGE)
     if port is not None and not (1 <= port <= 65535):
         s.fail(f"非法端口 {port}：必须在 1..65535 之间", EXIT_USAGE)
-    if ready_timeout is not None and not (
-        READY_TIMEOUT_MIN <= ready_timeout <= READY_TIMEOUT_MAX
-    ):
+    if ready_timeout is not None and not (READY_TIMEOUT_MIN <= ready_timeout <= READY_TIMEOUT_MAX):
         s.fail(
-            f"非法就绪超时 {ready_timeout}：必须在 "
-            f"{READY_TIMEOUT_MIN}..{READY_TIMEOUT_MAX} 秒之间",
+            f"非法就绪超时 {ready_timeout}：必须在 {READY_TIMEOUT_MIN}..{READY_TIMEOUT_MAX} 秒之间",
             EXIT_USAGE,
         )
 

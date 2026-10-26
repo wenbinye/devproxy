@@ -273,9 +273,7 @@ def test_logs_one_target_shows_path_and_follow_hint(project_scope):
 def test_logs_bare_in_project_follows_project_apps(project_scope, monkeypatch):
     """裸 `devproxy logs` 在项目里 = 跟本项目所有应用（一个时就是 tail -f）。"""
     followed: list[Path] = []
-    monkeypatch.setattr(
-        "devproxy.cli.logs.follow_log", lambda path: followed.append(path)
-    )
+    monkeypatch.setattr("devproxy.cli.logs.follow_log", lambda path: followed.append(path))
     result = _invoke(["logs"])
     assert result.exit_code == 0, result.output
     assert followed == [project_scope[1].log_dir / "routes" / "web.log"]

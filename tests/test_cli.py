@@ -8,10 +8,13 @@ from typer.testing import CliRunner
 from devproxy.cli import app
 from devproxy.cli._shared import DevProxyGroup
 from devproxy.core.caddy_env import CaddyEnvArchiveError
-from devproxy.core.config import Config, ConfigError
+from devproxy.core.config import Config
+from devproxy.core.config import ConfigError
 from devproxy.core.paths import Paths
-from devproxy.gateway.routes import Route, RouteTableError
-from devproxy.gateway.store import RouteStore, RouteStoreError
+from devproxy.gateway.routes import Route
+from devproxy.gateway.routes import RouteTableError
+from devproxy.gateway.store import RouteStore
+from devproxy.gateway.store import RouteStoreError
 
 
 class FakeCaddy:
@@ -244,7 +247,9 @@ def _write_ca(storage: Path) -> Path:
     """在 Caddy storage 下放一份 CA 根证书（模拟"首条路由已生成 CA"）。"""
     ca = storage / "pki" / "authorities" / "local" / "root.crt"
     ca.parent.mkdir(parents=True, exist_ok=True)
-    ca.write_text("-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n", encoding="utf-8")
+    ca.write_text(
+        "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n", encoding="utf-8"
+    )
     return ca
 
 
@@ -451,8 +456,7 @@ def _seed_legacy_unit(platform, tmp_path, caddyfile_text=None):
     old_cfg = tmp_path / "old" / "Caddyfile"
     old_cfg.parent.mkdir(parents=True, exist_ok=True)
     old_cfg.write_text(
-        caddyfile_text
-        or "localhost {\n\ttls internal\n}\n\n*.test {\n\trespond 404\n}\n",
+        caddyfile_text or "localhost {\n\ttls internal\n}\n\n*.test {\n\trespond 404\n}\n",
         encoding="utf-8",
     )
     unit = platform.service_unit_path("caddy")
@@ -487,9 +491,7 @@ def test_setup_does_not_pre_read_legacy_caddyfile(env, monkeypatch, tmp_path):
 
     _CountingPath.reads = []
     platform = FakePlatform()
-    monkeypatch.setattr(
-        "devproxy.cli._shared.DNSMASQ_CONF", tmp_path / "dnsmasq.conf"
-    )
+    monkeypatch.setattr("devproxy.cli._shared.DNSMASQ_CONF", tmp_path / "dnsmasq.conf")
     monkeypatch.setattr(
         "devproxy.cli._shared.default_dns_route",
         lambda *a, **k: tmp_path / "resolved.conf",
@@ -500,9 +502,7 @@ def test_setup_does_not_pre_read_legacy_caddyfile(env, monkeypatch, tmp_path):
     old_cfg.parent.mkdir(parents=True)
     legacy_storage = tmp_path / "legacy-data"
     old_cfg.write_text(
-        "{\n"
-        f"\tstorage file_system {legacy_storage}\n"
-        "}\n\nlocalhost {\n\ttls internal\n}\n",
+        f"{{\n\tstorage file_system {legacy_storage}\n}}\n\nlocalhost {{\n\ttls internal\n}}\n",
         encoding="utf-8",
     )
     unit = platform.service_unit_path("caddy")
@@ -624,9 +624,7 @@ def test_setup_backup_targets_follow_dns_backend(env, monkeypatch, tmp_path):
     res = CliRunner().invoke(app, ["setup", "--yes", "--dns-backend", "system"])
     assert res.exit_code == 0, res.output
     manifest = json.loads(
-        (next((env / "state" / "backups").iterdir()) / "manifest.json").read_text(
-            encoding="utf-8"
-        )
+        (next((env / "state" / "backups").iterdir()) / "manifest.json").read_text(encoding="utf-8")
     )
     originals = [e["original"] for e in manifest["entries"]]
     assert "/etc/dnsmasq.d/devproxy.conf" in originals
@@ -662,10 +660,7 @@ def test_setup_persists_legacy_storage_for_later_setups(env, monkeypatch, tmp_pa
         platform,
         tmp_path,
         caddyfile_text=(
-            "{\n"
-            f"\tstorage file_system {legacy_storage}\n"
-            "}\n\n"
-            "localhost {\n\ttls internal\n}\n"
+            f"{{\n\tstorage file_system {legacy_storage}\n}}\n\nlocalhost {{\n\ttls internal\n}}\n"
         ),
     )
     res = CliRunner().invoke(app, ["setup", "--yes"])
@@ -686,13 +681,9 @@ def _write_storage_pair(env, config_storage: str, stored_storage: str):
 
     paths = default_paths()
     paths.config_toml.parent.mkdir(parents=True, exist_ok=True)
-    paths.config_toml.write_text(
-        f'storage = "{config_storage}"\n', encoding="utf-8"
-    )
+    paths.config_toml.write_text(f'storage = "{config_storage}"\n', encoding="utf-8")
     paths.caddy_storage.parent.mkdir(parents=True, exist_ok=True)
-    paths.caddy_storage.write_text(
-        json.dumps({"storage": stored_storage}), encoding="utf-8"
-    )
+    paths.caddy_storage.write_text(json.dumps({"storage": stored_storage}), encoding="utf-8")
     return paths
 
 
@@ -753,8 +744,10 @@ def test_setup_example_command_actually_uses_port():
 def test_setup_prints_the_working_example(env, monkeypatch):
     """终端上打出来的示例必须是同一个能跑通的写法。"""
     from devproxy.cli._shared import UP_EXAMPLE
-    from devproxy.platform.base import Action, Status
-    from devproxy.lifecycle.setup import ComponentReport, SetupPlan
+    from devproxy.lifecycle.setup import ComponentReport
+    from devproxy.lifecycle.setup import SetupPlan
+    from devproxy.platform.base import Action
+    from devproxy.platform.base import Status
 
     report = ComponentReport(
         name="caddy",
@@ -794,9 +787,7 @@ def test_up_invalid_port_exits_2(env, monkeypatch):
 
 def test_up_invalid_ready_timeout_exits_2(env, monkeypatch):
     _patch_ctx(monkeypatch, env)
-    res = CliRunner().invoke(
-        app, ["up", "codeup", "--ready-timeout", "0", "--", "sleep", "1"]
-    )
+    res = CliRunner().invoke(app, ["up", "codeup", "--ready-timeout", "0", "--", "sleep", "1"])
     assert res.exit_code == 2, res.output
     assert "就绪超时" in res.output
 
@@ -902,9 +893,7 @@ def test_setup_rollback_restart_permission_error_exits_4(env, monkeypatch, tmp_p
     assert "Traceback" not in res.output
 
 
-def test_setup_rollback_skips_restart_when_service_was_absent(
-    env, monkeypatch, tmp_path
-):
+def test_setup_rollback_skips_restart_when_service_was_absent(env, monkeypatch, tmp_path):
     """迁移前没有服务单元 → 回滚无需重启，也不该报错。"""
     platform = _fake_setup_platform(monkeypatch, tmp_path)
     _seed_legacy_unit(platform, tmp_path)
@@ -914,9 +903,7 @@ def test_setup_rollback_skips_restart_when_service_was_absent(
     monkeypatch.setattr(
         platform, "service_unit_path", lambda name: tmp_path / "no-such-unit.service"
     )
-    monkeypatch.setattr(
-        platform, "restart_service", lambda name: pytest.fail("不应尝试重启")
-    )
+    monkeypatch.setattr(platform, "restart_service", lambda name: pytest.fail("不应尝试重启"))
     res = CliRunner().invoke(app, ["setup", "--rollback", str(backup_dir)])
     assert res.exit_code == 0, res.output
     assert "跳过重启" in res.output
@@ -1045,9 +1032,7 @@ def test_setup_accepts_tld_explicitly_allowed_in_config(env, monkeypatch):
     """config.toml 里显式放行后，命令行用同一个后缀必须放行。"""
     config_dir = env / "config"
     config_dir.mkdir(parents=True, exist_ok=True)
-    (config_dir / "config.toml").write_text(
-        'allowed_domain_suffixes = ["dev"]\n', encoding="utf-8"
-    )
+    (config_dir / "config.toml").write_text('allowed_domain_suffixes = ["dev"]\n', encoding="utf-8")
     platform = _fake_setup_platform(monkeypatch, env)
     res = CliRunner().invoke(app, ["setup", "--domain-suffix", "dev"])
     assert res.exit_code == 0, res.output

@@ -25,9 +25,7 @@ def validate_name(name: str) -> str:
     if len(name) > MAX_NAME_LEN:
         raise InvalidNameError(name, f"长度不得超过 {MAX_NAME_LEN}")
     if not NAME_RE.match(name):
-        raise InvalidNameError(
-            name, "限单标签 [a-z0-9-]，首尾为字母或数字，不得含点"
-        )
+        raise InvalidNameError(name, "限单标签 [a-z0-9-]，首尾为字母或数字，不得含点")
     return name
 
 

@@ -9,13 +9,22 @@ import hashlib
 import json
 import shutil
 import time
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass
+from dataclasses import field
 from pathlib import Path
-from typing import Callable
 
 # 备份用的复制函数：把源文件复制到备份目录。默认 shutil.copy2；
 # /etc 下的文件普通用户读不到，迁移场景要换成走提权会话的实现。
 Copier = Callable[[Path, Path], None]
+
+
+def _copy2(src: Path, dest: Path) -> None:
+    """默认的复制实现。显式写成返回 None —— shutil.copy2 自己返回目标路径，
+    直接拿它当 Copier 会让类型对不上（Copier 的约定是「复制完就完事」）。
+    """
+    shutil.copy2(src, dest)
+
 
 # 还原用的文件操作：src 为 None 表示"删除 dest"。
 Restorer = Callable[[Path | None, Path], None]
@@ -48,8 +57,7 @@ def _verify_backup_copy(entry: BackupEntry, src: Path) -> None:
     actual = _sha256(src)
     if actual != entry.sha256:
         raise ValueError(
-            f"备份副本 sha256 不匹配，拒绝还原：{src}"
-            f"（期望 {entry.sha256}，实际 {actual}）"
+            f"备份副本 sha256 不匹配，拒绝还原：{src}（期望 {entry.sha256}，实际 {actual}）"
         )
 
 
@@ -143,7 +151,7 @@ class BackupManager:
         self.base_dir = base_dir
         # copier(src, dest)：把源文件复制进备份目录。默认 shutil.copy2；
         # 迁移场景里 /etc 下的文件普通用户读不到，要换成走提权会话的实现。
-        self._copier: Copier = copier or (lambda src, dest: shutil.copy2(src, dest))
+        self._copier: Copier = copier or _copy2
 
     def create(self, targets: list[Path]) -> Backup:
         """备份目标文件。目录创建或复制失败一律抛异常 —— 调用方必须中止迁移。
@@ -185,9 +193,7 @@ class BackupManager:
                         )
                     )
                 else:
-                    entries.append(
-                        BackupEntry(original=target, backup=backup_name, existed=False)
-                    )
+                    entries.append(BackupEntry(original=target, backup=backup_name, existed=False))
         except Exception:
             # 备份未完成：先打标记再清理半成品目录，避免留下没有 manifest 的孤儿备份
             try:

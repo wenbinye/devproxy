@@ -13,15 +13,13 @@ from pathlib import Path
 
 from devproxy.core.config import Config
 from devproxy.core.paths import Paths
-from devproxy.platform.base import (
-    RESOLVED_CONF,
-    RESOLVER_DIR,
-    SYSTEM_DNSMASQ_CONF,
-    Action,
-    Platform,
-    Status,
-    render_resolver_file,
-)
+from devproxy.platform.base import RESOLVED_CONF
+from devproxy.platform.base import RESOLVER_DIR
+from devproxy.platform.base import SYSTEM_DNSMASQ_CONF
+from devproxy.platform.base import Action
+from devproxy.platform.base import Platform
+from devproxy.platform.base import Status
+from devproxy.platform.base import render_resolver_file
 
 # 路径常量的定义在 `platform/base.py`（单一来源）；这里只导入使用。
 
@@ -78,9 +76,7 @@ def _sha256(text: str) -> str:
 class DnsComponent:
     name = "dns"
 
-    def __init__(
-        self, platform: Platform, paths: Paths, config: Config, backend: str = "auto"
-    ):
+    def __init__(self, platform: Platform, paths: Paths, config: Config, backend: str = "auto"):
         self.platform = platform
         self.paths = paths
         self.config = config
@@ -101,8 +97,7 @@ class DnsComponent:
         if self.backend == "resolved":
             if self.platform.name == "mac":
                 raise RuntimeError(
-                    "macOS 不支持 resolved 后端（没有 systemd-resolved），"
-                    "请使用 auto 或 system"
+                    "macOS 不支持 resolved 后端（没有 systemd-resolved），请使用 auto 或 system"
                 )
             return True
         if self.platform.name == "mac" or self.backend == "system":
@@ -225,7 +220,7 @@ class DnsComponent:
         if self.platform.name == "mac":
             # macOS 的每域解析器文件：mDNSResponder 会自己重载，
             # 不需要（也不能）重启任何解析服务。
-            desc = "写入 %s（macOS 每域解析器）" % self.target_path
+            desc = f"写入 {self.target_path}（macOS 每域解析器）"
             if self._route_in_place(content):
                 return []
             return [
@@ -238,8 +233,9 @@ class DnsComponent:
                 )
             ]
         if resolved:
-            desc = "写入 systemd-resolved 路由（*.%s → 127.0.0.1，整机 DNS 作用域）" % (
-                self.config.domain_suffix,
+            desc = (
+                "写入 systemd-resolved 路由"
+                f"（*.{self.config.domain_suffix} → 127.0.0.1，整机 DNS 作用域）"
             )
             reload_action = Action(
                 description="重载 systemd-resolved 使路由生效",
@@ -248,7 +244,7 @@ class DnsComponent:
                 privileged=True,
             )
         else:
-            desc = "写入系统 dnsmasq 路由（*.%s → 127.0.0.1）" % self.config.domain_suffix
+            desc = f"写入系统 dnsmasq 路由（*.{self.config.domain_suffix} → 127.0.0.1）"
             reload_action = Action(
                 description="重载系统 dnsmasq 使路由生效",
                 kind="run",
@@ -258,7 +254,13 @@ class DnsComponent:
         if self._route_in_place(content):
             return []
         return [
-            Action(description=desc, kind="write", path=self.target_path, content=content, privileged=True),
+            Action(
+                description=desc,
+                kind="write",
+                path=self.target_path,
+                content=content,
+                privileged=True,
+            ),
             reload_action,
         ]
 
@@ -315,8 +317,7 @@ class DnsComponent:
             return Status(
                 ok=False,
                 detail=(
-                    f"系统解析器未把 {name} 指到本机（"
-                    f"{answer or '无响应'}）；路由文件已写但未生效"
+                    f"系统解析器未把 {name} 指到本机（{answer or '无响应'}）；路由文件已写但未生效"
                 ),
                 hint=(
                     f"dscacheutil -q host -a name {name}"
@@ -373,14 +374,9 @@ class DnsComponent:
             if current is not None:
                 return _sha256(current) == digest
             state = self._read_state()
-            if (
-                state.get("content_sha256") == digest
-                and state.get("path") == str(self.target_path)
-            ):
+            if state.get("content_sha256") == digest and state.get("path") == str(self.target_path):
                 return True
         # 文件不存在或普通用户读不到（如 root:root 0600），且 state 哈希缺失/
         # 过期：平台的"文件存在"判据是此时唯一可用的信息。check 与 plan 必须
         # 共用它——否则 doctor 报绿而 setup 又要 sudo 重写并重启整机解析器。
-        return self.platform.dns_route_installed(
-            self._backend_key(), self.config.domain_suffix
-        )
+        return self.platform.dns_route_installed(self._backend_key(), self.config.domain_suffix)

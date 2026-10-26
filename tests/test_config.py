@@ -2,7 +2,10 @@ from pathlib import Path
 
 import pytest
 
-from devproxy.core.config import Config, ConfigError, load_config, validate_config
+from devproxy.core.config import Config
+from devproxy.core.config import ConfigError
+from devproxy.core.config import load_config
+from devproxy.core.config import validate_config
 
 
 def test_defaults_when_file_missing(tmp_path):
@@ -73,7 +76,7 @@ def test_malformed_toml_raises_config_error(tmp_path):
 @pytest.mark.parametrize(
     "suffix",
     [
-        'test }\nimport /tmp/evil\n#',  # Caddyfile 元字符
+        "test }\nimport /tmp/evil\n#",  # Caddyfile 元字符
         "a.b",  # 含点：必须是单标签
         ".test",
         "-abc",  # 首字符连字符

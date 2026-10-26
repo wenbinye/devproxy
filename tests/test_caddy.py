@@ -1,15 +1,14 @@
 import json
 import subprocess
 import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 
-from devproxy.gateway.caddy import (
-    CaddyAdmin,
-    CaddyConfig,
-    MainCaddyfileSpec,
-    build_main_caddyfile,
-)
+from devproxy.gateway.caddy import CaddyAdmin
+from devproxy.gateway.caddy import CaddyConfig
+from devproxy.gateway.caddy import MainCaddyfileSpec
+from devproxy.gateway.caddy import build_main_caddyfile
 
 
 class _Quiet(ThreadingHTTPServer):
@@ -254,9 +253,7 @@ def test_api_malformed_status_line_returns_zero_not_exception():
     worker = threading.Thread(target=serve, daemon=True)
     worker.start()
     try:
-        code, body = CaddyAdmin(
-            base=f"http://127.0.0.1:{port}", timeout=2
-        ).api("GET", "/config/")
+        code, body = CaddyAdmin(base=f"http://127.0.0.1:{port}", timeout=2).api("GET", "/config/")
         assert (code, body) == (0, None)
     finally:
         srv.close()

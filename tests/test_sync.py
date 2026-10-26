@@ -475,9 +475,7 @@ def test_worker_passes_cwd_and_source_to_up_request(monkeypatch, tmp_path):
     paths = Paths(tmp_path / "config", tmp_path / "state", tmp_path / "data")
     paths.ensure_files()
     paths.caddyfile.write_text("# test Caddyfile\n", encoding="utf-8")
-    monkeypatch.setattr(
-        _worker, "build_context", lambda: (paths, None, None, None)
-    )
+    monkeypatch.setattr(_worker, "build_context", lambda: (paths, None, None, None))
     project_dir = tmp_path / "project"
     project_dir.mkdir()
     source = str(project_dir / "devproxy.toml")
@@ -526,9 +524,7 @@ def test_worker_runs_app_in_project_dir(monkeypatch, tmp_path):
         recorded.append(json.loads(paths.routes_json.read_text()))
 
     monkeypatch.setattr(store, "mutate", spy)
-    monkeypatch.setattr(
-        _worker, "build_context", lambda: (paths, cfg, store, FakeAdmin())
-    )
+    monkeypatch.setattr(_worker, "build_context", lambda: (paths, cfg, store, FakeAdmin()))
     monkeypatch.setenv("MARKER", str(marker))
     source = str(project_dir / "devproxy.toml")
     monkeypatch.setenv(
@@ -557,7 +553,7 @@ def _up_route(name: str, pid: int | None, proc_start: str | None = None) -> Rout
         domain=f"{name}.test",
         port=45671,
         mode="up",
-        upstream=f"127.0.0.1:45671",
+        upstream="127.0.0.1:45671",
         command=["npm", "run", "dev"],
         pid=pid,
         proc_start=proc_start,

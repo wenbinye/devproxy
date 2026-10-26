@@ -9,12 +9,10 @@ import os
 import pytest
 
 from devproxy.components import dns as dns_module
-from devproxy.components.dns import (
-    DnsComponent,
-    render_resolver_file,
-    render_resolved_conf,
-    render_system_dnsmasq_conf,
-)
+from devproxy.components.dns import DnsComponent
+from devproxy.components.dns import render_resolved_conf
+from devproxy.components.dns import render_resolver_file
+from devproxy.components.dns import render_system_dnsmasq_conf
 from devproxy.core.config import Config
 from devproxy.core.paths import Paths
 from devproxy.platform.fake import FakePlatform
@@ -38,9 +36,7 @@ def isolated_dns_paths(tmp_path, monkeypatch):
     单个用例仍可再用 monkeypatch 覆盖成自己的路径（后设置的生效）。
     """
     monkeypatch.setattr(dns_module, "RESOLVED_CONF", tmp_path / "etc" / "devproxy.conf")
-    monkeypatch.setattr(
-        dns_module, "SYSTEM_DNSMASQ_CONF", tmp_path / "etc" / "dnsmasq.conf"
-    )
+    monkeypatch.setattr(dns_module, "SYSTEM_DNSMASQ_CONF", tmp_path / "etc" / "dnsmasq.conf")
     monkeypatch.setattr(dns_module, "RESOLVER_DIR", tmp_path / "etc" / "resolver")
 
 
@@ -59,7 +55,9 @@ def test_dns_route_paths_have_a_single_source():
     任何一处重新写回字面量都会让 `is` 断言失败 —— 漂移的后果是
     “setup 写 A、doctor 查 B、回滚备份 C”。
     """
-    from devproxy.platform import base, linux, macos
+    from devproxy.platform import base
+    from devproxy.platform import linux
+    from devproxy.platform import macos
 
     assert _REAL_RESOLVED_CONF is base.RESOLVED_CONF
     assert _REAL_SYSTEM_DNSMASQ_CONF is base.SYSTEM_DNSMASQ_CONF
@@ -185,9 +183,7 @@ def test_system_plan_targets_system_dnsmasq_and_restarts_dnsmasq(tmp_path):
     assert reload_action.privileged is True
 
 
-def test_apply_writes_via_elevated_session_and_records_commands(
-    tmp_path, monkeypatch
-):
+def test_apply_writes_via_elevated_session_and_records_commands(tmp_path, monkeypatch):
     target = tmp_path / "etc" / "resolved.conf.d" / "devproxy.conf"
     monkeypatch.setattr(dns_module, "RESOLVED_CONF", target)
     comp, platform = _component(tmp_path, backend="resolved")
@@ -363,9 +359,7 @@ def test_apply_records_state_in_state_dir(tmp_path, monkeypatch):
 # -- 提权纪律（两个 minor） -----------------------------------------------
 
 
-def test_apply_without_privileged_actions_does_not_request_privilege(
-    tmp_path, monkeypatch
-):
+def test_apply_without_privileged_actions_does_not_request_privilege(tmp_path, monkeypatch):
     comp, platform = _component(tmp_path, backend="resolved")
 
     def boom():
@@ -413,9 +407,7 @@ class _MacPlatform(FakePlatform):
     dns_port = 5300
 
 
-def test_check_reports_not_ok_when_resolver_file_has_wrong_content(
-    tmp_path, monkeypatch
-):
+def test_check_reports_not_ok_when_resolver_file_has_wrong_content(tmp_path, monkeypatch):
     """macOS 上 /etc/resolver/<后缀> 已存在、但内容不是我们要的（缺 port）。
 
     `dns_route_installed` 只按**存在性**回答 —— 只靠它，doctor 会谎报"已就绪"，
@@ -440,9 +432,7 @@ def test_check_ok_when_resolver_file_content_matches(tmp_path, monkeypatch):
     """对照组：内容正确时 check 必须就绪 —— 否则上一条会退化成"永远报错"。"""
     resolver_dir = tmp_path / "etc" / "resolver"
     resolver_dir.mkdir(parents=True)
-    (resolver_dir / "test").write_text(
-        render_resolver_file(5300), encoding="utf-8"
-    )
+    (resolver_dir / "test").write_text(render_resolver_file(5300), encoding="utf-8")
     monkeypatch.setattr(dns_module, "RESOLVER_DIR", resolver_dir)
 
     comp, platform = _component(tmp_path, backend="auto", platform=_MacPlatform())
@@ -459,7 +449,7 @@ def test_macos_explicit_resolved_backend_raises(tmp_path):
     """macOS 没有 systemd-resolved —— 显式 resolved 必须报错，不能静默降级。"""
     comp, _platform = _component(tmp_path, backend="resolved", platform=_MacPlatform())
     with pytest.raises(RuntimeError, match="macOS 不支持 resolved"):
-        comp.resolved_backend
+        _ = comp.resolved_backend
 
 
 def test_macos_explicit_resolved_backend_check_reports_config_error(tmp_path):
@@ -612,9 +602,7 @@ def test_unreadable_route_with_platform_installed_is_in_place_for_check_and_plan
     assert comp.plan() == [], "doctor 说就绪时 setup 不能又重写并重启 resolved"
 
 
-def test_unreadable_route_without_platform_confirmation_is_not_in_place(
-    tmp_path, monkeypatch
-):
+def test_unreadable_route_without_platform_confirmation_is_not_in_place(tmp_path, monkeypatch):
     """平台也无法确认时不能凭空报就绪 —— 否则会漏掉真正的缺失。"""
     from tests.support import UnreadablePath
 

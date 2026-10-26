@@ -9,47 +9,40 @@
 实现分散在同包的几个模块里（caddyfile / legacy / install / rollback），
 这里只做编排，并把公共名字转出，供包外按 `devproxy.lifecycle.migrate.<名字>` 使用。
 """
+
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from dataclasses import field
 from pathlib import Path
 
 from devproxy.core.backup import Backup
 from devproxy.core.config import Config
 from devproxy.core.paths import Paths
+from devproxy.lifecycle.migrate.caddyfile import block_addresses
+from devproxy.lifecycle.migrate.caddyfile import legacy_storage_path
+from devproxy.lifecycle.migrate.caddyfile import split_caddyfile
+from devproxy.lifecycle.migrate.caddyfile import split_caddyfile_blocks
+from devproxy.lifecycle.migrate.caddyfile import wildcard_addresses
+from devproxy.lifecycle.migrate.install import _install_caddy_unit
+from devproxy.lifecycle.migrate.install import _restart_caddy
+from devproxy.lifecycle.migrate.install import _validate_caddyfile
+from devproxy.lifecycle.migrate.install import _write_main_caddyfile
+from devproxy.lifecycle.migrate.install import _write_sites_caddy
+from devproxy.lifecycle.migrate.legacy import LegacyState
+from devproxy.lifecycle.migrate.legacy import MigrationError
+from devproxy.lifecycle.migrate.legacy import detect_legacy
+from devproxy.lifecycle.migrate.legacy import load_legacy_storage
+from devproxy.lifecycle.migrate.legacy import resolve_storage_details
+from devproxy.lifecycle.migrate.legacy import save_legacy_storage
+from devproxy.lifecycle.migrate.legacy import unit_config_path
+from devproxy.lifecycle.migrate.legacy import unit_env
+from devproxy.lifecycle.migrate.legacy import unit_environment_files
+from devproxy.lifecycle.migrate.legacy import unit_exec_start
+from devproxy.lifecycle.migrate.rollback import _create_backup
+from devproxy.lifecycle.migrate.rollback import _restore_after_failure
+from devproxy.lifecycle.migrate.rollback import rollback
 from devproxy.platform.base import Platform
-
-from devproxy.lifecycle.migrate.caddyfile import (
-    block_addresses,
-    legacy_storage_path,
-    split_caddyfile,
-    split_caddyfile_blocks,
-    wildcard_addresses,
-)
-from devproxy.lifecycle.migrate.install import (
-    _install_caddy_unit,
-    _restart_caddy,
-    _validate_caddyfile,
-    _write_main_caddyfile,
-    _write_sites_caddy,
-)
-from devproxy.lifecycle.migrate.legacy import (
-    LegacyState,
-    MigrationError,
-    detect_legacy,
-    load_legacy_storage,
-    resolve_storage_details,
-    save_legacy_storage,
-    unit_config_path,
-    unit_env,
-    unit_environment_files,
-    unit_exec_start,
-)
-from devproxy.lifecycle.migrate.rollback import (
-    _create_backup,
-    _restore_after_failure,
-    rollback,
-)
 
 __all__ = [
     "LegacyState",
@@ -124,9 +117,7 @@ def default_dns_route(
     """
     from devproxy.components.dns import DnsComponent
 
-    comp = DnsComponent(
-        platform, paths, config, backend=backend or config.dns_backend
-    )
+    comp = DnsComponent(platform, paths, config, backend=backend or config.dns_backend)
     return comp.target_path
 
 
@@ -154,11 +145,7 @@ def run_migration(request: MigrationRequest) -> MigrationOutcome:
     if state.config_path is None:
         raise MigrationError("遗留 Caddyfile 路径未知，迁移已中止（未改动任何文件）")
     notes: list[str] = []
-    conf = (
-        request.dnsmasq_conf
-        if request.dnsmasq_conf is not None
-        else _default_dnsmasq_conf()
-    )
+    conf = request.dnsmasq_conf if request.dnsmasq_conf is not None else _default_dnsmasq_conf()
     route = (
         request.dns_route
         if request.dns_route is not None

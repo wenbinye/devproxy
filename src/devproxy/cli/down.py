@@ -2,16 +2,16 @@ from __future__ import annotations
 
 import typer
 
-from devproxy.cli import app
 from devproxy.cli import _completion
+from devproxy.cli import _shared as s
+from devproxy.cli import app
 from devproxy.cli._shared import EXIT_OK
 from devproxy.cli._shared import EXIT_USAGE
 from devproxy.gateway.names import InvalidNameError
 from devproxy.gateway.names import validate_name
+from devproxy.gateway.routes import RouteTable
 from devproxy.gateway.routes import RouteTableError
 from devproxy.gateway.store import RouteStoreError
-
-from devproxy.cli import _shared as s
 
 
 @app.command()
@@ -40,8 +40,12 @@ def down(
     if route is None:
         s.console.print(f"（{name} 未注册）")
         raise typer.Exit(EXIT_OK)
+
+    def _remove(table: RouteTable) -> None:
+        table.remove(name)
+
     try:
-        store.mutate(lambda t: t.remove(name))
+        store.mutate(_remove)
     except (RouteStoreError, RouteTableError) as e:
         s.fail(str(e))
     if route.pid:

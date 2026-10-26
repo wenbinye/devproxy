@@ -17,7 +17,7 @@ class DevProxyGroup(TyperGroup):
         has_sep = "--" in args
         if has_sep:
             i = args.index("--")
-            head, tail = args[:i], args[i + 1:]
+            head, tail = args[:i], args[i + 1 :]
         else:
             head, tail = args, []
         data = ctx.ensure_object(dict)

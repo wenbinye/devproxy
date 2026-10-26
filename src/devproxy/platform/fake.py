@@ -15,7 +15,8 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from devproxy.platform.base import ElevatedSession, nss_db_dir
+from devproxy.platform.base import ElevatedSession
+from devproxy.platform.base import nss_db_dir
 
 
 def _certutil_opt(argv: list[str], name: str) -> str | None:
@@ -54,7 +55,7 @@ def _repair_flags(flags: str) -> str:
 
 
 class FakeElevated:
-    def __init__(self, platform: "FakePlatform") -> None:
+    def __init__(self, platform: FakePlatform) -> None:
         self.platform = platform
 
     def run(self, argv: list[str]) -> tuple[int, str]:
@@ -188,7 +189,7 @@ class FakePlatform:
         if raw is None:
             return default
         if raw.startswith("sql:"):
-            raw = raw[len("sql:"):]
+            raw = raw[len("sql:") :]
         return _norm(Path(raw).expanduser())
 
     def _apply_certutil(self, argv: list[str]) -> None:
@@ -335,9 +336,7 @@ class FakePlatform:
         """假平台认定的默认 NSS 库路径（**非协议方法**）。"""
         return _norm(self.nss_db)
 
-    def nss_entries(
-        self, ca: Path, nss_dir: Path | None = None
-    ) -> list[tuple[str, str]] | None:
+    def nss_entries(self, ca: Path, nss_dir: Path | None = None) -> list[tuple[str, str]] | None:
         """库里与这张 CA 内容相同的条目；假平台不会"判不了"（返回 []）。"""
         db = self._nss_db_for(nss_dir)
         target = _read_bytes(ca)
@@ -362,9 +361,7 @@ class FakePlatform:
             return None
         return stored != expected
 
-    def nss_has_nickname(
-        self, nickname: str, nss_dir: Path | None = None
-    ) -> bool | None:
+    def nss_has_nickname(self, nickname: str, nss_dir: Path | None = None) -> bool | None:
         return (self._nss_db_for(nss_dir), nickname) in self.nss_entries_db
 
     def nss_trust_flags(self, flags: str) -> str:
@@ -383,9 +380,7 @@ class FakePlatform:
             return False
         db = self._nss_db_for(None)
         return any(
-            entry_db == db
-            and _flags_ssl_trusted(flags)
-            and _read_bytes(path) == target
+            entry_db == db and _flags_ssl_trusted(flags) and _read_bytes(path) == target
             for (entry_db, _nickname), (path, flags) in self.nss_entries_db.items()
         )
 

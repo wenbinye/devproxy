@@ -9,6 +9,7 @@ from pathlib import Path
 
 import typer
 
+from devproxy.cli import _shared as s
 from devproxy.cli import app
 from devproxy.cli._shared import EXIT_FAIL
 from devproxy.cli._shared import EXIT_OK
@@ -25,14 +26,10 @@ from devproxy.gateway.project import suggest_command
 from devproxy.gateway.routes import RouteTableError
 from devproxy.gateway.routes import load_table
 
-from devproxy.cli import _shared as s
-
 
 @app.command()
 def init(
-    name: str = typer.Option(
-        None, "--name", help="路由名（默认取项目目录名）"
-    ),
+    name: str = typer.Option(None, "--name", help="路由名（默认取项目目录名）"),
     command: str = typer.Option(
         None, "--command", help='启动命令，如 "npm run dev"（不写则按项目类型猜）'
     ),
@@ -41,9 +38,7 @@ def init(
         "--from",
         help="从已注册的同名路由导入它的启动命令（路由表是全局的，所以要指名）",
     ),
-    force: bool = typer.Option(
-        False, "--force", help="覆盖已存在的 devproxy.toml"
-    ),
+    force: bool = typer.Option(False, "--force", help="覆盖已存在的 devproxy.toml"),
 ) -> None:
     """在项目里生成 devproxy.toml。"""
     root = detect_project_root()
@@ -107,10 +102,10 @@ def _resolve_command(
         return argv, []
 
     if from_route:
-        argv, error = _import_command(from_route)
+        imported, error = _import_command(from_route)
         if error:
             s.fail(error, EXIT_USAGE)
-        return argv or [], [f"启动命令是从已注册的路由 {from_route} 导入的"]
+        return imported or [], [f"启动命令是从已注册的路由 {from_route} 导入的"]
 
     suggested, reason = suggest_command(root)
     if suggested is None:
@@ -134,7 +129,5 @@ def _import_command(route_name: str) -> tuple[list[str] | None, str]:
         known = "、".join(sorted(r.name for r in table.routes)) or "（路由表是空的）"
         return None, f"路由表里没有 {route_name!r}。已注册的路由：{known}"
     if not route.command:
-        return None, (
-            f"路由 {route_name!r} 没有启动命令（expose 模式的路由只记上游端口）"
-        )
+        return None, (f"路由 {route_name!r} 没有启动命令（expose 模式的路由只记上游端口）")
     return list(route.command), ""

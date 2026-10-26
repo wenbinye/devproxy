@@ -12,16 +12,14 @@ import sys
 import tempfile
 from pathlib import Path
 
-from devproxy.platform.base import (
-    CA_NICKNAME,
-    RESOLVED_CONF,
-    SYSTEM_DNSMASQ_CONF,
-    SYSTEM_TRUST_DIR,
-    ElevatedSession,
-    file_fingerprints as _fingerprints_of_file,
-    nss_db_dir,
-    pem_fingerprints as _pem_fingerprints,
-)
+from devproxy.platform.base import CA_NICKNAME
+from devproxy.platform.base import RESOLVED_CONF
+from devproxy.platform.base import SYSTEM_DNSMASQ_CONF
+from devproxy.platform.base import SYSTEM_TRUST_DIR
+from devproxy.platform.base import ElevatedSession
+from devproxy.platform.base import file_fingerprints as _fingerprints_of_file
+from devproxy.platform.base import nss_db_dir
+from devproxy.platform.base import pem_fingerprints as _pem_fingerprints
 
 # 系统信任库（活库）里可能存放 CA 的位置。
 #
@@ -77,9 +75,7 @@ NSS_TRUSTED_COLUMN = 0
 #
 # 正则只是**候选**：每个候选昵称都要再用 `certutil -L -n <昵称> -a` 实际取一次，
 # 取不到就跳过 —— 解析有偏差时宁可漏判也不能误判。
-_NSS_ROW_RE = re.compile(
-    r"^(?P<name>.*?)[ ]+(?P<flags>[A-Za-z]*(?:,[A-Za-z]*){2})$"
-)
+_NSS_ROW_RE = re.compile(r"^(?P<name>.*?)[ ]+(?P<flags>[A-Za-z]*(?:,[A-Za-z]*){2})$")
 
 
 def _store_candidates() -> list[Path]:
@@ -230,19 +226,15 @@ def _nss_entry_matches(
     `certutil -L -n … -a` 结果在 `cache` 里只取一次。
     """
     if nickname not in cache:
-        code, pem = _run(
-            ["certutil", "-L", "-d", f"sql:{nss}", "-n", nickname, "-a"]
-        )
+        code, pem = _run(["certutil", "-L", "-d", f"sql:{nss}", "-n", nickname, "-a"])
         cache[nickname] = pem if code == 0 else None
-    pem = cache[nickname]
-    if pem is None:
+    cached = cache[nickname]
+    if cached is None:
         return False
-    return bool(expected & _pem_fingerprints(pem))
+    return bool(expected & _pem_fingerprints(cached))
 
 
-def _run(
-    argv: list[str], timeout: float | None = DEFAULT_TIMEOUT
-) -> tuple[int, str]:
+def _run(argv: list[str], timeout: float | None = DEFAULT_TIMEOUT) -> tuple[int, str]:
     """跑一个 argv。timeout 是**防挂死**，不是性能优化。
 
     没有超时的子进程调用会被卡在交互提示上的命令永久拖住，并**无限往
@@ -415,9 +407,7 @@ class LinuxElevated:
             return
         # 两条路都走不通 —— 错误信息要同时带上两条命令的输出，
         # 用户才能分辨"这台机器没免密"和"sudo 本身坏了"。
-        raise PermissionError(
-            f"提权失败：sudo -v: {msg}；sudo -n true: {msg_nopasswd}"
-        )
+        raise PermissionError(f"提权失败：sudo -v: {msg}；sudo -n true: {msg_nopasswd}")
 
     def run(self, argv: list[str]) -> tuple[int, str]:
         if self._noninteractive:
@@ -584,9 +574,7 @@ class LinuxPlatform:
         path = self.service_unit_path(name)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
-            render_systemd_unit(
-                name, exec_start, exec_reload, exec_stop, env, description
-            ),
+            render_systemd_unit(name, exec_start, exec_reload, exec_stop, env, description),
             encoding="utf-8",
         )
         code, msg = _run(["systemctl", "--user", "daemon-reload"])
@@ -658,9 +646,7 @@ class LinuxPlatform:
         if not SYSTEMD_RUN_DIR.is_dir():
             # 容器 / WSL / 非 systemd 宿主：linger 不适用。
             return True
-        code, out = _run(
-            ["loginctl", "show-user", getpass.getuser(), "-p", "Linger", "--value"]
-        )
+        code, out = _run(["loginctl", "show-user", getpass.getuser(), "-p", "Linger", "--value"])
         if code == 127:
             # loginctl 不在 PATH（精简 systemd 环境）：linger 无从启用。
             return True
@@ -695,9 +681,7 @@ class LinuxPlatform:
         systemd-resolved 挂起时子进程不会自己返回，`verify()` 会被永久
         拖死。上限与 macOS 的 `DNS_QUERY_TIMEOUT` 保持一致。
         """
-        code, out = _run(
-            ["resolvectl", "query", name], timeout=DNS_QUERY_TIMEOUT
-        )
+        code, out = _run(["resolvectl", "query", name], timeout=DNS_QUERY_TIMEOUT)
         if code == 0:
             answer = _first_ip(out)
             if answer is not None:
@@ -734,9 +718,7 @@ class LinuxPlatform:
         # 而不是被吞掉后继续跑 openssl。
         if ca_in_trust_store(ca):
             return True
-        code, _ = _run(
-            ["openssl", "verify", "-CApath", str(SYSTEM_TRUST_DIR), str(ca)]
-        )
+        code, _ = _run(["openssl", "verify", "-CApath", str(SYSTEM_TRUST_DIR), str(ca)])
         return code == 0
 
     def nss_db_path(self) -> Path:
@@ -747,9 +729,7 @@ class LinuxPlatform:
         """
         return nss_db_dir(self.user_home)
 
-    def nss_entries(
-        self, ca: Path, nss_dir: Path | None = None
-    ) -> list[tuple[str, str]] | None:
+    def nss_entries(self, ca: Path, nss_dir: Path | None = None) -> list[tuple[str, str]] | None:
         """NSS 库里与这张 CA **内容相同**的条目：[(昵称, 信任标志), ...]。
 
         按**内容**找，不按昵称找 —— NSS 按 (issuer, serial) 去重：
@@ -821,9 +801,7 @@ class LinuxPlatform:
             return False
         if state is None:
             return None
-        code, pem = _run(
-            ["certutil", "-L", "-d", f"sql:{nss}", "-n", nickname, "-a"]
-        )
+        code, pem = _run(["certutil", "-L", "-d", f"sql:{nss}", "-n", nickname, "-a"])
         if code != 0:
             if _nss_missing_cert(pem):
                 return False  # 这个昵称下确定没有条目
@@ -834,9 +812,7 @@ class LinuxPlatform:
             return None  # 内容不是 PEM，无法比对
         return not (stored & expected)
 
-    def nss_has_nickname(
-        self, nickname: str, nss_dir: Path | None = None
-    ) -> bool | None:
+    def nss_has_nickname(self, nickname: str, nss_dir: Path | None = None) -> bool | None:
         """`nickname` 下是否有条目（不看内容）。**非协议方法**，三态。
 
         - `True` / `False`：确定有 / 确定没有；
@@ -885,11 +861,7 @@ class LinuxPlatform:
 
     def _resolve_nss_dir(self, nss_dir: Path | None) -> Path:
         """显式库路径优先；否则用本平台的默认库。"""
-        return (
-            Path(nss_dir).expanduser()
-            if nss_dir is not None
-            else self.nss_db_path()
-        )
+        return Path(nss_dir).expanduser() if nss_dir is not None else self.nss_db_path()
 
     def dns_route_installed(self, backend: str, suffix: str) -> bool:
         """Linux 的两个后端都是固定路径，不看域名后缀（macOS 才按后缀分文件）。"""

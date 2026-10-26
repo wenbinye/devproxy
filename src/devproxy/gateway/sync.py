@@ -22,8 +22,8 @@ from dataclasses import dataclass
 from dataclasses import field
 from pathlib import Path
 
-from devproxy.core.logs import rotate_at_start
 from devproxy.core.config import Config
+from devproxy.core.logs import rotate_at_start
 from devproxy.core.paths import Paths
 from devproxy.gateway.names import domain_for
 from devproxy.gateway.project import MODE_EXPOSE
@@ -101,9 +101,7 @@ def app_process_alive(route: Route) -> bool:
     return True
 
 
-def build_sync_plan(
-    project: ProjectFile, existing: list[Route], prune: bool = False
-) -> SyncPlan:
+def build_sync_plan(project: ProjectFile, existing: list[Route], prune: bool = False) -> SyncPlan:
     """把声明与现状比对成计划。
 
     会读 /proc 判断 up 模式应用是否还活着（docstring 说"纯函数"是老黄历了：
@@ -133,9 +131,7 @@ def build_sync_plan(
         # source 为 None 的路由（手工 up/expose 出来的）永远不碰。
         declared_names = {r.name for r in project.routes}
         plan.prune = [
-            r
-            for r in existing
-            if r.source == str(project.path) and r.name not in declared_names
+            r for r in existing if r.source == str(project.path) and r.name not in declared_names
         ]
     return plan
 
@@ -174,9 +170,7 @@ def execute_sync_plan(
         try:
             proc = _spawn_worker(project, declared, log_path)
         except OSError as e:
-            record(
-                SyncOutcome(declared.name, "failed", f"无法启动后台进程：{e}")
-            )
+            record(SyncOutcome(declared.name, "failed", f"无法启动后台进程：{e}"))
             continue
         workers.append((declared, proc, log_path))
 
@@ -205,8 +199,8 @@ def execute_sync_plan(
         timeout = (declared.ready_timeout or config.ready_timeout) + _WAIT_MARGIN
         ok, reason = _wait_ready(store, declared.name, proc, timeout)
         if ok:
-            route = store.get(declared.name)
-            if route is None:
+            ready_route = store.get(declared.name)
+            if ready_route is None:
                 # 就绪后立刻退出 —— 工作进程已经把路由注销了
                 record(
                     SyncOutcome(
@@ -221,18 +215,16 @@ def execute_sync_plan(
                 SyncOutcome(
                     declared.name,
                     "created",
-                    f"端口 {route.port}",
-                    domain=route.domain,
-                    port=route.port,
+                    f"端口 {ready_route.port}",
+                    domain=ready_route.domain,
+                    port=ready_route.port,
                     log_path=log_path,
                 )
             )
         else:
             tail = _log_tail(log_path)
             detail = f"{reason}：{tail}" if tail else reason
-            record(
-                SyncOutcome(declared.name, "failed", detail, log_path=log_path)
-            )
+            record(SyncOutcome(declared.name, "failed", detail, log_path=log_path))
 
     # 4) 跳过与冲突（只报告，不动手）。
     for declared, current in plan.skip:
@@ -331,9 +323,7 @@ def prune_routes(store: RouteStore, routes: list[Route]) -> None:
             kill_pid_group(route.pid, route.proc_start)
 
 
-def _spawn_worker(
-    project: ProjectFile, declared: ProjectRoute, log_path: Path
-) -> subprocess.Popen:
+def _spawn_worker(project: ProjectFile, declared: ProjectRoute, log_path: Path) -> subprocess.Popen:
     """启动后台工作进程：它去跑应用并陪着应用。
 
     独立会话（start_new_session）—— sync 自己退出后它继续陪着应用；

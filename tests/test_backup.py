@@ -4,7 +4,9 @@ import json
 import pytest
 
 from devproxy.core import backup as backup_mod
-from devproxy.core.backup import BackupManager, BackupRestoreError, load_backup
+from devproxy.core.backup import BackupManager
+from devproxy.core.backup import BackupRestoreError
+from devproxy.core.backup import load_backup
 
 
 def test_create_backs_up_existing_files(tmp_path):

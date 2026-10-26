@@ -13,7 +13,8 @@ import hashlib
 import re
 import shutil
 import ssl
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from dataclasses import field
 from pathlib import Path
 
 from devproxy.components.certs import CertComponent
@@ -24,26 +25,22 @@ from devproxy.core.paths import Paths
 from devproxy.core.paths import atomic_write_text
 from devproxy.gateway.routes import load_table
 from devproxy.gateway.runner import kill_pid_group
-from devproxy.platform.base import (
-    RESOLVED_CONF,
-    RESOLVER_DIR,
-    SYSTEM_CA_DEST,
-    SYSTEM_DNSMASQ_CONF,
-    SYSTEM_KEYCHAIN,
-    Action,
-    Platform,
-    file_fingerprints,
-    nss_db_dir,
-    pem_fingerprints,
-)
+from devproxy.platform.base import RESOLVED_CONF
+from devproxy.platform.base import RESOLVER_DIR
+from devproxy.platform.base import SYSTEM_CA_DEST
+from devproxy.platform.base import SYSTEM_DNSMASQ_CONF
+from devproxy.platform.base import SYSTEM_KEYCHAIN
+from devproxy.platform.base import Action
+from devproxy.platform.base import Platform
+from devproxy.platform.base import file_fingerprints
+from devproxy.platform.base import nss_db_dir
+from devproxy.platform.base import pem_fingerprints
 
 # 与 CertComponent.ca_path 保持一致：Caddy 的默认 CA 落点。
 CA_RELATIVE_PATH = Path("pki") / "authorities" / "local" / "root.crt"
 
 # dnsmasq 配置备份的命名：dnsmasq.conf.<UTC 时间戳>[.<序号>].bak
-_DNSMASQ_BACKUP_RE = re.compile(
-    r"^dnsmasq\.conf\.(\d{8}T\d{6}Z)(?:\.(\d+))?\.bak$"
-)
+_DNSMASQ_BACKUP_RE = re.compile(r"^dnsmasq\.conf\.(\d{8}T\d{6}Z)(?:\.(\d+))?\.bak$")
 
 # `certutil -D` 明确表示条目不存在时的文案（与平台层的判据一致）。
 _NSS_NOT_FOUND = (
@@ -165,8 +162,7 @@ def _plan_route_processes(plan: UninstallPlan, paths: Paths) -> None:
         plan.actions.append(
             Action(
                 description=(
-                    f"终止路由 {route.name} 的残留子进程组"
-                    f"（pid {route.pid}，带启动时刻校验）"
+                    f"终止路由 {route.name} 的残留子进程组（pid {route.pid}，带启动时刻校验）"
                 ),
                 kind="run",
                 command=["kill-pid-group", str(route.pid), route.proc_start],
@@ -311,9 +307,7 @@ def _plan_ca(
     _plan_system_ca(plan, platform, ca, probe=probe)
 
 
-def _plan_nss_ca(
-    plan: UninstallPlan, platform: Platform, ca: Path, *, probe: bool
-) -> None:
+def _plan_nss_ca(plan: UninstallPlan, platform: Platform, ca: Path, *, probe: bool) -> None:
     """NSS 库按证书内容（指纹）找条目，不按昵称。"""
     if not hasattr(platform, "nss_entries"):
         return
@@ -350,9 +344,7 @@ def _plan_nss_ca(
     )
 
 
-def _plan_system_ca(
-    plan: UninstallPlan, platform: Platform, ca: Path, *, probe: bool
-) -> None:
+def _plan_system_ca(plan: UninstallPlan, platform: Platform, ca: Path, *, probe: bool) -> None:
     """Linux 系统信任库：删暂存文件 + update-ca-certificates。"""
     dest = plan.targets.system_ca_dest
     if probe:
@@ -399,9 +391,7 @@ def _plan_state_files(plan: UninstallPlan, paths: Paths) -> None:
         )
 
 
-def _plan_purge(
-    plan: UninstallPlan, paths: Paths, config: Config, *, purge: bool
-) -> None:
+def _plan_purge(plan: UninstallPlan, paths: Paths, config: Config, *, purge: bool) -> None:
     """只有在选择「连存储一起删」时才删：Caddy 存储、备份目录、下载的 caddy 二进制。"""
     if not purge:
         return
@@ -409,9 +399,7 @@ def _plan_purge(
     if storage.exists() or storage.is_symlink():
         plan.actions.append(
             Action(
-                description=(
-                    f"删除 Caddy 存储 {storage}（CA、证书与站点数据一并删除）"
-                ),
+                description=(f"删除 Caddy 存储 {storage}（CA、证书与站点数据一并删除）"),
                 kind="delete",
                 path=storage,
             )
@@ -419,10 +407,7 @@ def _plan_purge(
     if paths.backup_dir.exists() or paths.backup_dir.is_symlink():
         plan.actions.append(
             Action(
-                description=(
-                    f"删除备份目录 {paths.backup_dir}"
-                    "（含迁移备份，删除后无法回滚）"
-                ),
+                description=(f"删除备份目录 {paths.backup_dir}（含迁移备份，删除后无法回滚）"),
                 kind="delete",
                 path=paths.backup_dir,
             )
@@ -438,9 +423,7 @@ def _plan_purge(
         )
 
 
-def _plan_kept(
-    plan: UninstallPlan, paths: Paths, config: Config, *, purge: bool
-) -> None:
+def _plan_kept(plan: UninstallPlan, paths: Paths, config: Config, *, purge: bool) -> None:
     """明确列出默认不动的东西 —— 卸载不能"顺手"清掉用户资产。"""
     plan.kept.extend(
         [
@@ -528,19 +511,13 @@ def _apply_one(platform: Platform, plan: UninstallPlan, action: Action) -> str:
         return _remove_linux_system_ca(platform, Path(command[1]), Path(command[2]))
     if head == "remove-macos-ca":
         return _remove_macos_ca(platform, Path(command[1]), command[2])
-    code, msg = (
-        platform.privilege().run(command)
-        if action.privileged
-        else platform.run(command)
-    )
+    code, msg = platform.privilege().run(command) if action.privileged else platform.run(command)
     if code != 0:
         raise RuntimeError(msg or f"命令失败（返回码 {code}）")
     return ""
 
 
-def _delete_path(
-    platform: Platform, path: Path | None, privileged: bool
-) -> str:
+def _delete_path(platform: Platform, path: Path | None, privileged: bool) -> str:
     """删除文件或工具自有目录。
 
     特权删除统一用 `rm -rf`：调用方只会把系统路径（DNS drop-in）放进来。
@@ -564,32 +541,22 @@ def _delete_path(
     return ""
 
 
-def _remove_nss_ca(
-    platform: Platform, ca: Path, nss: Path, nickname: str | None
-) -> str:
+def _remove_nss_ca(platform: Platform, ca: Path, nss: Path, nickname: str | None) -> str:
     """按证书内容找到匹配条目并删除；昵称只作为定位手段，不作判据。"""
     probe = getattr(platform, "nss_entries", None)
     if probe is None:
         return "平台不提供 NSS 探测，跳过"
     entries = probe(ca, nss)
     if entries is None:
-        raise RuntimeError(
-            "无法判定 NSS 库中的 CA 条目（库可能被锁或不可读），拒绝静默跳过"
-        )
+        raise RuntimeError("无法判定 NSS 库中的 CA 条目（库可能被锁或不可读），拒绝静默跳过")
     # 只删内容与当前 CA 完全相同的条目；plan 里带上的昵称只是缩小范围，
     # 执行前仍以指纹复查结果为准。
-    targets = [
-        (name, flags)
-        for name, flags in entries
-        if nickname is None or name == nickname
-    ]
+    targets = [(name, flags) for name, flags in entries if nickname is None or name == nickname]
     if not targets:
         return "NSS 库中无匹配条目"
     removed: list[str] = []
     for name, _flags in targets:
-        code, msg = platform.run(
-            ["certutil", "-d", f"sql:{nss}", "-D", "-n", name]
-        )
+        code, msg = platform.run(["certutil", "-d", f"sql:{nss}", "-D", "-n", name])
         if code != 0:
             remaining = probe(ca, nss)
             if remaining is not None and all(n != name for n, _f in remaining):
@@ -600,9 +567,7 @@ def _remove_nss_ca(
         removed.append(name)
     remaining = probe(ca, nss)
     if remaining is None:
-        raise RuntimeError(
-            "无法确认 NSS 库中的 CA 条目是否已删除（库可能被锁或不可读）"
-        )
+        raise RuntimeError("无法确认 NSS 库中的 CA 条目是否已删除（库可能被锁或不可读）")
     if remaining:
         names = [name for name, _flags in remaining]
         raise RuntimeError(f"NSS 库里仍残留匹配 CA 的条目: {names}")

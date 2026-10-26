@@ -23,11 +23,15 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from dataclasses import field
 from pathlib import Path
 
-from devproxy.gateway.caddy import MainCaddyfileSpec, build_main_caddyfile
-from devproxy.gateway.routes import Route, RouteTable, render_caddyfile
+from devproxy.gateway.caddy import MainCaddyfileSpec
+from devproxy.gateway.caddy import build_main_caddyfile
+from devproxy.gateway.routes import Route
+from devproxy.gateway.routes import RouteTable
+from devproxy.gateway.routes import render_caddyfile
 
 UPSTREAM_BODY = b"hello-from-upstream"
 
@@ -454,9 +458,7 @@ def run_selftest(caddy_bin: Path) -> SelftestResult:
                 last_err = str(e)
             if not hit:
                 time.sleep(0.3)
-        result.record(
-            "已注册域名命中上游" if hit else f"已注册域名命中上游（{last_err}）", hit
-        )
+        result.record("已注册域名命中上游" if hit else f"已注册域名命中上游（{last_err}）", hit)
 
         # 这次是在 TLS 服务已经起来之后测：未注册域名必须握手失败（真的没有证书）
         try:

@@ -5,9 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from rich.markup import escape
 import typer
+from rich.markup import escape
 
+from devproxy.cli import _shared as s
 from devproxy.cli._shared import EXIT_DECLINED
 from devproxy.cli._shared import EXIT_FAIL
 from devproxy.cli._shared import EXIT_SUDO
@@ -20,8 +21,6 @@ from devproxy.lifecycle.migrate import MigrationRequest
 from devproxy.lifecycle.migrate import rollback as do_rollback
 from devproxy.lifecycle.migrate import run_migration
 from devproxy.platform.base import Platform
-
-from devproxy.cli import _shared as s
 
 
 @dataclass
@@ -56,7 +55,9 @@ def _migrate_legacy(req: MigrateRequest) -> MigrationOutcome:
         s.err_console.print("非交互环境且未指定 --yes，拒绝迁移。")
         raise typer.Exit(EXIT_SUDO)
     if not req.yes and interactive:
-        if not typer.confirm("即将迁移上述遗留环境（会改写单元与 Caddyfile），继续？", default=True):
+        if not typer.confirm(
+            "即将迁移上述遗留环境（会改写单元与 Caddyfile），继续？", default=True
+        ):
             s.console.print("已取消：什么都没改（迁移未开始）。")
             raise typer.Exit(EXIT_DECLINED)
     try:
@@ -115,23 +116,23 @@ def _restart_caddy_after_rollback(platform, restored_count: int) -> None:
             "   Caddy 可能仍在运行迁移后的配置。修复: 以普通用户重新运行 "
             "devproxy setup --rollback <备份目录>，或手动重启 caddy。"
         )
-        raise typer.Exit(EXIT_SUDO)
+        raise typer.Exit(EXIT_SUDO) from e
     except Exception as e:  # noqa: BLE001 —— 重启失败必须报出来，不能吞
         s.err_console.print(
-            f"devproxy: 已还原 {restored_count} 个文件，但重启 caddy 失败："
-            f"{escape(str(e))}"
+            f"devproxy: 已还原 {restored_count} 个文件，但重启 caddy 失败：{escape(str(e))}"
         )
         s.err_console.print(
             "   Caddy 可能仍在运行迁移后的配置（或已被停掉）。修复: 手动执行 "
             "systemctl --user restart caddy（macOS: launchctl kickstart -k），"
             "或检查还原后的单元文件是否有效。"
         )
-        raise typer.Exit(EXIT_FAIL)
+        raise typer.Exit(EXIT_FAIL) from e
 
 
 def _do_rollback(directory: Path) -> None:
     """按备份目录回滚。"""
-    from devproxy.core.backup import BackupRestoreError, load_backup
+    from devproxy.core.backup import BackupRestoreError
+    from devproxy.core.backup import load_backup
 
     try:
         backup = load_backup(directory)
@@ -148,7 +149,7 @@ def _do_rollback(directory: Path) -> None:
             s.console.print(f"  ✔ 已还原 {escape(str(p))}")
         for p, exc in e.failures:
             s.err_console.print(f"  ✗ {escape(str(p))}: {escape(str(exc))}")
-        raise typer.Exit(EXIT_FAIL)
+        raise typer.Exit(EXIT_FAIL) from e
     s.console.print(f"已回滚 {len(touched)} 个文件：")
     for p in touched:
         s.console.print(f"  · {escape(str(p))}")

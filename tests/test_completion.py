@@ -88,9 +88,7 @@ def test_completion_filters_by_prefix(monkeypatch, capsys):
 
 
 @pytest.mark.parametrize("content", [None, "{broken", '{"routes": [1]}'])
-def test_completion_with_unreadable_route_table_is_empty_and_quiet(
-    monkeypatch, capsys, content
-):
+def test_completion_with_unreadable_route_table_is_empty_and_quiet(monkeypatch, capsys, content):
     """没 setup / 路由表损坏：补全安静地给出空候选，不报错不打印垃圾。"""
     if content is not None:
         paths = default_paths()

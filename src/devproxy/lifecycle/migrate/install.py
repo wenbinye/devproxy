@@ -1,4 +1,5 @@
 """把工具自己的配置与单元落到盘上：主 Caddyfile、sites.caddy、systemd/launchd 单元。"""
+
 from __future__ import annotations
 
 import os
@@ -8,22 +9,16 @@ from pathlib import Path
 from devproxy.core.caddy_env import save_extra_env
 from devproxy.core.config import Config
 from devproxy.core.paths import Paths
+from devproxy.lifecycle.migrate.caddyfile import _has_content
+from devproxy.lifecycle.migrate.caddyfile import block_addresses
+from devproxy.lifecycle.migrate.caddyfile import split_caddyfile_blocks
+from devproxy.lifecycle.migrate.legacy import LegacyState
+from devproxy.lifecycle.migrate.legacy import MigrationError
+from devproxy.lifecycle.migrate.legacy import unit_exec_start
 from devproxy.platform.base import Platform
 
-from devproxy.lifecycle.migrate.caddyfile import (
-    _has_content,
-    block_addresses,
-    split_caddyfile_blocks,
-)
-from devproxy.lifecycle.migrate.legacy import (
-    LegacyState,
-    MigrationError,
-    unit_exec_start,
-)
 
-def _write_sites_caddy(
-    paths: Paths, state: LegacyState, config: Config
-) -> list[str]:
+def _write_sites_caddy(paths: Paths, state: LegacyState, config: Config) -> list[str]:
     """把个人站点写进 sites.caddy，返回要告诉用户的提示。
 
     工具只 import sites.caddy，绝不覆盖已有内容 —— 用户自己写的站点不能被
@@ -41,9 +36,7 @@ def _write_sites_caddy(
     if not config_path.exists():
         return [f"遗留 Caddyfile 不存在，跳过站点拆分：{config_path}"]
     legacy = config_path.read_text(encoding="utf-8")
-    personal_blocks, dropped = split_caddyfile_blocks(
-        legacy, suffix=config.domain_suffix
-    )
+    personal_blocks, dropped = split_caddyfile_blocks(legacy, suffix=config.domain_suffix)
     if dropped:
         addresses = block_addresses(dropped)
         notes.append(
@@ -70,9 +63,11 @@ def _write_sites_caddy(
     paths.sites_caddy.write_text("\n".join(personal_blocks), encoding="utf-8")
     return notes
 
+
 def _main_caddyfile_content(paths: Paths, config: Config) -> str:
     """工具自己的主 Caddyfile（全局块 + 两个 import）。"""
-    from devproxy.gateway.caddy import MainCaddyfileSpec, build_main_caddyfile
+    from devproxy.gateway.caddy import MainCaddyfileSpec
+    from devproxy.gateway.caddy import build_main_caddyfile
 
     return build_main_caddyfile(
         MainCaddyfileSpec(
@@ -85,13 +80,13 @@ def _main_caddyfile_content(paths: Paths, config: Config) -> str:
         )
     )
 
+
 def _write_main_caddyfile(paths: Paths, config: Config) -> None:
     paths.caddyfile.parent.mkdir(parents=True, exist_ok=True)
     paths.caddyfile.write_text(_main_caddyfile_content(paths, config), encoding="utf-8")
 
-def _legacy_caddy_binary(
-    state: LegacyState | None, home: Path | None = None
-) -> Path | None:
+
+def _legacy_caddy_binary(state: LegacyState | None, home: Path | None = None) -> Path | None:
     """遗留单元的 ExecStart 指向的 caddy 二进制。
 
     配置里的 caddy_bin 可能还没下载（首次 setup），但遗留单元里的那个
@@ -111,6 +106,7 @@ def _legacy_caddy_binary(
         return None
     base = home or Path.home()
     return Path(program.replace("%h", str(base))).expanduser()
+
 
 def _validate_caddyfile(
     platform: Platform,
@@ -132,9 +128,7 @@ def _validate_caddyfile(
     if not binary.exists():
         fallback = _legacy_caddy_binary(state)
         if fallback is not None and fallback.exists():
-            notes.append(
-                f"配置里的 caddy 二进制不存在，改用遗留单元里的 {fallback} 校验配置"
-            )
+            notes.append(f"配置里的 caddy 二进制不存在，改用遗留单元里的 {fallback} 校验配置")
             binary = fallback
         else:
             notes.append("caddy 二进制不存在，跳过配置校验（setup 下载后仍会校验）")
@@ -148,10 +142,9 @@ def _validate_caddyfile(
     finally:
         tmp.unlink(missing_ok=True)
     if code != 0:
-        raise MigrationError(
-            f"caddy 配置校验未通过，迁移已中止（单元未改动）：{msg or '校验失败'}"
-        )
+        raise MigrationError(f"caddy 配置校验未通过，迁移已中止（单元未改动）：{msg or '校验失败'}")
     return notes
+
 
 def _install_caddy_unit(
     platform: Platform,
@@ -181,8 +174,7 @@ def _install_caddy_unit(
             binary = fallback
         else:
             notes.append(
-                f"caddy 二进制不存在（{binary}），单元将指向它 —— "
-                f"setup 下载完成后才会可用"
+                f"caddy 二进制不存在（{binary}），单元将指向它 —— setup 下载完成后才会可用"
             )
     platform.install_service(
         "caddy",
@@ -201,6 +193,7 @@ def _install_caddy_unit(
     )
     save_extra_env(paths, state.env)
     return notes
+
 
 def _restart_caddy(platform: Platform) -> list[str]:
     """重启 caddy，让新配置真正生效，返回提示。

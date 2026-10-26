@@ -13,16 +13,14 @@ import devproxy
 from devproxy.core.config import Config
 from devproxy.gateway.caddy import CaddyAdmin
 from devproxy.gateway.routes import Route
-from devproxy.gateway.runner import (
-    PreconditionError,
-    UpError,
-    UpRunner,
-    alloc_port,
-    kill_pid_group,
-    proc_start_time,
-    reachable,
-    stop_process_group,
-)
+from devproxy.gateway.runner import PreconditionError
+from devproxy.gateway.runner import UpError
+from devproxy.gateway.runner import UpRunner
+from devproxy.gateway.runner import alloc_port
+from devproxy.gateway.runner import kill_pid_group
+from devproxy.gateway.runner import proc_start_time
+from devproxy.gateway.runner import reachable
+from devproxy.gateway.runner import stop_process_group
 from devproxy.gateway.store import RouteStore
 
 from .support import wait_until
@@ -129,18 +127,10 @@ def test_stop_process_group_kills_grandchildren(tmp_path):
     """子进程 fork 出孙进程后，stop_process_group 必须按组清理干净。"""
     marker = tmp_path / "grandchild.pid"
     script = tmp_path / "spawn.sh"
-    script.write_text(
-        "#!/bin/sh\n"
-        f"(sleep 60 & echo $! > {marker})\n"
-        "sleep 60\n"
-    )
+    script.write_text(f"#!/bin/sh\n(sleep 60 & echo $! > {marker})\nsleep 60\n")
     script.chmod(0o755)
-    proc = subprocess.Popen(
-        [str(script)], start_new_session=True, stdout=subprocess.DEVNULL
-    )
-    assert wait_until(
-        lambda: marker.exists() and marker.read_text().strip()
-    ), "孙进程 pid 未写出"
+    proc = subprocess.Popen([str(script)], start_new_session=True, stdout=subprocess.DEVNULL)
+    assert wait_until(lambda: marker.exists() and marker.read_text().strip()), "孙进程 pid 未写出"
     gpid = int(marker.read_text().strip())
     stop_process_group(proc, proc.pid)
     assert wait_until(lambda: not _process_running(gpid)), "孙进程应已被按组清理"
@@ -248,13 +238,12 @@ def test_run_kills_process_on_ready_timeout(paths, tmp_path):
         )
     assert "就绪超时" in str(cm.value)
     assert not paths.routes_json.exists(), "超时不得留下路由"
-    assert wait_until(
-        lambda: marker.exists() and marker.read_text().strip()
-    ), "子进程没写出 pid 标记"
+    assert wait_until(lambda: marker.exists() and marker.read_text().strip()), (
+        "子进程没写出 pid 标记"
+    )
     child_pid, grandchild_pid = (int(x) for x in marker.read_text().split())
     assert wait_until(
-        lambda: not _process_running(child_pid)
-        and not _process_running(grandchild_pid)
+        lambda: not _process_running(child_pid) and not _process_running(grandchild_pid)
     ), "超时后子进程与孙进程必须被杀（子进程按组清理）"
 
 
@@ -270,9 +259,7 @@ def test_watch_re_registers_when_route_lost_from_caddy(paths):
     runner = UpRunner(store, cfg, admin)
     runner.heartbeat_interval = 0.1
 
-    route = Route(
-        name="x", domain="x.test", port=1, mode="up", upstream="127.0.0.1:1"
-    )
+    route = Route(name="x", domain="x.test", port=1, mode="up", upstream="127.0.0.1:1")
     store.mutate(lambda t: t.upsert(route))
     before = caddy.reloads
 
@@ -298,9 +285,7 @@ def test_watch_does_not_revive_removed_route(paths):
     runner = UpRunner(store, cfg, admin)
     runner.heartbeat_interval = 0.1
 
-    route = Route(
-        name="x", domain="x.test", port=1, mode="up", upstream="127.0.0.1:1"
-    )
+    route = Route(name="x", domain="x.test", port=1, mode="up", upstream="127.0.0.1:1")
     store.mutate(lambda t: t.upsert(route))
     store.mutate(lambda t: t.remove("x"))
     before = caddy.reloads
@@ -329,28 +314,18 @@ def test_watch_re_registers_when_only_prefixed_domain_remains(paths):
     runner = UpRunner(store, cfg, admin)
     runner.heartbeat_interval = 0.1
 
-    route = Route(
-        name="x", domain="x.test", port=1, mode="up", upstream="127.0.0.1:1"
-    )
+    route = Route(name="x", domain="x.test", port=1, mode="up", upstream="127.0.0.1:1")
     store.mutate(lambda t: t.upsert(route))
     before = caddy.reloads
 
     # 只含另一条路由 ax.test —— 裸子串 "x.test" in '"ax.test"' 会命中
     admin.config_payload = {
-        "apps": {
-            "http": {
-                "servers": {
-                    "srv0": {"routes": [{"match": [{"host": ["ax.test"]}]}]}
-                }
-            }
-        }
+        "apps": {"http": {"servers": {"srv0": {"routes": [{"match": [{"host": ["ax.test"]}]}]}}}}
     }
     stop = threading.Event()
     t = threading.Thread(target=runner._watch, args=(route, stop), daemon=True)
     t.start()
-    assert wait_until(lambda: caddy.reloads > before), (
-        "前缀域名（ax.test）不得让 x.test 伪装成存活"
-    )
+    assert wait_until(lambda: caddy.reloads > before), "前缀域名（ax.test）不得让 x.test 伪装成存活"
     stop.set()
     t.join(timeout=10)
 
@@ -468,9 +443,7 @@ def test_run_signal_forwards_to_group_and_deregisters(paths, tmp_path):
         # 超时给到 60s：负载高的机器上 python 子进程启动本身就要好几秒
         deadline = time.time() + 60
         table = None
-        while time.time() < deadline and (
-            table is None or not grandchild_pid_file.exists()
-        ):
+        while time.time() < deadline and (table is None or not grandchild_pid_file.exists()):
             assert proc.poll() is None, f"runner 提前退出 rc={proc.returncode}"
             if paths.routes_json.exists():
                 loaded = json.loads(paths.routes_json.read_text())
@@ -488,8 +461,7 @@ def test_run_signal_forwards_to_group_and_deregisters(paths, tmp_path):
         table = json.loads(paths.routes_json.read_text())
         assert table["routes"] == [], "信号退出后路由必须注销"
         assert wait_until(
-            lambda: not _process_running(child_pid)
-            and not _process_running(grandchild_pid)
+            lambda: not _process_running(child_pid) and not _process_running(grandchild_pid)
         ), "子进程与孙进程应被按组清理"
     finally:
         if proc.poll() is None:
@@ -575,9 +547,7 @@ def test_run_persists_proc_start_with_pid(paths):
 # --------------------------------------------- I-4: 心跳不得复活已注销的路由
 
 
-def test_watch_does_not_resurrect_route_removed_between_check_and_write(
-    paths, monkeypatch
-):
+def test_watch_does_not_resurrect_route_removed_between_check_and_write(paths, monkeypatch):
     """down 恰好落在心跳的「查表」与「写回」之间 → 不得复活（检查必须持锁）。"""
     import threading
 
@@ -624,9 +594,7 @@ def test_watch_does_not_resurrect_route_removed_between_check_and_write(
 def test_stop_process_group_skips_unverifiable_reaped_leader():
     """组长已被回收 + 身份无法核实 → 绝不对该 pgid 发信号（可能已被复用）。"""
     victim = _spawn_sleeper()
-    reaped = subprocess.Popen(
-        [sys.executable, "-c", "pass"], start_new_session=True
-    )
+    reaped = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
     try:
         reaped.wait()  # 组长已被回收，pid/pgid 理论上可被复用
         stop_process_group(reaped, victim.pid, expected_start="forged")
@@ -661,9 +629,7 @@ def test_run_kills_grandchildren_after_leader_already_exited(paths, tmp_path):
     assert rc == 0
     assert wait_until(lambda: marker.exists() and marker.read_text().strip())
     gpid = int(marker.read_text())
-    assert wait_until(
-        lambda: not _process_running(gpid)
-    ), "组长退出后孙进程仍必须被清理"
+    assert wait_until(lambda: not _process_running(gpid)), "组长退出后孙进程仍必须被清理"
 
 
 # ------------------------------- I2: 同名路由的注销 / 心跳必须校验归属
@@ -678,12 +644,8 @@ def test_deregister_does_not_remove_route_replaced_by_new_up(paths):
     store = RouteStore(paths, cfg, caddy)
     runner = UpRunner(store, cfg, FakeAdmin())
 
-    old = Route(
-        name="x", domain="x.test", port=1, mode="up", upstream="127.0.0.1:1", pid=111
-    )
-    new = Route(
-        name="x", domain="x.test", port=2, mode="up", upstream="127.0.0.1:2", pid=222
-    )
+    old = Route(name="x", domain="x.test", port=1, mode="up", upstream="127.0.0.1:1", pid=111)
+    new = Route(name="x", domain="x.test", port=2, mode="up", upstream="127.0.0.1:2", pid=222)
     store.mutate(lambda t: t.upsert(new))
 
     runner._deregister(old)
@@ -702,12 +664,8 @@ def test_watch_stops_without_overwriting_route_replaced_by_new_up(paths):
     runner = UpRunner(store, cfg, admin)
     runner.heartbeat_interval = 0.05
 
-    old = Route(
-        name="x", domain="x.test", port=1, mode="up", upstream="127.0.0.1:1", pid=111
-    )
-    new = Route(
-        name="x", domain="x.test", port=2, mode="up", upstream="127.0.0.1:2", pid=222
-    )
+    old = Route(name="x", domain="x.test", port=1, mode="up", upstream="127.0.0.1:1", pid=111)
+    new = Route(name="x", domain="x.test", port=2, mode="up", upstream="127.0.0.1:2", pid=222)
     store.mutate(lambda t: t.upsert(new))
     admin.config_payload = {}  # 旧路由确实不在 Caddy 里
     before = caddy.reloads
@@ -733,16 +691,14 @@ def test_kill_pid_group_escalates_to_sigkill(tmp_path):
         f"pathlib.Path({str(marker)!r}).write_text('1');"
         "time.sleep(60)"
     )
-    proc = subprocess.Popen(
-        [sys.executable, "-c", code], start_new_session=True
-    )
+    proc = subprocess.Popen([sys.executable, "-c", code], start_new_session=True)
     try:
         assert wait_until(marker.exists), "子进程未完成 SIGTERM handler 安装"
         start = proc_start_time(proc.pid)
         assert kill_pid_group(proc.pid, start, timeout=0.3) is True
-        assert wait_until(
-            lambda: not _process_running(proc.pid)
-        ), "忽略 SIGTERM 的进程必须被 SIGKILL 收掉"
+        assert wait_until(lambda: not _process_running(proc.pid)), (
+            "忽略 SIGTERM 的进程必须被 SIGKILL 收掉"
+        )
     finally:
         stop_process_group(proc, proc.pid)
 
@@ -781,9 +737,7 @@ def test_run_reclaims_existing_route_and_reuses_its_port(paths):
             )
         )
         runner = UpRunner(store, cfg, FakeAdmin())
-        rc = runner.run(
-            "codeup", [sys.executable, "-c", _LISTEN_AND_EXIT], port=port
-        )
+        rc = runner.run("codeup", [sys.executable, "-c", _LISTEN_AND_EXIT], port=port)
         assert rc == 0
         assert wait_until(lambda: not _process_running(old.pid)), "旧进程必须被收掉"
         assert wait_until(lambda: json.loads(paths.routes_json.read_text())["routes"] == [])
@@ -826,9 +780,7 @@ def test_watch_retries_store_errors_and_reports_once(paths, monkeypatch, capsys)
     runner = UpRunner(store, cfg, admin)
     runner.heartbeat_interval = 0.05
 
-    route = Route(
-        name="x", domain="x.test", port=1, mode="up", upstream="127.0.0.1:1"
-    )
+    route = Route(name="x", domain="x.test", port=1, mode="up", upstream="127.0.0.1:1")
     store.mutate(lambda t: t.upsert(route))
     admin.config_payload = {}
 
@@ -861,9 +813,7 @@ def test_watch_stops_on_unknown_exception(paths, monkeypatch, capsys):
     runner = UpRunner(store, cfg, admin)
     runner.heartbeat_interval = 0.05
 
-    route = Route(
-        name="x", domain="x.test", port=1, mode="up", upstream="127.0.0.1:1"
-    )
+    route = Route(name="x", domain="x.test", port=1, mode="up", upstream="127.0.0.1:1")
     store.mutate(lambda t: t.upsert(route))
     admin.config_payload = {}
 
@@ -929,13 +879,7 @@ def test_route_live_sees_structured_host():
     admin = FakeAdmin()
     admin.config_payload = {
         "apps": {
-            "http": {
-                "servers": {
-                    "srv0": {
-                        "routes": [{"match": [{"host": ["x.test", "y.test"]}]}]
-                    }
-                }
-            }
+            "http": {"servers": {"srv0": {"routes": [{"match": [{"host": ["x.test", "y.test"]}]}]}}}
         }
     }
     assert _route_live(admin, "x.test") is True

@@ -17,6 +17,7 @@ import os
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from typing import BinaryIO
 
 # 单个日志文件的上限。超过就轮转：当前文件改名成 .1（覆盖旧的 .1），
 # 新文件从头开始写 —— 总量因此有界（上限 × (1 + 保留份数)）。
@@ -70,7 +71,7 @@ class RotatingLogWriter:
     def __init__(self, path: Path, max_bytes: int = MAX_LOG_BYTES) -> None:
         self.path = path
         self.max_bytes = max_bytes
-        self._handle = None
+        self._handle: BinaryIO | None = None
         self._open()
 
     def _open(self) -> None:
@@ -147,9 +148,7 @@ def follow_log(path: Path) -> None:
                 inode = os.fstat(handle.fileno()).st_ino
 
 
-def follow_many(
-    targets: list[tuple[str, Path]], poll: float = 0.3
-) -> Iterator[tuple[str, str]]:
+def follow_many(targets: list[tuple[str, Path]], poll: float = 0.3) -> Iterator[tuple[str, str]]:
     """同时跟随多个日志文件，产出 (标签, 一行文本)。
 
     - 已存在的文件从**末尾**开始跟（不倒历史）；
@@ -162,7 +161,7 @@ def follow_many(
     import queue
     import threading
 
-    queue_: "queue.Queue[tuple[str, str]]" = queue.Queue()
+    queue_: queue.Queue[tuple[str, str]] = queue.Queue()
 
     def watch(tag: str, path: Path) -> None:
         handle = None

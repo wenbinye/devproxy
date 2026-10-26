@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import typer
 
-from devproxy.cli import app
+from devproxy.cli import _shared as s
 from devproxy.cli._shared import EXIT_OK
 from devproxy.cli._shared import EXIT_USAGE
 from devproxy.gateway.project import ProjectFileError
@@ -16,16 +16,13 @@ from devproxy.gateway.project import load_project_file
 from devproxy.gateway.routes import RouteTableError
 from devproxy.gateway.store import RouteStoreError
 
-from devproxy.cli import _shared as s
-
 
 def stop_project_apps() -> None:
     """停掉本项目（devproxy.toml）声明的所有应用。重新启动：devproxy up"""
     found = s.find_project_file()
     if found is None:
         s.fail(
-            "当前目录不在项目里（找不到 devproxy.toml）。"
-            "停单条路由用 devproxy down <名字>",
+            "当前目录不在项目里（找不到 devproxy.toml）。停单条路由用 devproxy down <名字>",
             EXIT_USAGE,
         )
     try:

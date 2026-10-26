@@ -3,12 +3,13 @@
 全程不碰真实系统：配置路径注入 tmp_path，服务操作走 FakePlatform。
 """
 
-import pytest
-
 from pathlib import Path
 
+import pytest
+
 from devproxy.components import dnsmasq as dnsmasq_module
-from devproxy.components.dnsmasq import DnsmasqComponent, merge_dnsmasq_config
+from devproxy.components.dnsmasq import DnsmasqComponent
+from devproxy.components.dnsmasq import merge_dnsmasq_config
 from devproxy.core.config import Config
 from devproxy.core.paths import Paths
 from devproxy.platform.fake import FakePlatform
@@ -105,7 +106,7 @@ def _global_servers(lines):
         s = line.strip()
         if not s.startswith("server="):
             continue
-        value = s[len("server="):].strip()
+        value = s[len("server=") :].strip()
         if value and "/" not in value and "," not in value:
             out.append(s)
     return out
@@ -118,9 +119,7 @@ def test_merge_domain_scoped_server_is_not_a_global_upstream():
     /etc/resolv.conf（resolved 机器上是 127.0.0.53 桩），而 resolved 又被
     工具的 drop-in 指回本机 dnsmasq → 全机解析失败。
     """
-    out = merge_dnsmasq_config(
-        "server=/corp.example.com/10.0.0.1\n", port=5353, suffix="test"
-    )
+    out = merge_dnsmasq_config("server=/corp.example.com/10.0.0.1\n", port=5353, suffix="test")
     lines = out.splitlines()
     assert "no-resolv" in lines
     assert _global_servers(lines)
@@ -138,16 +137,12 @@ def test_merge_global_server_keeps_it_and_adds_no_resolv():
 
 def test_merge_resolv_file_prevents_no_resolv():
     """显式 resolv-file= 是用户自选解析器文件 —— 与 no-resolv 互斥，不加。"""
-    out = merge_dnsmasq_config(
-        "resolv-file=/etc/resolv.d/custom\n", port=5353, suffix="test"
-    )
+    out = merge_dnsmasq_config("resolv-file=/etc/resolv.d/custom\n", port=5353, suffix="test")
     assert "no-resolv" not in out.splitlines()
 
 
 def test_merge_idempotent_for_domain_scoped_server():
-    once = merge_dnsmasq_config(
-        "server=/corp.example.com/10.0.0.1\n", port=5353, suffix="test"
-    )
+    once = merge_dnsmasq_config("server=/corp.example.com/10.0.0.1\n", port=5353, suffix="test")
     twice = merge_dnsmasq_config(once, port=5353, suffix="test")
     assert once == twice
 
@@ -159,9 +154,7 @@ def test_merge_idempotent_for_global_server():
 
 
 def test_merge_idempotent_for_resolv_file():
-    once = merge_dnsmasq_config(
-        "resolv-file=/etc/resolv.d/custom\n", port=5353, suffix="test"
-    )
+    once = merge_dnsmasq_config("resolv-file=/etc/resolv.d/custom\n", port=5353, suffix="test")
     twice = merge_dnsmasq_config(once, port=5353, suffix="test")
     assert once == twice
 
@@ -213,9 +206,7 @@ def _component(tmp_path, conf=None, platform=None):
     if conf is not None:
         conf_path.parent.mkdir(parents=True, exist_ok=True)
         conf_path.write_text(conf, encoding="utf-8")
-    return DnsmasqComponent(
-        platform, paths, Config(), conf_path=conf_path
-    ), platform, conf_path
+    return DnsmasqComponent(platform, paths, Config(), conf_path=conf_path), platform, conf_path
 
 
 def test_plan_keeps_user_entries_and_writes_to_conf_path(tmp_path):
@@ -300,9 +291,7 @@ def test_unit_conf_dir_is_absolute_for_relative_conf_path(tmp_path, monkeypatch)
     monkeypatch.chdir(tmp_path)
     platform = FakePlatform()
     paths = Paths(tmp_path / "c", tmp_path / "s", tmp_path / "d")
-    comp = DnsmasqComponent(
-        platform, paths, Config(), conf_path=Path("rel/dnsmasq.conf")
-    )
+    comp = DnsmasqComponent(platform, paths, Config(), conf_path=Path("rel/dnsmasq.conf"))
     comp.apply(comp.plan())
     unit = platform.services["dnsmasq"]
     conf_dir = unit.split("--conf-dir=")[1].split()[0]
@@ -406,9 +395,7 @@ def test_apply_backs_up_changed_user_config(tmp_path):
 def test_apply_does_not_backup_when_content_unchanged(tmp_path):
     """内容没变时不得落备份 —— 否则每次 setup 都堆垃圾。"""
     comp, platform, conf_path = _component(tmp_path)
-    merged = merge_dnsmasq_config(
-        "", port=platform.dns_port, suffix=Config().domain_suffix
-    )
+    merged = merge_dnsmasq_config("", port=platform.dns_port, suffix=Config().domain_suffix)
     conf_path.parent.mkdir(parents=True, exist_ok=True)
     conf_path.write_text(merged, encoding="utf-8")
 
@@ -447,8 +434,9 @@ class _MacPlatform(FakePlatform):
         super().__init__()
         self.installed: dict = {}
 
-    def install_service(self, name, *, exec_start, exec_reload=None, exec_stop=None,
-                        env, description=""):
+    def install_service(
+        self, name, *, exec_start, exec_reload=None, exec_stop=None, env, description=""
+    ):
         self.installed = {
             "name": name,
             "exec_start": list(exec_start),
@@ -535,9 +523,7 @@ def test_macos_dnsmasq_binary_prefers_homebrew_path(tmp_path, monkeypatch):
     brew.parent.mkdir(parents=True)
     brew.write_text("#!/bin/sh\n", encoding="utf-8")
     monkeypatch.setattr(dnsmasq_module, "MACOS_DNSMASQ_CANDIDATES", (str(brew),))
-    monkeypatch.setattr(
-        dnsmasq_module.shutil, "which", lambda name: "/usr/local/bin/dnsmasq"
-    )
+    monkeypatch.setattr(dnsmasq_module.shutil, "which", lambda name: "/usr/local/bin/dnsmasq")
     comp, _platform, _conf = _component(tmp_path, platform=_MacPlatform())
     assert comp._dnsmasq_binary() == str(brew)
 
@@ -547,9 +533,7 @@ def test_macos_dnsmasq_binary_falls_back_to_which(tmp_path, monkeypatch):
     from devproxy.components import dnsmasq as dnsmasq_module
 
     monkeypatch.setattr(dnsmasq_module, "MACOS_DNSMASQ_CANDIDATES", ("/nope/dnsmasq",))
-    monkeypatch.setattr(
-        dnsmasq_module.shutil, "which", lambda name: "/usr/local/bin/dnsmasq"
-    )
+    monkeypatch.setattr(dnsmasq_module.shutil, "which", lambda name: "/usr/local/bin/dnsmasq")
     comp, _platform, _conf = _component(tmp_path, platform=_MacPlatform())
     assert comp._dnsmasq_binary() == "/usr/local/bin/dnsmasq"
 
@@ -676,9 +660,7 @@ def test_apply_refuses_to_overwrite_when_backup_read_fails(tmp_path):
 def test_backups_do_not_collide_within_same_second(tmp_path, monkeypatch):
     from devproxy.platform.base import Action
 
-    monkeypatch.setattr(
-        dnsmasq_module.time, "strftime", lambda *args, **kwargs: "20260101T000000Z"
-    )
+    monkeypatch.setattr(dnsmasq_module.time, "strftime", lambda *args, **kwargs: "20260101T000000Z")
     comp, _platform, conf_path = _component(tmp_path, conf="port=53\n")
     first = merge_dnsmasq_config("port=53\n", port=5353, suffix="test")
     comp.apply([Action(description="第一次", kind="write", path=conf_path, content=first)])
@@ -693,4 +675,3 @@ def test_backups_do_not_collide_within_same_second(tmp_path, monkeypatch):
         "port=53\n",
         "port=5300\n",
     }
-

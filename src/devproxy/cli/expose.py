@@ -4,6 +4,7 @@ import time
 
 import typer
 
+from devproxy.cli import _shared as s
 from devproxy.cli import app
 from devproxy.cli._shared import EXIT_PRECONDITION
 from devproxy.cli._shared import EXIT_USAGE
@@ -14,8 +15,6 @@ from devproxy.gateway.routes import Route
 from devproxy.gateway.routes import RouteTableError
 from devproxy.gateway.runner import reachable
 from devproxy.gateway.store import RouteStoreError
-
-from devproxy.cli import _shared as s
 
 
 @app.command()

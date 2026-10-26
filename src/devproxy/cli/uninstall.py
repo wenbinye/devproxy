@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import typer
 
+from devproxy.cli import _shared as s
 from devproxy.cli import app
 from devproxy.cli._shared import EXIT_DECLINED
 from devproxy.cli._shared import EXIT_FAIL
 from devproxy.cli._shared import EXIT_OK
-
-from devproxy.cli import _shared as s
 
 
 @app.command()
@@ -75,14 +74,12 @@ def uninstall(
         chosen_remove_ca = remove_ca
         if not purge:
             chosen_purge = s.typer.confirm(
-                "还要删除 Caddy 存储（CA 与证书）、迁移备份与下载的 caddy 二进制吗？"
-                "（不可恢复）",
+                "还要删除 Caddy 存储（CA 与证书）、迁移备份与下载的 caddy 二进制吗？（不可恢复）",
                 default=False,
             )
         if not remove_ca and plan.ca_kept:
             chosen_remove_ca = s.typer.confirm(
-                "要把 CA 从系统信任库卸载吗？"
-                "（它在本工具接管前就存在，你的站点可能仍在使用）",
+                "要把 CA 从系统信任库卸载吗？（它在本工具接管前就存在，你的站点可能仍在使用）",
                 default=False,
             )
         if chosen_purge != purge or chosen_remove_ca != remove_ca:

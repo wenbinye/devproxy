@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Protocol
+from typing import runtime_checkable
 
-from devproxy.platform.base import Action, Status
+from devproxy.platform.base import Action
+from devproxy.platform.base import Status
 
 
 def _site_host(address: str) -> str:
@@ -43,10 +45,7 @@ def has_localhost_site(sites_caddy: Path) -> bool:
             continue
         # 站点地址写在 `{` 之前，多个地址用逗号或空白分隔。
         head = stripped.split("{", 1)[0]
-        if any(
-            _site_host(address) == "localhost"
-            for address in head.replace(",", " ").split()
-        ):
+        if any(_site_host(address) == "localhost" for address in head.replace(",", " ").split()):
             return True
     return False
 

@@ -98,8 +98,7 @@ def _caddy_token(value: str) -> str:
     未知转义留在 token 内，因此换行永远不会变成真正的行分隔符。
     """
     safe = value and all(
-        not ch.isspace() and ch not in '"`{}#' and 0x20 <= ord(ch) < 0x7F
-        for ch in value
+        not ch.isspace() and ch not in '"`{}#' and 0x20 <= ord(ch) < 0x7F for ch in value
     )
     return value if safe else json.dumps(value, ensure_ascii=False)
 

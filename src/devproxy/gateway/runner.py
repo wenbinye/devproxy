@@ -17,16 +17,23 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from types import FrameType
+from typing import Any
 
 from devproxy.core.config import Config
 from devproxy.core.logs import RotatingLogWriter
-from devproxy.gateway.caddy import CaddyAdmin, CaddyError
-from devproxy.gateway.names import domain_for, validate_name
-from devproxy.gateway.routes import Route, RouteTable, RouteTableError
-from devproxy.gateway.store import RouteStore, RouteStoreError
+from devproxy.gateway.caddy import CaddyAdmin
+from devproxy.gateway.caddy import CaddyError
+from devproxy.gateway.names import domain_for
+from devproxy.gateway.names import validate_name
+from devproxy.gateway.routes import Route
+from devproxy.gateway.routes import RouteTable
+from devproxy.gateway.routes import RouteTableError
+from devproxy.gateway.store import RouteStore
+from devproxy.gateway.store import RouteStoreError
 
 HEARTBEAT_INTERVAL = 30.0
 
@@ -68,7 +75,6 @@ class UpRequest:
     # 写进这个文件 —— 只有自己持有句柄才能在运行中轮转（见 core.logs）。
     # None = 输出继承当前终端（前台 `devproxy up` 的老行为）。
     log_path: Path | None = None
-
 
 
 def _start_log_pump(stream, path: Path) -> None:
@@ -457,9 +463,7 @@ class UpRunner:
             # 端口的路由；条件删除保证不会误删同名的新路由。
             registered = True
             self.store.mutate(lambda t: t.upsert(route))
-            watcher = threading.Thread(
-                target=self._watch, args=(route, stop), daemon=True
-            )
+            watcher = threading.Thread(target=self._watch, args=(route, stop), daemon=True)
             watcher.start()
             if req.on_ready is not None:
                 req.on_ready(route.domain, port)
@@ -468,9 +472,7 @@ class UpRunner:
             stop.set()
             # 先杀进程组再 join/注销：缩短清理窗口，也避免 watcher 在子进程
             # 死后仍把路由补写回去。
-            stop_process_group(
-                child.proc, child.pgid, expected_start=child.start
-            )
+            stop_process_group(child.proc, child.pgid, expected_start=child.start)
             if watcher is not None:
                 watcher.join(timeout=10)
             if registered and route is not None:
@@ -489,11 +491,7 @@ class UpRunner:
             raise UpError(f"非法端口 {req.port}：必须在 1..65535 之间")
 
     def _timeout(self, req: UpRequest) -> int:
-        return (
-            req.ready_timeout
-            if req.ready_timeout is not None
-            else self.config.ready_timeout
-        )
+        return req.ready_timeout if req.ready_timeout is not None else self.config.ready_timeout
 
     def _reclaim_existing(self, name: str) -> None:
         """注销同名旧路由并杀掉旧子进程。
@@ -533,15 +531,13 @@ class UpRunner:
         try:
             # cwd=None 时与从前完全一致（继承当前工作目录）；
             # 给了 cwd 就把子进程放进那个目录（项目根目录）。
-            extra: dict[str, object] = {}
+            extra: dict[str, Any] = {}
             if req.log_path is not None:
                 # 收进管道：devproxy 自己写日志文件，才能在运行中轮转。
                 # 代价是多一个泵线程 —— 它必须**一直把管道读空**，
                 # 否则子进程写满管道缓冲区后会卡死。
                 extra = {"stdout": subprocess.PIPE, "stderr": subprocess.STDOUT}
-            proc = subprocess.Popen(
-                req.cmd, env=env, cwd=req.cwd, start_new_session=True, **extra
-            )
+            proc = subprocess.Popen(req.cmd, env=env, cwd=req.cwd, start_new_session=True, **extra)
         except OSError as e:
             # 覆盖 FileNotFoundError / PermissionError / Exec format error：
             # 都映射成 UpError，CLI 才会给出格式化错误而不是裸 traceback。
@@ -553,9 +549,7 @@ class UpRunner:
             _start_log_pump(proc.stdout, req.log_path)
         return proc
 
-    def _wait_ready(
-        self, proc: subprocess.Popen, port: int, timeout: int
-    ) -> None:
+    def _wait_ready(self, proc: subprocess.Popen, port: int, timeout: int) -> None:
         deadline = time.time() + timeout
         while time.time() < deadline:
             status = _leader_status(proc)
@@ -564,13 +558,9 @@ class UpRunner:
             if reachable(port, timeout=1):
                 return
             time.sleep(0.3)
-        raise UpError(
-            f"就绪超时（{timeout}s）——应用可能未使用 $PORT，可用 --port 显式指定"
-        )
+        raise UpError(f"就绪超时（{timeout}s）——应用可能未使用 $PORT，可用 --port 显式指定")
 
-    def _make_route(
-        self, req: UpRequest, port: int, child: _ChildHandle
-    ) -> Route:
+    def _make_route(self, req: UpRequest, port: int, child: _ChildHandle) -> Route:
         proc = child.proc
         if proc is None:  # pragma: no cover - _spawn 成功后才调用
             raise UpError("内部错误：子进程尚未启动")
@@ -606,7 +596,7 @@ class UpRunner:
 
     def _install_handlers(
         self, stop: threading.Event, child: _ChildHandle
-    ) -> dict[int, object]:
+    ) -> dict[int, signal.Handlers | Callable[[int, FrameType | None], Any] | int | None]:
         def on_signal(signum, frame):
             # 清理期间收到第二个信号时直接忽略，避免中断 finally 留下残留
             if stop.is_set():
@@ -621,8 +611,7 @@ class UpRunner:
             raise SystemExit(128 + signum)
 
         return {
-            s: signal.signal(s, on_signal)
-            for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+            s: signal.signal(s, on_signal) for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
         }
 
     def _watch(self, route: Route, stop: threading.Event) -> None:
@@ -663,8 +652,7 @@ class UpRunner:
                 message = f"{type(e).__name__}: {e}"
                 if message != last_error:
                     print(
-                        f"⚠️  devproxy: 路由 {route.name} 心跳失败"
-                        f"（将继续重试）：{message}",
+                        f"⚠️  devproxy: 路由 {route.name} 心跳失败（将继续重试）：{message}",
                         file=sys.stderr,
                     )
                     last_error = message

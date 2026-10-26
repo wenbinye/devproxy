@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import typer
 from rich.markup import escape
 from rich.table import Table
-import typer
 
+from devproxy.cli import _shared as s
 from devproxy.cli import app
 from devproxy.cli._shared import EXIT_PRECONDITION
 from devproxy.lifecycle.doctor import build_report
@@ -11,7 +12,6 @@ from devproxy.lifecycle.doctor import find_wildcard_sites
 from devproxy.lifecycle.doctor import report_is_healthy
 from devproxy.lifecycle.migrate import detect_legacy
 
-from devproxy.cli import _shared as s
 
 @app.command()
 def doctor(
@@ -29,9 +29,7 @@ def doctor(
     # 精确站点块同后缀，会让 TLS 握手整体失败。迁移正是移除它的动作。
     # 用非交互的探测 —— doctor 是只读命令，绝不能弹密码框。
     legacy = detect_legacy(platform, paths, interactive=False)
-    wildcards = find_wildcard_sites(
-        paths, config, legacy.config_path if legacy else None
-    )
+    wildcards = find_wildcard_sites(paths, config, legacy.config_path if legacy else None)
     table = Table(show_header=True, header_style="bold")
     table.add_column("组件")
     table.add_column("状态")
@@ -54,9 +52,7 @@ def doctor(
     s.console.print(table)
     # 表格里的说明会被 Rich 截断 —— 关键信息（影响与修复）单独再打一遍
     for path, addresses in wildcards:
-        s.console.print(
-            f"[yellow]⚠ {path} 仍有通配站点块：{', '.join(addresses)}[/yellow]"
-        )
+        s.console.print(f"[yellow]⚠ {path} 仍有通配站点块：{', '.join(addresses)}[/yellow]")
         s.console.print(
             "   通配块与精确站点块同后缀时，Caddy 的 TLS 握手会整体失败；"
             "修复: devproxy setup（完成迁移，移除通配块）"

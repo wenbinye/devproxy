@@ -12,8 +12,8 @@ from devproxy.cli._runtime import EXIT_PRECONDITION
 from devproxy.cli._runtime import EXIT_USAGE
 from devproxy.cli._runtime import err_console
 from devproxy.cli._runtime import fail
-from devproxy.core.config import Config
 from devproxy.core.config import DNS_BACKENDS
+from devproxy.core.config import Config
 from devproxy.core.config import load_config
 from devproxy.core.paths import Paths
 from devproxy.core.paths import default_paths
@@ -206,7 +206,6 @@ def ensure_backend_supported(backend: str, platform) -> None:
     """
     if backend == "resolved" and getattr(platform, "name", "") == "mac":
         fail(
-            "macOS 不支持 resolved 后端（没有 systemd-resolved），"
-            "请使用 auto 或 system",
+            "macOS 不支持 resolved 后端（没有 systemd-resolved），请使用 auto 或 system",
             EXIT_USAGE,
         )

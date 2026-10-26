@@ -11,7 +11,7 @@ from pathlib import Path
 import typer
 from rich.markup import escape
 
-from devproxy.cli import app
+from devproxy.cli import _shared as s
 from devproxy.cli._shared import EXIT_DECLINED
 from devproxy.cli._shared import EXIT_FAIL
 from devproxy.cli._shared import EXIT_OK
@@ -23,8 +23,6 @@ from devproxy.gateway.project import resolve_project_file
 from devproxy.gateway.routes import RouteTableError
 from devproxy.gateway.store import RouteStoreError
 
-from devproxy.cli import _shared as s
-
 _STATUS_MARKS = {
     "created": "✅ 创建",
     "skipped": "➖ 跳过",
@@ -34,9 +32,7 @@ _STATUS_MARKS = {
 }
 
 
-def run_project_sync(
-    *, file: Path | None = None, prune: bool = False, yes: bool = False
-) -> None:
+def run_project_sync(*, file: Path | None = None, prune: bool = False, yes: bool = False) -> None:
     """按项目根目录的 devproxy.toml 应用路由声明（`devproxy up` 的实现）。
 
     由 cli/up.py 在「没给路由名」时调用 —— compose 的 `up -d` 语义。
@@ -68,10 +64,7 @@ def run_project_sync(
         names = "、".join(r.name for r in plan.prune)
         interactive = s._interactive() and not yes
         if not interactive and not yes:
-            s.err_console.print(
-                "非交互环境且未指定 --yes，拒绝执行 --prune"
-                f"（将移除：{names}）。"
-            )
+            s.err_console.print(f"非交互环境且未指定 --yes，拒绝执行 --prune（将移除：{names}）。")
             raise typer.Exit(EXIT_DECLINED)
         if interactive and not s.typer.confirm(
             f"即将移除本文件里已删掉的路由：{names}（子进程也会一并收掉），继续？",
@@ -85,9 +78,7 @@ def run_project_sync(
 
     # 3) 执行
     try:
-        outcomes = s.execute_sync_plan(
-            project, plan, store=store, config=config, paths=paths
-        )
+        outcomes = s.execute_sync_plan(project, plan, store=store, config=config, paths=paths)
     except (RouteStoreError, RouteTableError) as e:
         s.fail(str(e))
 

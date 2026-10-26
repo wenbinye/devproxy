@@ -21,12 +21,10 @@ import tempfile
 from pathlib import Path
 
 from devproxy.core.paths import default_state_dir
-from devproxy.platform.base import (
-    RESOLVER_DIR,
-    ElevatedSession,
-    Platform,
-    render_resolver_file as _render_resolver_file,
-)
+from devproxy.platform.base import RESOLVER_DIR
+from devproxy.platform.base import ElevatedSession
+from devproxy.platform.base import Platform
+from devproxy.platform.base import render_resolver_file as _render_resolver_file
 
 LAUNCH_AGENTS = "Library/LaunchAgents"
 LAUNCH_DAEMONS = "/Library/LaunchDaemons"
@@ -43,9 +41,7 @@ DEFAULT_TIMEOUT = 30.0
 _LAUNCHD_STATE = re.compile(r"^\s*state\s*=\s*(\S+)", re.MULTILINE)
 
 
-def _run(
-    argv: list[str], timeout: float | None = DEFAULT_TIMEOUT
-) -> tuple[int, str]:
+def _run(argv: list[str], timeout: float | None = DEFAULT_TIMEOUT) -> tuple[int, str]:
     """执行一个 argv 列表（不走 shell）。返回 (返回码, 输出)。
 
     默认超时是 `DEFAULT_TIMEOUT` 而不是 `None`：漏传超时是有界等待，
@@ -99,7 +95,7 @@ def _launchd_running(text: str) -> bool:
     宁可让用户去查，也不能把崩溃的服务报成在运行。
     """
     match = _LAUNCHD_STATE.search(text)
-    return bool(match) and match.group(1) == "running"
+    return match is not None and match.group(1) == "running"
 
 
 # 平台自身单元测试的显式豁免：那些用例要把 _run 换成假的、路径指向
@@ -199,9 +195,7 @@ class MacOSElevated:
             return
         # 两条路都走不通 —— 错误信息要同时带上两条命令的输出，
         # 用户才能分辨"这台机器没免密"和"sudo 本身坏了"。
-        raise PermissionError(
-            f"提权失败：sudo -v: {msg}；sudo -n true: {msg_nopasswd}"
-        )
+        raise PermissionError(f"提权失败：sudo -v: {msg}；sudo -n true: {msg_nopasswd}")
 
     def run(self, argv: list[str]) -> tuple[int, str]:
         if self._noninteractive:
@@ -330,9 +324,7 @@ class MacOSPlatform:
         launchctl print 对已注册但已退出的服务同样返回 0 —— 直接拿退出码
         当"在运行"，doctor 会把崩溃的 caddy 报成好的。
         """
-        code, out = _run(
-            ["launchctl", "print", f"{self._domain(name)}/com.devproxy.{name}"]
-        )
+        code, out = _run(["launchctl", "print", f"{self._domain(name)}/com.devproxy.{name}"])
         if code != 0:
             return False
         return _launchd_running(out)
@@ -454,9 +446,7 @@ class MacOSPlatform:
             # 不再需要额外的 chown/chmod。
             self.privilege().write(path, content)
             self.privilege().run(["launchctl", "bootout", target])
-            code, msg = self.privilege().run(
-                ["launchctl", "bootstrap", "system", str(path)]
-            )
+            code, msg = self.privilege().run(["launchctl", "bootstrap", "system", str(path)])
         else:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content, encoding="utf-8")
@@ -541,7 +531,7 @@ class MacOSPlatform:
         idx = arg.find("=~/")
         if idx >= 0:
             head = arg[: idx + 1]
-            return f"{head}{self.user_home / arg[idx + 3:]}"
+            return f"{head}{self.user_home / arg[idx + 3 :]}"
         return arg
 
 

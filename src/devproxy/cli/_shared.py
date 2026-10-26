@@ -21,7 +21,6 @@ from __future__ import annotations
 # 本模块是稳定的兼容转出口：导入的名字供命令模块与测试使用，
 # 不能按“未使用”删掉（ruff 看不到 `s.<名字>` 这种调用时查找）。
 # ruff: noqa: F401
-
 import typer  # 测试经 `_shared.typer.confirm` 打桩
 
 from devproxy.cli._context import StorageArchiveError
@@ -69,9 +68,9 @@ from devproxy.components.dns import DnsComponent  # noqa: F401
 from devproxy.components.dnsmasq import DNSMASQ_CONF  # noqa: F401
 from devproxy.components.dnsmasq import DnsmasqComponent  # noqa: F401
 from devproxy.gateway.caddy import CaddyConfig  # noqa: F401
+from devproxy.gateway.project import find_project_file  # noqa: F401
 from devproxy.gateway.runner import UpRunner  # noqa: F401
 from devproxy.gateway.runner import kill_pid_group  # noqa: F401
-from devproxy.gateway.project import find_project_file  # noqa: F401
 from devproxy.gateway.sync import build_sync_plan  # noqa: F401
 from devproxy.gateway.sync import execute_sync_plan  # noqa: F401
 from devproxy.lifecycle.migrate import default_dns_route  # noqa: F401

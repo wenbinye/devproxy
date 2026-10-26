@@ -12,7 +12,9 @@ import sys
 import typer
 from rich.markup import escape
 
-from devproxy.cli._shared import EXIT_FAIL, DevProxyGroup, err_console
+from devproxy.cli._shared import EXIT_FAIL
+from devproxy.cli._shared import DevProxyGroup
+from devproxy.cli._shared import err_console
 from devproxy.core.caddy_env import CaddyEnvArchiveError
 from devproxy.core.config import ConfigError
 from devproxy.gateway.routes import RouteTableError
@@ -25,21 +27,19 @@ app = typer.Typer(
 )
 
 # 导入即注册：每个模块用 @app.command() 把命令挂到 app 上。
-from devproxy.cli import (  # noqa: E402,F401
-    up,
-    expose,
-    down,
-    ls,
-    config,
-    selftest,
-    setup,
-    doctor,
-    trust,
-    logs,
-    uninstall,
-    run,
-    init,
-)
+from devproxy.cli import config  # noqa: E402,F401
+from devproxy.cli import doctor  # noqa: E402,F401
+from devproxy.cli import down  # noqa: E402,F401
+from devproxy.cli import expose  # noqa: E402,F401
+from devproxy.cli import init  # noqa: E402,F401
+from devproxy.cli import logs  # noqa: E402,F401
+from devproxy.cli import ls  # noqa: E402,F401
+from devproxy.cli import run  # noqa: E402,F401
+from devproxy.cli import selftest  # noqa: E402,F401
+from devproxy.cli import setup  # noqa: E402,F401
+from devproxy.cli import trust  # noqa: E402,F401
+from devproxy.cli import uninstall  # noqa: E402,F401
+from devproxy.cli import up  # noqa: E402,F401
 
 
 def main() -> None:

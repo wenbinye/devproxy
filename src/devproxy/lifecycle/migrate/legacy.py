@@ -1,17 +1,20 @@
 """遗留环境的探测：单元解析、Caddyfile 定位、storage 留档。"""
+
 from __future__ import annotations
 
 import json
 import shlex
 import warnings
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass
+from dataclasses import field
+from dataclasses import replace
 from pathlib import Path
 
 from devproxy.core.config import Config
-from devproxy.core.paths import Paths, atomic_write_text
-from devproxy.platform.base import Platform
-
+from devproxy.core.paths import Paths
+from devproxy.core.paths import atomic_write_text
 from devproxy.lifecycle.migrate.caddyfile import legacy_storage_path
+from devproxy.platform.base import Platform
 
 
 class MigrationError(RuntimeError):
@@ -25,6 +28,7 @@ class MigrationError(RuntimeError):
     def __init__(self, message: str, notes: list[str] | None = None):
         super().__init__(message)
         self.notes = list(notes or [])
+
 
 @dataclass
 class LegacyState:
@@ -40,13 +44,14 @@ class LegacyState:
     env: dict[str, str] = field(default_factory=dict)
     error: str | None = None
 
+
 def _exec_start_args(unit_text: str) -> list[str] | None:
     """ExecStart= 的命令行参数（systemd 的 "-" 前缀与引号都要正确处理）。"""
     for raw in unit_text.splitlines():
         line = raw.strip()
         if not line.startswith("ExecStart="):
             continue
-        value = line[len("ExecStart="):]
+        value = line[len("ExecStart=") :]
         if value.startswith("-"):
             # systemd：ExecStart=-cmd 表示启动失败不记错
             value = value[1:].lstrip()
@@ -59,18 +64,20 @@ def _exec_start_args(unit_text: str) -> list[str] | None:
             return args
     return None
 
+
 def _config_arg(args: list[str]) -> str | None:
     """从参数列表里取出 --config 的值（同时支持空格与 = 两种写法）。"""
     for i, arg in enumerate(args):
         if arg == "--config":
             value = args[i + 1] if i + 1 < len(args) else ""
         elif arg.startswith("--config="):
-            value = arg[len("--config="):]
+            value = arg[len("--config=") :]
         else:
             continue
         if value:
             return value
     return None
+
 
 def unit_config_path(unit_text: str, home: Path) -> Path | None:
     """从 ExecStart= 里解析 --config 指向的路径（展开 %h）。
@@ -87,6 +94,7 @@ def unit_config_path(unit_text: str, home: Path) -> Path | None:
         return None
     return Path(value.replace("%h", str(home))).expanduser()
 
+
 def unit_env(unit_text: str) -> dict[str, str]:
     """提取单元里的 Environment= 键值。
 
@@ -100,14 +108,15 @@ def unit_env(unit_text: str) -> dict[str, str]:
         if not line.startswith("Environment="):
             continue
         try:
-            items = shlex.split(line[len("Environment="):])
+            items = shlex.split(line[len("Environment=") :])
         except ValueError:
-            items = line[len("Environment="):].split()
+            items = line[len("Environment=") :].split()
         for item in items:
             if "=" in item:
                 k, v = item.split("=", 1)
                 env[k] = v
     return env
+
 
 def unit_environment_files(unit_text: str) -> list[str]:
     """单元引用的 EnvironmentFile= 路径列表（去掉 systemd 的 "-" 前缀）。"""
@@ -117,27 +126,28 @@ def unit_environment_files(unit_text: str) -> list[str]:
         if not line.startswith("EnvironmentFile="):
             continue
         try:
-            items = shlex.split(line[len("EnvironmentFile="):])
+            items = shlex.split(line[len("EnvironmentFile=") :])
         except ValueError:
-            items = line[len("EnvironmentFile="):].split()
+            items = line[len("EnvironmentFile=") :].split()
         for item in items:
             path = item.lstrip("-")
             if path:
                 files.append(path)
     return files
 
+
 def unit_exec_start(unit_text: str) -> list[str] | None:
     """从 ExecStart= 里解析出命令行参数列表（没有则返回 None）。"""
     return _exec_start_args(unit_text)
+
 
 def _home(platform: Platform, home: Path | None = None) -> Path:
     if home is not None:
         return home
     return getattr(platform, "user_home", None) or Path.home()
 
-def _read_unit_text(
-    platform: Platform, path: Path, *, interactive: bool = True
-) -> str | None:
+
+def _read_unit_text(platform: Platform, path: Path, *, interactive: bool = True) -> str | None:
     """读单元内容；普通读不到时（权限不足）改走提权会话。
 
     macOS 的 system scope 单元在 /Library/LaunchDaemons —— 权限或归属不对时
@@ -166,6 +176,7 @@ def _read_unit_text(
         # 提权也读不到（sudo 不可用等）—— 调用方按“无法确认”处理
         return None
 
+
 def detect_legacy(
     platform: Platform,
     paths: Paths,
@@ -183,9 +194,7 @@ def detect_legacy(
     interactive=False 用于只读场景（doctor）：读不到单元时不弹密码框，
     但同样返回“无法确认”的状态，让报告层有机会如实呈现。
     """
-    unit_path = (
-        unit_dir / "caddy.service" if unit_dir else platform.service_unit_path("caddy")
-    )
+    unit_path = unit_dir / "caddy.service" if unit_dir else platform.service_unit_path("caddy")
     if not unit_path.exists():
         return None
     unit_text = _read_unit_text(platform, unit_path, interactive=interactive)
@@ -227,6 +236,7 @@ def detect_legacy(
         env=unit_env(unit_text),
     )
 
+
 def _legacy_storage(state: LegacyState) -> Path | None:
     """旧 Caddyfile 全局块里声明的 storage 路径（读不到时返回 None）。"""
     if state.config_path is None or not state.config_path.exists():
@@ -236,6 +246,7 @@ def _legacy_storage(state: LegacyState) -> Path | None:
     except (OSError, UnicodeDecodeError):
         return None
     return legacy_storage_path(text)
+
 
 def resolve_storage_details(
     config: Config, state: LegacyState
@@ -260,6 +271,7 @@ def resolve_storage_details(
     )
     return replace(config, storage=str(legacy)), legacy, note
 
+
 def save_legacy_storage(paths: Paths, storage: Path | None) -> None:
     """留档生效的 storage 路径 —— 之后的 setup 必须用同一个地方。"""
     path = paths.caddy_storage
@@ -271,13 +283,14 @@ def save_legacy_storage(paths: Paths, storage: Path | None) -> None:
         json.dumps({"storage": str(storage)}, ensure_ascii=False, indent=2) + "\n",
     )
 
+
 def _warn_archive_unusable(path: Path, exc: Exception) -> None:
     warnings.warn(
-        f"storage 留档不可读：{path}（{exc}）。"
-        f"为避免 Caddy 重建 CA，请确认后删除或修复该文件。",
+        f"storage 留档不可读：{path}（{exc}）。为避免 Caddy 重建 CA，请确认后删除或修复该文件。",
         UserWarning,
         stacklevel=3,
     )
+
 
 def load_legacy_storage(paths: Paths) -> Path | None:
     """读回留档的 storage 路径。

@@ -15,7 +15,9 @@ from pathlib import Path
 
 from devproxy.core.config import Config
 from devproxy.core.paths import Paths
-from devproxy.platform.base import Action, Platform, Status
+from devproxy.platform.base import Action
+from devproxy.platform.base import Platform
+from devproxy.platform.base import Status
 
 DNSMASQ_CONF = Path("~/.config/dnsmasq/dnsmasq.conf")
 
@@ -55,7 +57,7 @@ def _is_global_server(line: str) -> bool:
     s = line.strip()
     if not s.startswith("server="):
         return False
-    value = s[len("server="):].strip()
+    value = s[len("server=") :].strip()
     if not value:
         return False
     if "/" in value or "," in value:
@@ -296,9 +298,7 @@ class DnsmasqComponent:
         try:
             original = path.read_bytes()
         except OSError as e:
-            raise RuntimeError(
-                f"读取现有 dnsmasq 配置失败，拒绝覆盖: {path}: {e}"
-            ) from e
+            raise RuntimeError(f"读取现有 dnsmasq 配置失败，拒绝覆盖: {path}: {e}") from e
         if original == content.encode("utf-8"):
             return
         stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
@@ -331,9 +331,7 @@ class DnsmasqComponent:
             )
             return Status(
                 ok=False,
-                detail=(
-                    f"dnsmasq 未把 {name} 解析到本机（{answer or '无响应'}）"
-                ),
+                detail=(f"dnsmasq 未把 {name} 解析到本机（{answer or '无响应'}）"),
                 hint=f"{hint}；dig @127.0.0.1 -p {self.platform.dns_port} {name}",
             )
         return Status(ok=True, detail=f"dnsmasq 运行中（{name} → {answer}）")

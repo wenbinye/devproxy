@@ -1,11 +1,11 @@
 import pytest
 
-from devproxy.gateway.names import InvalidNameError, domain_for, validate_name
+from devproxy.gateway.names import InvalidNameError
+from devproxy.gateway.names import domain_for
+from devproxy.gateway.names import validate_name
 
 
-@pytest.mark.parametrize(
-    "name", ["codeup", "codeup-web", "a1-b2-c3", "x", "a-b", "x" * 63]
-)
+@pytest.mark.parametrize("name", ["codeup", "codeup-web", "a1-b2-c3", "x", "a-b", "x" * 63])
 def test_valid_names_pass(name):
     assert validate_name(name) == name
 

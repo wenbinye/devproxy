@@ -30,7 +30,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SRC_DIR = REPO_ROOT / "src"
 
 # 假的 caddy：`validate` 立刻成功；`run` 的行为由 mode 决定。
-_FAKE_CADDY = '''#!__PYTHON__
+_FAKE_CADDY = """#!__PYTHON__
 import os
 import signal
 import sys
@@ -64,7 +64,7 @@ if cmd == "run":
         time.sleep(0.05)
 
 sys.exit(0)
-'''
+"""
 
 # 在子进程里跑 gateway 层的 run_foreground（信号处理只能发生在主线程）。
 _DRIVER = (
@@ -221,9 +221,7 @@ def test_run_with_missing_explicit_config_exits_2(env, validator, foreground):
     assert not foreground
 
 
-def test_run_with_explicit_config_ignores_missing_main_caddyfile(
-    env, validator, foreground
-):
+def test_run_with_explicit_config_ignores_missing_main_caddyfile(env, validator, foreground):
     """给了 --config 就不再要求主 Caddyfile 存在。"""
     paths, config, binary = env
     paths.caddyfile.unlink()
@@ -269,9 +267,7 @@ def test_run_with_active_service_on_unknown_platform_exits_3(
     assert "caddy服务仍在运行" in _flat(res.output)
 
 
-def test_run_with_invalid_config_exits_1_and_shows_detail(
-    env, validator, foreground, monkeypatch
-):
+def test_run_with_invalid_config_exits_1_and_shows_detail(env, validator, foreground, monkeypatch):
     """配置校验不过 → 打印 Caddy 给的说明，退出码 1。"""
     validator.ok = False
     validator.detail = "Caddyfile:3 - unrecognized directive 'bogus'"
@@ -281,9 +277,7 @@ def test_run_with_invalid_config_exits_1_and_shows_detail(
     assert not foreground, "校验不过就不该启动 caddy"
 
 
-def test_run_validates_and_launches_the_main_caddyfile(
-    env, validator, foreground
-):
+def test_run_validates_and_launches_the_main_caddyfile(env, validator, foreground):
     """默认校验并加载主 Caddyfile。"""
     paths, config, binary = env
     res = _invoke(["run"])
@@ -294,9 +288,7 @@ def test_run_validates_and_launches_the_main_caddyfile(
 
 def test_run_propagates_foreground_exit_code(env, validator, monkeypatch):
     """Caddy 自己退出 → devproxy 退出码 1。"""
-    monkeypatch.setattr(
-        "devproxy.gateway.foreground.run_foreground", lambda *a, **k: 1
-    )
+    monkeypatch.setattr("devproxy.gateway.foreground.run_foreground", lambda *a, **k: 1)
     res = _invoke(["run"])
     assert res.exit_code == 1, res.output
 
@@ -323,10 +315,10 @@ def test_run_foreground_passes_run_and_config_to_caddy(tmp_path):
     # 记录 argv 的假 caddy：validate 成功，run 立刻退出
     recorder = tmp_path / "recorder"
     recorder.write_text(
-        "#!{py}\n"
+        f"#!{sys.executable}\n"
         "import sys\n"
-        "open({rec!r}, 'w').write('\\0'.join(sys.argv))\n"
-        "sys.exit(0)\n".format(py=sys.executable, rec=str(record)),
+        f"open({str(record)!r}, 'w').write('\\0'.join(sys.argv))\n"
+        "sys.exit(0)\n",
         encoding="utf-8",
     )
     recorder.chmod(0o755)
@@ -424,13 +416,10 @@ def test_cli_run_starts_caddy_in_foreground_and_stops_on_sigint(tmp_path):
     config_dir = tmp_path / "config"
     config_dir.mkdir()
     (config_dir / "Caddyfile").write_text("# 主 Caddyfile\n", encoding="utf-8")
-    (config_dir / "config.toml").write_text(
-        f'caddy_bin = "{caddy}"\n', encoding="utf-8"
-    )
+    (config_dir / "config.toml").write_text(f'caddy_bin = "{caddy}"\n', encoding="utf-8")
 
     proc = subprocess.Popen(
-        [sys.executable, "-c", _CLI_DRIVER, "run", "--config",
-         str(config_dir / "Caddyfile")],
+        [sys.executable, "-c", _CLI_DRIVER, "run", "--config", str(config_dir / "Caddyfile")],
         env=_child_env(
             marker,
             DEVPROXY_CONFIG_DIR=str(config_dir),
@@ -452,9 +441,7 @@ def test_cli_run_starts_caddy_in_foreground_and_stops_on_sigint(tmp_path):
     assert not (tmp_path / "state" / "routes.json").exists()
 
 
-def test_run_with_other_config_ignores_active_service(
-    env, validator, foreground, monkeypatch
-):
+def test_run_with_other_config_ignores_active_service(env, validator, foreground, monkeypatch):
     """`--config` 指向**别的** Caddyfile 时不该被"服务在跑"拦住。
 
     服务加载的是主 Caddyfile；另一份配置通常用另一组端口（调试、隔离实例

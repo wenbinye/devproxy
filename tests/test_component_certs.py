@@ -208,9 +208,7 @@ def _injected(tmp_path, platform):
 
 
 def _certutil_installed(monkeypatch):
-    monkeypatch.setattr(
-        "devproxy.components.certs.shutil.which", lambda name: "/usr/bin/certutil"
-    )
+    monkeypatch.setattr("devproxy.components.certs.shutil.which", lambda name: "/usr/bin/certutil")
 
 
 def _certutil_missing(monkeypatch):
@@ -476,9 +474,7 @@ def test_apply_skips_nss_install_when_already_trusted(tmp_path, monkeypatch):
             )
         ]
     )
-    assert not [c for c in platform.commands if c[:1] == ["certutil"]], (
-        "已信任的库不该被反复重装"
-    )
+    assert not [c for c in platform.commands if c[:1] == ["certutil"]], "已信任的库不该被反复重装"
 
 
 # -- fix round 1：偏差点 ----------------------------------------------------
@@ -582,9 +578,7 @@ def test_apply_repair_uses_platform_flag_helper(tmp_path, monkeypatch):
     _write_ca(paths)
     comp.apply(comp.plan())
     mods = [c for c in platform.commands if c[:1] == ["certutil"] and "-M" in c]
-    assert mods and mods[0][mods[0].index("-t") + 1] == "C,C,", (
-        "只补 SSL 列，S/MIME 的信任必须保留"
-    )
+    assert mods and mods[0][mods[0].index("-t") + 1] == "C,C,", "只补 SSL 列，S/MIME 的信任必须保留"
 
 
 def test_check_fails_loud_when_stale_state_is_unknown(tmp_path):
@@ -725,9 +719,7 @@ def test_remove_stale_action_raises_when_delete_unverifiable(tmp_path, monkeypat
     assert "SEC_ERROR_BAD_DATABASE" in message
 
 
-def test_remove_stale_action_raises_when_delete_reports_success_but_fails(
-    tmp_path, monkeypatch
-):
+def test_remove_stale_action_raises_when_delete_reports_success_but_fails(tmp_path, monkeypatch):
     """`-D` 返回 0 但条目仍在（库目录只读）→ 必须报错。"""
     _certutil_installed(monkeypatch)
 
@@ -791,9 +783,7 @@ def test_remove_stale_action_tolerates_missing_entry(tmp_path, monkeypatch):
     )  # 不抛异常
 
 
-def test_remove_stale_action_uses_message_when_platform_cannot_probe(
-    tmp_path, monkeypatch
-):
+def test_remove_stale_action_uses_message_when_platform_cannot_probe(tmp_path, monkeypatch):
     """平台不提供 nss_has_nickname 时按 certutil 的输出判断"不存在"。"""
     _certutil_installed(monkeypatch)
 
@@ -860,9 +850,7 @@ def test_signature_probe_does_not_swallow_internal_type_error(tmp_path):
 def test_apply_unknown_action_is_a_clean_error(tmp_path):
     comp, _platform, _paths = _component(tmp_path)
     with pytest.raises(RuntimeError, match="未知动作"):
-        comp.apply(
-            [Action(description="未知步骤", kind="run", command=["bogus-action"])]
-        )
+        comp.apply([Action(description="未知步骤", kind="run", command=["bogus-action"])])
 
 
 def test_apply_drops_stale_own_entry_when_trusted_elsewhere(tmp_path, monkeypatch):
@@ -917,7 +905,7 @@ def test_verify_checks_real_https_request(tmp_path, monkeypatch):
     ca = _write_ca(paths)
     comp.apply(comp.plan())
     _trust_both(platform, ca)
-    paths.sites_caddy.write_text("localhost { respond \"hi\" }\n", encoding="utf-8")
+    paths.sites_caddy.write_text('localhost { respond "hi" }\n', encoding="utf-8")
     assert comp.verify().ok is True
     assert "https://localhost" in platform.http_probes
 
@@ -927,7 +915,7 @@ def test_verify_not_ok_when_https_probe_fails(tmp_path):
     comp, paths, _ = _injected(tmp_path, platform)
     ca = _write_ca(paths)
     _trust_both(platform, ca)
-    paths.sites_caddy.write_text("localhost { respond \"hi\" }\n", encoding="utf-8")
+    paths.sites_caddy.write_text('localhost { respond "hi" }\n', encoding="utf-8")
     platform.http_result = False
     status = comp.verify()
     assert status.ok is False
@@ -953,9 +941,7 @@ def test_verify_does_not_treat_localhost_substring_as_site(tmp_path):
     comp, paths, _ = _injected(tmp_path, platform)
     ca = _write_ca(paths)
     _trust_both(platform, ca)
-    paths.sites_caddy.write_text(
-        "foo.localhost.test { respond \"hi\" }\n", encoding="utf-8"
-    )
+    paths.sites_caddy.write_text('foo.localhost.test { respond "hi" }\n', encoding="utf-8")
     status = comp.verify()
     assert status.ok is True
     assert "暂无可探测站点" in status.detail
@@ -975,7 +961,7 @@ def test_verify_probes_first_registered_route(tmp_path):
         encoding="utf-8",
     )
     # 即便机器上同时有 localhost 站点，也应优先探真实路由
-    paths.sites_caddy.write_text("localhost { respond \"hi\" }\n", encoding="utf-8")
+    paths.sites_caddy.write_text('localhost { respond "hi" }\n', encoding="utf-8")
     assert comp.verify().ok is True
     assert platform.http_probes == ["https://codeup.test"]
 

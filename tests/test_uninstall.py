@@ -14,20 +14,17 @@ from devproxy.cli import app
 from devproxy.core.config import Config
 from devproxy.core.paths import Paths
 from devproxy.lifecycle import uninstall as uninstall_mod
-from devproxy.lifecycle.uninstall import (
-    UninstallTargets,
-    apply_plan,
-    build_plan,
-    latest_dnsmasq_backup,
-    latest_migration_backup,
-)
+from devproxy.lifecycle.uninstall import UninstallTargets
+from devproxy.lifecycle.uninstall import apply_plan
+from devproxy.lifecycle.uninstall import build_plan
+from devproxy.lifecycle.uninstall import latest_dnsmasq_backup
+from devproxy.lifecycle.uninstall import latest_migration_backup
 from devproxy.platform import linux as linux_mod
 from devproxy.platform import macos as macos_mod
 from devproxy.platform.base import Platform
 from devproxy.platform.fake import FakePlatform
 from devproxy.platform.linux import LinuxPlatform
 from devproxy.platform.macos import MacOSPlatform
-
 
 # ---------------------------------------------------------------------------
 # 测试夹具与小工具
@@ -53,7 +50,12 @@ def make_targets(tmp_path: Path) -> UninstallTargets:
         resolved_conf=tmp_path / "etc" / "systemd" / "resolved.conf.d" / "devproxy.conf",
         system_dnsmasq_conf=tmp_path / "etc" / "dnsmasq.d" / "devproxy.conf",
         resolver_dir=tmp_path / "etc" / "resolver",
-        system_ca_dest=tmp_path / "usr" / "local" / "share" / "ca-certificates" / "devproxy-local.crt",
+        system_ca_dest=tmp_path
+        / "usr"
+        / "local"
+        / "share"
+        / "ca-certificates"
+        / "devproxy-local.crt",
         system_keychain=str(tmp_path / "System.keychain"),
         nss_dir=tmp_path / "nssdb",
         dnsmasq_conf=tmp_path / "home" / ".config" / "dnsmasq" / "dnsmasq.conf",
@@ -304,9 +306,7 @@ def test_plan_order_kill_services_dns_ca_state(paths, tmp_path):
     platform.nss_entries_db[(platform.nss_db, "任意昵称")] = (ca, "C,,")
     seed_state(paths)
 
-    plan = build_plan(
-        platform, paths, config, purge=False, remove_ca=False, targets=targets
-    )
+    plan = build_plan(platform, paths, config, purge=False, remove_ca=False, targets=targets)
     executed = commands(plan)
     assert executed[0] == ["kill-pid-group", "4242", "start-1"]
     assert executed[1:3] == [
@@ -328,9 +328,9 @@ def test_plan_order_kill_services_dns_ca_state(paths, tmp_path):
     assert index_of(lambda a: a.command[:1] == ["remove-service"]) < index_of(
         lambda a: a.command == ["systemctl", "restart", "systemd-resolved"]
     )
-    assert index_of(
-        lambda a: a.command == ["systemctl", "restart", "systemd-resolved"]
-    ) < index_of(lambda a: a.command[:1] == ["remove-nss-ca"])
+    assert index_of(lambda a: a.command == ["systemctl", "restart", "systemd-resolved"]) < index_of(
+        lambda a: a.command[:1] == ["remove-nss-ca"]
+    )
     assert index_of(lambda a: a.command[:1] == ["remove-nss-ca"]) < index_of(
         lambda a: a.path == paths.caddyfile
     )
@@ -360,9 +360,7 @@ def test_plan_dns_linux_removes_both_dropins(paths, tmp_path):
         path.parent.mkdir(parents=True)
         path.write_text("dns\n", encoding="utf-8")
 
-    plan = build_plan(
-        platform, paths, config, purge=False, remove_ca=False, targets=targets
-    )
+    plan = build_plan(platform, paths, config, purge=False, remove_ca=False, targets=targets)
     assert targets.resolved_conf in delete_paths(plan)
     assert targets.system_dnsmasq_conf in delete_paths(plan)
     assert ["systemctl", "restart", "systemd-resolved"] in commands(plan)
@@ -378,9 +376,7 @@ def test_plan_dns_macos_removes_resolver_without_restart(paths, tmp_path, monkey
     resolver.parent.mkdir(parents=True)
     resolver.write_text("nameserver 127.0.0.1\nport 5300\n", encoding="utf-8")
 
-    plan = build_plan(
-        platform, paths, config, purge=False, remove_ca=False, targets=targets
-    )
+    plan = build_plan(platform, paths, config, purge=False, remove_ca=False, targets=targets)
     assert resolver in delete_paths(plan)
     assert not any("systemctl" in c for c in commands(plan))
 
@@ -398,9 +394,7 @@ def test_plan_dnsmasq_restores_latest_backup(paths, tmp_path):
     new.write_text("original\n", encoding="utf-8")
     assert latest_dnsmasq_backup(paths.backup_dir) == new
 
-    plan = build_plan(
-        platform, paths, config, purge=False, remove_ca=False, targets=targets
-    )
+    plan = build_plan(platform, paths, config, purge=False, remove_ca=False, targets=targets)
     writes = [a for a in plan.actions if a.kind == "write"]
     assert len(writes) == 1
     assert writes[0].path == targets.dnsmasq_conf
@@ -414,9 +408,7 @@ def test_plan_dnsmasq_without_backup_keeps_file(paths, tmp_path):
     targets.dnsmasq_conf.parent.mkdir(parents=True)
     targets.dnsmasq_conf.write_text("merged\n", encoding="utf-8")
 
-    plan = build_plan(
-        platform, paths, config, purge=False, remove_ca=False, targets=targets
-    )
+    plan = build_plan(platform, paths, config, purge=False, remove_ca=False, targets=targets)
     assert not any(a.kind == "write" for a in plan.actions)
     assert any(str(targets.dnsmasq_conf) in item for item in plan.kept)
 
@@ -434,9 +426,7 @@ def test_plan_keeps_migrated_ca_by_default(paths, tmp_path):
     paths.state_dir.mkdir(parents=True, exist_ok=True)
     paths.caddy_storage.write_text("{}", encoding="utf-8")
 
-    plan = build_plan(
-        platform, paths, config, purge=False, remove_ca=False, targets=targets
-    )
+    plan = build_plan(platform, paths, config, purge=False, remove_ca=False, targets=targets)
     assert not any(
         c[:1] in (["remove-nss-ca"], ["remove-linux-system-ca"], ["remove-macos-ca"])
         for c in commands(plan)
@@ -454,9 +444,7 @@ def test_plan_remove_ca_forces_migrated_ca_removal(paths, tmp_path):
     paths.state_dir.mkdir(parents=True, exist_ok=True)
     paths.caddy_storage.write_text("{}", encoding="utf-8")
 
-    plan = build_plan(
-        platform, paths, config, purge=False, remove_ca=True, targets=targets
-    )
+    plan = build_plan(platform, paths, config, purge=False, remove_ca=True, targets=targets)
     assert any(c[:1] == ["remove-linux-system-ca"] for c in commands(plan))
     assert any("迁移前就存在" in note for note in plan.notes)
 
@@ -472,13 +460,9 @@ def test_plan_ca_matches_fingerprint_not_nickname(paths, tmp_path):
     platform.nss_entries_db[(platform.nss_db, "devproxy Local CA")] = (other, "C,,")
     platform.nss_entries_db[(platform.nss_db, "用户自己的别名")] = (ca, "C,,")
 
-    plan = build_plan(
-        platform, paths, config, purge=False, remove_ca=False, targets=targets
-    )
+    plan = build_plan(platform, paths, config, purge=False, remove_ca=False, targets=targets)
     nss_actions = [c for c in commands(plan) if c[:1] == ["remove-nss-ca"]]
-    assert nss_actions == [
-        ["remove-nss-ca", str(ca), str(targets.nss_dir), "用户自己的别名"]
-    ]
+    assert nss_actions == [["remove-nss-ca", str(ca), str(targets.nss_dir), "用户自己的别名"]]
 
     results = apply_plan(plan)
     assert all(result.ok for result in results), [r for r in results if not r.ok]
@@ -495,9 +479,7 @@ def test_apply_system_ca_only_removes_matching_fingerprint(paths, tmp_path):
     targets.system_ca_dest.parent.mkdir(parents=True)
     targets.system_ca_dest.write_text(cert_pem("someone-else"), encoding="utf-8")
 
-    plan = build_plan(
-        platform, paths, config, purge=False, remove_ca=False, targets=targets
-    )
+    plan = build_plan(platform, paths, config, purge=False, remove_ca=False, targets=targets)
     results = apply_plan(plan)
     assert all(result.ok for result in results), [r for r in results if not r.ok]
     assert targets.system_ca_dest.exists()
@@ -516,13 +498,9 @@ def test_macos_plan_removes_ca_by_sha1_fingerprint(paths, tmp_path, monkeypatch)
     ca = write_ca(config)
     platform.trusted.add(ca)
 
-    plan = build_plan(
-        platform, paths, config, purge=False, remove_ca=False, targets=targets
-    )
+    plan = build_plan(platform, paths, config, purge=False, remove_ca=False, targets=targets)
     mac_actions = [c for c in commands(plan) if c[:1] == ["remove-macos-ca"]]
-    assert mac_actions == [
-        ["remove-macos-ca", str(ca), targets.system_keychain]
-    ]
+    assert mac_actions == [["remove-macos-ca", str(ca), targets.system_keychain]]
     assert not any(c[:1] == ["remove-nss-ca"] for c in commands(plan))
 
     results = apply_plan(plan)
@@ -548,9 +526,7 @@ def test_macos_ca_not_found_is_idempotent(paths, tmp_path, monkeypatch):
         "run",
         lambda argv: (1, "security: The specified item could not be found."),
     )
-    detail = uninstall_mod._remove_macos_ca(
-        platform, ca, str(tmp_path / "System.keychain")
-    )
+    detail = uninstall_mod._remove_macos_ca(platform, ca, str(tmp_path / "System.keychain"))
     assert "未找到" in detail
 
 
@@ -563,9 +539,7 @@ def test_apply_system_ca_removes_matching_fingerprint(paths, tmp_path):
     targets.system_ca_dest.parent.mkdir(parents=True)
     targets.system_ca_dest.write_text(ca.read_text(encoding="utf-8"), encoding="utf-8")
 
-    plan = build_plan(
-        platform, paths, config, purge=False, remove_ca=False, targets=targets
-    )
+    plan = build_plan(platform, paths, config, purge=False, remove_ca=False, targets=targets)
     results = apply_plan(plan)
     assert all(result.ok for result in results), [r for r in results if not r.ok]
     assert not targets.system_ca_dest.exists()
@@ -585,9 +559,7 @@ def test_plan_purge_deletes_storage_backups_and_binary(paths, tmp_path):
     config.caddy_bin_path.parent.mkdir(parents=True)
     config.caddy_bin_path.write_text("binary", encoding="utf-8")
     paths.backup_dir.mkdir(parents=True)
-    (paths.backup_dir / "dnsmasq.conf.20240101T000000Z.bak").write_text(
-        "x", encoding="utf-8"
-    )
+    (paths.backup_dir / "dnsmasq.conf.20240101T000000Z.bak").write_text("x", encoding="utf-8")
 
     plan = build_plan(
         platform,
@@ -727,19 +699,13 @@ def _full_plan(paths, tmp_path, platform, monkeypatch):
         "kill_pid_group",
         lambda pid, proc_start=None: killed.append((pid, proc_start)) or True,
     )
-    plan = build_plan(
-        platform, paths, config, purge=False, remove_ca=False, targets=targets
-    )
+    plan = build_plan(platform, paths, config, purge=False, remove_ca=False, targets=targets)
     return plan, config, targets, ca, killed
 
 
-def test_apply_full_flow_removes_tool_state_and_keeps_user_files(
-    paths, tmp_path, monkeypatch
-):
+def test_apply_full_flow_removes_tool_state_and_keeps_user_files(paths, tmp_path, monkeypatch):
     platform = FakePlatform()
-    plan, config, targets, ca, killed = _full_plan(
-        paths, tmp_path, platform, monkeypatch
-    )
+    plan, config, targets, ca, killed = _full_plan(paths, tmp_path, platform, monkeypatch)
     results = apply_plan(plan)
     assert all(result.ok for result in results), [r for r in results if not r.ok]
     assert killed == [(4242, "start-1")]
@@ -775,9 +741,7 @@ def test_apply_full_flow_removes_tool_state_and_keeps_user_files(
 
 def test_apply_continues_after_one_step_fails(paths, tmp_path, monkeypatch):
     platform = FakePlatform()
-    plan, config, targets, ca, killed = _full_plan(
-        paths, tmp_path, platform, monkeypatch
-    )
+    plan, config, targets, ca, killed = _full_plan(paths, tmp_path, platform, monkeypatch)
 
     def boom(name):
         raise RuntimeError("service boom")
@@ -792,17 +756,13 @@ def test_apply_continues_after_one_step_fails(paths, tmp_path, monkeypatch):
 
 def test_apply_is_idempotent_second_plan_is_noop(paths, tmp_path, monkeypatch):
     platform = FakePlatform()
-    plan, config, targets, ca, _killed = _full_plan(
-        paths, tmp_path, platform, monkeypatch
-    )
+    plan, config, targets, ca, _killed = _full_plan(paths, tmp_path, platform, monkeypatch)
     results = apply_plan(plan)
     assert all(result.ok for result in results)
 
     # 模拟系统信任库真的不再包含该 CA（假平台不解析 update-ca-certificates）
     platform.trusted.discard(ca)
-    second = build_plan(
-        platform, paths, config, purge=False, remove_ca=False, targets=targets
-    )
+    second = build_plan(platform, paths, config, purge=False, remove_ca=False, targets=targets)
     assert second.is_noop, [a.description for a in second.actions]
     assert apply_plan(second) == []
 
@@ -842,9 +802,7 @@ def test_cli_uninstall_help_lists_options():
     assert "uninstall" in top.output
 
 
-def test_cli_dry_run_has_no_side_effects(
-    paths, tmp_path, monkeypatch, isolated_cli_platform
-):
+def test_cli_dry_run_has_no_side_effects(paths, tmp_path, monkeypatch, isolated_cli_platform):
     config = make_config(paths)
     targets = make_targets(tmp_path)
     seed_service(isolated_cli_platform, "caddy")
@@ -877,9 +835,7 @@ def test_cli_refuses_noninteractive_without_yes(
     assert not isolated_cli_platform.commands
 
 
-def test_cli_declined_confirmation_exits_4(
-    paths, tmp_path, monkeypatch, isolated_cli_platform
-):
+def test_cli_declined_confirmation_exits_4(paths, tmp_path, monkeypatch, isolated_cli_platform):
     config = make_config(paths)
     targets = make_targets(tmp_path)
     seed_service(isolated_cli_platform, "caddy")
@@ -895,9 +851,7 @@ def test_cli_declined_confirmation_exits_4(
     assert not isolated_cli_platform.commands
 
 
-def test_cli_yes_uninstalls_and_prints_kept(
-    paths, tmp_path, monkeypatch, isolated_cli_platform
-):
+def test_cli_yes_uninstalls_and_prints_kept(paths, tmp_path, monkeypatch, isolated_cli_platform):
     config = make_config(paths)
     targets = make_targets(tmp_path)
     seed_service(isolated_cli_platform, "caddy")
@@ -933,9 +887,7 @@ def test_cli_second_run_says_nothing_to_uninstall(
     assert not isolated_cli_platform.commands
 
 
-def test_cli_failure_exits_1(
-    paths, tmp_path, monkeypatch, isolated_cli_platform
-):
+def test_cli_failure_exits_1(paths, tmp_path, monkeypatch, isolated_cli_platform):
     config = make_config(paths)
     targets = make_targets(tmp_path)
     seed_service(isolated_cli_platform, "caddy")
@@ -961,9 +913,7 @@ def test_cli_purge_deletes_storage_backups_and_binary(
     config.caddy_bin_path.parent.mkdir(parents=True)
     config.caddy_bin_path.write_text("binary", encoding="utf-8")
     paths.backup_dir.mkdir(parents=True)
-    (paths.backup_dir / "dnsmasq.conf.20240101T000000Z.bak").write_text(
-        "x", encoding="utf-8"
-    )
+    (paths.backup_dir / "dnsmasq.conf.20240101T000000Z.bak").write_text("x", encoding="utf-8")
     _patch_cli(monkeypatch, paths, config, targets, isolated_cli_platform)
 
     result = CliRunner().invoke(app, ["uninstall", "--yes", "--purge"])

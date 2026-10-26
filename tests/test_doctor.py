@@ -1,4 +1,5 @@
-from devproxy.lifecycle.doctor import build_report, report_is_healthy
+from devproxy.lifecycle.doctor import build_report
+from devproxy.lifecycle.doctor import report_is_healthy
 from devproxy.platform.base import Status
 
 
@@ -178,12 +179,8 @@ def test_cli_doctor_macos_rejects_resolved_backend(tmp_path, monkeypatch):
 
     cfg = Config(storage=str(tmp_path / "data"))
     _patch_cli_with_config(monkeypatch, tmp_path, cfg)
-    monkeypatch.setattr(
-        "devproxy.cli._shared._components", lambda *a, **k: []
-    )
-    monkeypatch.setattr(
-        "devproxy.cli._shared._platform", lambda: SimpleNamespace(name="mac")
-    )
+    monkeypatch.setattr("devproxy.cli._shared._components", lambda *a, **k: [])
+    monkeypatch.setattr("devproxy.cli._shared._platform", lambda: SimpleNamespace(name="mac"))
     result = CliRunner().invoke(app, ["doctor", "--dns-backend", "resolved"])
     assert result.exit_code == 2, result.output
     assert "macOS 不支持 resolved" in result.output
@@ -208,14 +205,12 @@ def test_cli_doctor_rejects_invalid_dns_backend(tmp_path, monkeypatch):
 def test_find_wildcard_sites_detects_test_wildcard(tmp_path):
     """工具的设计前提是"精确站点块、没有通配"。"""
     from devproxy.core.config import Config
-    from devproxy.lifecycle.doctor import find_wildcard_sites
     from devproxy.core.paths import Paths
+    from devproxy.lifecycle.doctor import find_wildcard_sites
 
     paths = Paths(tmp_path / "config", tmp_path / "state", tmp_path / "data")
     paths.ensure_files()
-    paths.sites_caddy.write_text(
-        "*.test {\n\ttls {\n\t\ton_demand\n\t}\n}\n", encoding="utf-8"
-    )
+    paths.sites_caddy.write_text("*.test {\n\ttls {\n\t\ton_demand\n\t}\n}\n", encoding="utf-8")
     found = find_wildcard_sites(paths, Config())
     assert found, "必须发现 *.test 通配块"
     assert any("*.test" in a for _, addrs in found for a in addrs)
@@ -224,8 +219,8 @@ def test_find_wildcard_sites_detects_test_wildcard(tmp_path):
 def test_find_wildcard_sites_ignores_other_suffix(tmp_path):
     """别的后缀的通配块与本工具无关（*.local.yikuaigao.com 不算）。"""
     from devproxy.core.config import Config
-    from devproxy.lifecycle.doctor import find_wildcard_sites
     from devproxy.core.paths import Paths
+    from devproxy.lifecycle.doctor import find_wildcard_sites
 
     paths = Paths(tmp_path / "config", tmp_path / "state", tmp_path / "data")
     paths.ensure_files()
@@ -248,9 +243,7 @@ def test_cli_doctor_reports_wildcard_and_exits_3(tmp_path, monkeypatch):
 
     cfg = Config(storage=str(tmp_path / "data"))
     paths = _patch_cli_with_config(monkeypatch, tmp_path, cfg)
-    paths.sites_caddy.write_text(
-        "*.test {\n\ttls {\n\t\ton_demand\n\t}\n}\n", encoding="utf-8"
-    )
+    paths.sites_caddy.write_text("*.test {\n\ttls {\n\t\ton_demand\n\t}\n}\n", encoding="utf-8")
     monkeypatch.setattr(
         "devproxy.cli._shared._components", lambda *a, **k: [FakeCliComponent("a", True)]
     )

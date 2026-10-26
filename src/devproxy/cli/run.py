@@ -14,14 +14,13 @@ from pathlib import Path
 
 import typer
 
+from devproxy.cli import _shared as s
 from devproxy.cli import app
 from devproxy.cli._shared import EXIT_FAIL
 from devproxy.cli._shared import EXIT_PRECONDITION
 from devproxy.cli._shared import EXIT_USAGE
 from devproxy.core.config import Config
 from devproxy.core.paths import Paths
-
-from devproxy.cli import _shared as s
 
 # 各平台停掉现役 caddy 服务的命令 —— 提示里必须给一条能直接执行的。
 # 键是 platform.name（linux.py 的 "linux" / macos.py 的 "mac"）；

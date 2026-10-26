@@ -8,7 +8,8 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from dataclasses import field
 from pathlib import Path
 
 TABLE_VERSION = 1
@@ -22,9 +23,7 @@ class RouteTableError(RuntimeError):
 # 站点地址与上游都要拼进 Caddyfile 文本 —— 只放行严格白名单，
 # 大括号/换行/引号这类元字符一律拒绝（不是「转义后放行」：
 # Caddyfile 没有可靠的通用转义，唯一的正解是不让它们进来）
-HOSTNAME_RE = re.compile(
-    r"\A[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*\Z"
-)
+HOSTNAME_RE = re.compile(r"\A[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*\Z")
 HOSTPORT_RE = re.compile(r"\A[a-z0-9.-]+:\d{1,5}\Z")
 MAX_HOSTNAME_LEN = 253
 
@@ -70,7 +69,7 @@ class Route:
         return d
 
     @classmethod
-    def from_dict(cls, d: dict) -> "Route":
+    def from_dict(cls, d: dict) -> Route:
         return cls(
             name=d["name"],
             domain=d["domain"],
@@ -115,7 +114,7 @@ class RouteTable:
         }
 
     @classmethod
-    def from_dict(cls, d: dict) -> "RouteTable":
+    def from_dict(cls, d: dict) -> RouteTable:
         return cls(
             version=int(d.get("version", TABLE_VERSION)),
             domain_suffix=d.get("domain_suffix", "test"),
@@ -181,13 +180,9 @@ def check_renderable(route: Route) -> None:
         )
     upstream = route.upstream
     if not isinstance(upstream, str) or not HOSTPORT_RE.match(upstream):
-        raise RouteTableError(
-            f"路由 {route.name!r} 的 upstream {upstream!r} 必须形如 host:port"
-        )
+        raise RouteTableError(f"路由 {route.name!r} 的 upstream {upstream!r} 必须形如 host:port")
     if not 1 <= int(upstream.rpartition(":")[2]) <= 65535:
-        raise RouteTableError(
-            f"路由 {route.name!r} 的 upstream {upstream!r} 端口超出 1..65535"
-        )
+        raise RouteTableError(f"路由 {route.name!r} 的 upstream {upstream!r} 端口超出 1..65535")
 
 
 DEFAULT_HTTPS_PORT = 443

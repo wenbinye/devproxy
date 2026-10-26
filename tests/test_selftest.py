@@ -12,13 +12,11 @@ from pathlib import Path
 import pytest
 
 from devproxy.gateway import selftest
-from devproxy.gateway.selftest import (
-    MIN_CADDY_VERSION,
-    TRUST_DISABLED_LOG,
-    _caddy_version,
-    _wait_trust_disabled_log,
-    run_selftest,
-)
+from devproxy.gateway.selftest import MIN_CADDY_VERSION
+from devproxy.gateway.selftest import TRUST_DISABLED_LOG
+from devproxy.gateway.selftest import _caddy_version
+from devproxy.gateway.selftest import _wait_trust_disabled_log
+from devproxy.gateway.selftest import run_selftest
 
 
 class _FakeRun:
@@ -56,8 +54,7 @@ def test_min_version_floor_is_2_7_and_log_string_is_pinned():
     #  clients may show warnings"。用前缀做子串匹配，容忍后半句措辞变化。
     assert TRUST_DISABLED_LOG == "root certificate trust store installation disabled"
     assert (
-        "root certificate trust store installation disabled; "
-        "unconfigured clients may show warnings"
+        "root certificate trust store installation disabled; unconfigured clients may show warnings"
     ).startswith(TRUST_DISABLED_LOG)
 
 
@@ -128,9 +125,9 @@ def test_selftest_accepts_caddy_at_floor(monkeypatch, caddy_bin):
         ),
     )
     monkeypatch.setattr(
-        selftest.subprocess, "Popen", lambda *a, **k: (_ for _ in ()).throw(
-            AssertionError("不应启动沙箱")
-        )
+        selftest.subprocess,
+        "Popen",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("不应启动沙箱")),
     )
 
     result = run_selftest(caddy_bin)
@@ -148,8 +145,8 @@ def test_selftest_accepts_caddy_at_floor(monkeypatch, caddy_bin):
 def test_trust_disabled_log_line_is_detected(tmp_path):
     log = tmp_path / "caddy.log"
     log.write_text(
-        "{\"level\":\"info\",\"ts\":1,\"msg\":\"root certificate trust store "
-        "installation disabled; unconfigured clients may show warnings\"}\n",
+        '{"level":"info","ts":1,"msg":"root certificate trust store '
+        'installation disabled; unconfigured clients may show warnings"}\n',
         encoding="utf-8",
     )
     assert _wait_trust_disabled_log(log, timeout=0.2) is True
@@ -192,9 +189,7 @@ def _serve_config(payload: dict):
 
 def test_wait_admin_rejects_instance_with_other_storage():
     """端口上活着别人的 Caddy → 不能认领（否则 reload 会改到别人）。"""
-    srv, base = _serve_config(
-        {"storage": {"module": "file_system", "root": "/someone/else"}}
-    )
+    srv, base = _serve_config({"storage": {"module": "file_system", "root": "/someone/else"}})
     try:
         assert selftest._wait_admin(base, "/our/sandbox", timeout=0.5) is False
     finally:
@@ -203,9 +198,7 @@ def test_wait_admin_rejects_instance_with_other_storage():
 
 
 def test_wait_admin_accepts_matching_sandbox_storage():
-    srv, base = _serve_config(
-        {"storage": {"module": "file_system", "root": "/our/sandbox"}}
-    )
+    srv, base = _serve_config({"storage": {"module": "file_system", "root": "/our/sandbox"}})
     try:
         assert selftest._wait_admin(base, "/our/sandbox", timeout=2) is True
     finally:
@@ -226,16 +219,12 @@ def test_free_ports_are_distinct_and_bindable():
             s.close()
 
 
-def test_selftest_uses_dynamic_ports_and_production_caddyfile(
-    monkeypatch, caddy_bin
-):
+def test_selftest_uses_dynamic_ports_and_production_caddyfile(monkeypatch, caddy_bin):
     """沙箱 Caddyfile 必须由 build_main_caddyfile 生成，端口全部动态分配。"""
     captured: dict[str, str] = {}
     monkeypatch.setattr(selftest, "_caddy_version", lambda _: (2, 7, 0))
     monkeypatch.setattr(selftest, "_free_ports", lambda n: [21001, 21002, 21003])
-    monkeypatch.setattr(
-        selftest, "build_main_caddyfile", lambda spec: "MARKER-CADDYFILE\n"
-    )
+    monkeypatch.setattr(selftest, "build_main_caddyfile", lambda spec: "MARKER-CADDYFILE\n")
 
     def fake_adapt(caddy_bin_, caddyfile, config_json):
         captured["text"] = caddyfile.read_text(encoding="utf-8")
@@ -269,9 +258,7 @@ def test_adapt_oserror_returns_false(monkeypatch, tmp_path):
         raise OSError(8, "Exec format error")
 
     monkeypatch.setattr(selftest.subprocess, "run", broken_run)
-    ok, msg = selftest._adapt(
-        Path("/unused"), tmp_path / "Caddyfile", tmp_path / "config.json"
-    )
+    ok, msg = selftest._adapt(Path("/unused"), tmp_path / "Caddyfile", tmp_path / "config.json")
     assert ok is False
     assert "无法执行" in msg
 
@@ -281,9 +268,7 @@ def test_reload_timeout_returns_false(monkeypatch, tmp_path):
         raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout", 30))
 
     monkeypatch.setattr(selftest.subprocess, "run", timeout_run)
-    ok, msg = selftest._reload(
-        Path("/unused"), tmp_path / "config.json", 12345, timeout=1
-    )
+    ok, msg = selftest._reload(Path("/unused"), tmp_path / "config.json", 12345, timeout=1)
     assert ok is False
     assert "超时" in msg
 
@@ -301,9 +286,7 @@ def test_reload_oserror_returns_false(monkeypatch, tmp_path):
 # ---------------------------- I12: mkdtemp 之后所有异常都必须走统一清理
 
 
-def test_selftest_cleans_tmp_when_setup_raises_after_mkdtemp(
-    monkeypatch, caddy_bin, tmp_path
-):
+def test_selftest_cleans_tmp_when_setup_raises_after_mkdtemp(monkeypatch, caddy_bin, tmp_path):
     import tempfile
 
     created: list[Path] = []

@@ -4,12 +4,13 @@ import os
 from pathlib import Path
 from shutil import which
 
+import typer
 from rich.markup import escape
 from rich.text import Text
-import typer
 
-from devproxy.cli import app
 from devproxy.cli import _completion
+from devproxy.cli import _shared as s
+from devproxy.cli import app
 from devproxy.cli._shared import EXIT_FAIL
 from devproxy.cli._shared import EXIT_SUDO
 from devproxy.cli._shared import EXIT_USAGE
@@ -19,8 +20,6 @@ from devproxy.gateway.project import ProjectFileError
 from devproxy.gateway.project import find_project_file
 from devproxy.gateway.project import load_project_file
 from devproxy.gateway.sync import route_log_path
-
-from devproxy.cli import _shared as s
 
 _SERVICE_LOGS = ("caddy", "dnsmasq")
 
@@ -75,8 +74,18 @@ def _log_line(path: Path) -> str:
     return f"{path.stem:<20} {size:>8}"
 
 
-_PALETTE = ("cyan", "magenta", "yellow", "green", "blue", "bright_red",
-            "bright_cyan", "bright_magenta", "bright_yellow", "bright_green")
+_PALETTE = (
+    "cyan",
+    "magenta",
+    "yellow",
+    "green",
+    "blue",
+    "bright_red",
+    "bright_cyan",
+    "bright_magenta",
+    "bright_yellow",
+    "bright_green",
+)
 
 
 def _follow_project(project_path: Path, names: list[str]) -> None:
@@ -97,17 +106,13 @@ def _follow_project(project_path: Path, names: list[str]) -> None:
         )
         raise typer.Exit(EXIT_USAGE)
     if missing:
-        s.err_console.print(
-            f"   已声明但还没有日志（跳过）：{'、'.join(missing)}"
-        )
+        s.err_console.print(f"   已声明但还没有日志（跳过）：{'、'.join(missing)}")
 
     try:
         if len(targets) == 1:
             follow_log(targets[0][1])
         else:
-            colors = {
-                tag: _PALETTE[i % len(_PALETTE)] for i, (tag, _) in enumerate(targets)
-            }
+            colors = {tag: _PALETTE[i % len(_PALETTE)] for i, (tag, _) in enumerate(targets)}
             width = max(len(tag) for tag, _ in targets)
             s.console.print("跟随中（Ctrl-C 退出）：")
             for tag, _ in targets:
@@ -122,7 +127,7 @@ def _follow_project(project_path: Path, names: list[str]) -> None:
                 s.console.print(text)
     except KeyboardInterrupt:
         # Ctrl-C：正常退出方式，不是错误
-        raise typer.Exit(0)
+        raise typer.Exit(0) from None
 
 
 def _print_one(service: str) -> None:
@@ -139,8 +144,7 @@ def _print_one(service: str) -> None:
         s.console.print(f"  跟随：devproxy logs {service}")
         return
     s.err_console.print(
-        f"devproxy: 没有叫 {service} 的日志"
-        f"（可选：{' / '.join(_SERVICE_LOGS)}，或路由名）"
+        f"devproxy: 没有叫 {service} 的日志（可选：{' / '.join(_SERVICE_LOGS)}，或路由名）"
     )
     if known:
         s.err_console.print(f"   可用的路由日志：{'、'.join(known)}")
@@ -183,8 +187,7 @@ def _edit_log(service: str) -> None:
     known = _known_route_logs()
     if service not in known:
         s.err_console.print(
-            f"devproxy: 没有叫 {service} 的日志"
-            f"（可选：{' / '.join(_SERVICE_LOGS)}，或路由名）"
+            f"devproxy: 没有叫 {service} 的日志（可选：{' / '.join(_SERVICE_LOGS)}，或路由名）"
         )
         if known:
             s.err_console.print(f"   可用的路由日志：{'、'.join(known)}")
@@ -197,10 +200,10 @@ def _edit_log(service: str) -> None:
         code = s._platform().open_in_editor(path, editor)
     except FileNotFoundError as e:
         s.err_console.print(f"devproxy: 打不开编辑器 {editor}：{escape(str(e))}")
-        raise typer.Exit(EXIT_FAIL)
+        raise typer.Exit(EXIT_FAIL) from e
     except OSError as e:
         s.err_console.print(f"devproxy: 打开日志失败：{escape(str(e))}")
-        raise typer.Exit(EXIT_FAIL)
+        raise typer.Exit(EXIT_FAIL) from e
     if code != 0:
         s.err_console.print(f"devproxy: 编辑器 {editor} 退出码 {code}")
         raise typer.Exit(EXIT_FAIL)
@@ -225,7 +228,7 @@ def _print_list(project_names: set[str] | None, project_path: Path | None) -> No
         if in_project:
             s.console.print(
                 "路由日志：（本项目声明了 "
-                f"{'、'.join(sorted(project_names))}，但还没有日志 —— 跑一次 devproxy up）"
+                f"{'、'.join(sorted(project_names or ()))}，但还没有日志 —— 跑一次 devproxy up）"
             )
         else:
             s.console.print("路由日志：（没有 —— 跑一次 devproxy up 就会有）")
@@ -253,7 +256,7 @@ def _print_list(project_names: set[str] | None, project_path: Path | None) -> No
     # 项目里声明了、但还没起过（没有日志文件）的路由也提示一下
     if in_project:
         have = {f.stem for f in files}
-        missing = sorted(project_names - have)
+        missing = sorted((project_names or set()) - have)
         if missing:
             s.console.print(f"  已声明但还没有日志：{'、'.join(missing)}（跑一次 devproxy up）")
 
@@ -320,11 +323,11 @@ def logs(
             s._platform().tail_service_log(service)
         except PermissionError as e:
             s.err_console.print(f"devproxy: {escape(str(e))}")
-            raise typer.Exit(EXIT_SUDO)
+            raise typer.Exit(EXIT_SUDO) from e
         except OSError as e:
             # journalctl 不存在等：干净报错，不要把 FileNotFoundError 漏成 traceback
             s.err_console.print(f"devproxy: 无法读取 {service} 日志: {escape(str(e))}")
-            raise typer.Exit(EXIT_FAIL)
+            raise typer.Exit(EXIT_FAIL) from e
         return
 
     # 路由日志：~/.local/state/devproxy/logs/routes/<名字>.log
@@ -332,8 +335,7 @@ def logs(
     if service not in known:
         # 参数错误按全局约定退出 2（§9.1），而不是运行失败 1
         s.err_console.print(
-            f"devproxy: 未知服务 {service}"
-            f"（可选：{' / '.join(_SERVICE_LOGS)}，或路由名）"
+            f"devproxy: 未知服务 {service}（可选：{' / '.join(_SERVICE_LOGS)}，或路由名）"
         )
         if known:
             s.err_console.print(f"   可用的路由日志：{'、'.join(known)}")
@@ -346,7 +348,7 @@ def logs(
     try:
         follow_log(path)
     except KeyboardInterrupt:
-        raise typer.Exit(0)
+        raise typer.Exit(0) from None
     except FileNotFoundError:
         s.err_console.print(f"devproxy: 日志文件不存在: {path}")
-        raise typer.Exit(EXIT_FAIL)
+        raise typer.Exit(EXIT_FAIL) from None

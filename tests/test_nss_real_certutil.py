@@ -116,7 +116,9 @@ def test_certutil_add_dedups_by_issuer_and_serial(tmp_path):
     """
     ca = _make_ca(tmp_path)
     db = _new_db(tmp_path / "nssdb")
-    assert _certutil(db, "-A", "-n", "devproxy Local CA", "-t", "C,,", "-i", str(ca)).returncode == 0
+    assert (
+        _certutil(db, "-A", "-n", "devproxy Local CA", "-t", "C,,", "-i", str(ca)).returncode == 0
+    )
     assert [name for name, _ in _rows(db)] == ["devproxy Local CA"]
 
     again = _certutil(db, "-A", "-n", "另一个昵称", "-t", "C,,", "-i", str(ca))
@@ -404,9 +406,7 @@ def test_apply_keeps_three_column_flags(tmp_path):
 
     comp.apply([_install_action(comp.ca_path, db)])
 
-    assert _rows(db) == [("Caddy Local Authority", "C,C,C")], (
-        "用户条目的另外两列信任不能被抹掉"
-    )
+    assert _rows(db) == [("Caddy Local Authority", "C,C,C")], "用户条目的另外两列信任不能被抹掉"
 
 
 def test_apply_repairs_only_ssl_column(tmp_path):
@@ -423,9 +423,7 @@ def test_apply_repairs_only_ssl_column(tmp_path):
     assert comp.check().ok is False
     comp.apply([_install_action(comp.ca_path, db)])
     assert comp.check().ok is True
-    assert _rows(db) == [("Caddy Local Authority", "C,C,")], (
-        "补 SSL 列不能顺手把 S/MIME 的信任清掉"
-    )
+    assert _rows(db) == [("Caddy Local Authority", "C,C,")], "补 SSL 列不能顺手把 S/MIME 的信任清掉"
 
 
 # -- fix round 1：自有昵称下的陈旧条目 --------------------------------------
@@ -461,9 +459,12 @@ def test_plan_offers_stale_cleanup_when_ca_trusted_elsewhere(tmp_path):
 
     comp.apply(actions)
 
-    assert _rows(db) == [("Caddy Local Authority", "C,,",)], (
-        "自有昵称下的陈旧 CA 必须删掉，用户那条不能动"
-    )
+    assert _rows(db) == [
+        (
+            "Caddy Local Authority",
+            "C,,",
+        )
+    ], "自有昵称下的陈旧 CA 必须删掉，用户那条不能动"
     assert comp.plan() == [], "清理之后应当彻底无事可做"
 
 
@@ -525,7 +526,12 @@ def test_production_construction_detects_stale_entry(tmp_path, isolated_home):
     )
 
     comp.apply(actions)
-    assert _rows(db) == [("Caddy Local Authority", "C,,",)]
+    assert _rows(db) == [
+        (
+            "Caddy Local Authority",
+            "C,,",
+        )
+    ]
     assert comp.plan() == []
 
 

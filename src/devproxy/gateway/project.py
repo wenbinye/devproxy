@@ -21,7 +21,8 @@
 from __future__ import annotations
 
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from dataclasses import field
 from pathlib import Path
 
 from devproxy.core.config import READY_TIMEOUT_MAX
@@ -145,9 +146,7 @@ def _parse(path: Path, data: dict) -> ProjectFile:
         )
     raw_routes = data.get("routes", [])
     if not isinstance(raw_routes, list):
-        raise ProjectFileError(
-            f"{path}：routes 必须是 [[routes]] 形式的数组"
-        )
+        raise ProjectFileError(f"{path}：routes 必须是 [[routes]] 形式的数组")
     routes: list[ProjectRoute] = []
     seen: dict[str, int] = {}
     for index, item in enumerate(raw_routes):
@@ -169,8 +168,7 @@ def _parse_route(path: Path, index: int, item: object) -> ProjectRoute:
     unknown = [k for k in item if k not in _ROUTE_KEYS]
     if unknown:
         raise ProjectFileError(
-            f"{where}：未知键 {'、'.join(sorted(unknown))}"
-            f"（可用键：{', '.join(_ROUTE_KEYS)}）"
+            f"{where}：未知键 {'、'.join(sorted(unknown))}（可用键：{', '.join(_ROUTE_KEYS)}）"
         )
     name = item.get("name")
     if not isinstance(name, str) or not name:
@@ -182,9 +180,7 @@ def _parse_route(path: Path, index: int, item: object) -> ProjectRoute:
 
     mode = item.get("mode", MODE_UP)
     if mode not in MODES:
-        raise ProjectFileError(
-            f"{where}（{name}）：mode 只能是 'up' 或 'expose'，当前 {mode!r}"
-        )
+        raise ProjectFileError(f"{where}（{name}）：mode 只能是 'up' 或 'expose'，当前 {mode!r}")
     command = _parse_command(where, name, mode, item)
     port = _parse_port(where, name, mode, item)
     ready_timeout = _parse_ready_timeout(where, name, item)
@@ -197,20 +193,15 @@ def _parse_route(path: Path, index: int, item: object) -> ProjectRoute:
     )
 
 
-def _parse_command(
-    where: str, name: str, mode: str, item: dict
-) -> list[str] | None:
+def _parse_command(where: str, name: str, mode: str, item: dict) -> list[str] | None:
     raw = item.get("command")
     if mode == MODE_EXPOSE:
         if raw is not None:
-            raise ProjectFileError(
-                f"{where}（{name}）：expose 模式不启动进程，不能声明 command"
-            )
+            raise ProjectFileError(f"{where}（{name}）：expose 模式不启动进程，不能声明 command")
         return None
     if raw is None:
         raise ProjectFileError(
-            f"{where}（{name}）：up 模式必须声明 command"
-            f'（例如 command = ["npm", "run", "dev"]）'
+            f'{where}（{name}）：up 模式必须声明 command（例如 command = ["npm", "run", "dev"]）'
         )
     if not isinstance(raw, list) or not raw:
         raise ProjectFileError(
@@ -229,17 +220,14 @@ def _parse_port(where: str, name: str, mode: str, item: dict) -> int | None:
     if raw is None:
         if mode == MODE_EXPOSE:
             raise ProjectFileError(
-                f"{where}（{name}）：expose 模式必须声明 port"
-                f"（上游已在监听的端口）"
+                f"{where}（{name}）：expose 模式必须声明 port（上游已在监听的端口）"
             )
         return None
     # bool 是 int 的子类 —— True 会当成端口 1 混过去
     if isinstance(raw, bool) or not isinstance(raw, int):
         raise ProjectFileError(f"{where}（{name}）：port 必须是整数")
     if not (1 <= raw <= 65535):
-        raise ProjectFileError(
-            f"{where}（{name}）：port {raw} 超出 1..65535 范围"
-        )
+        raise ProjectFileError(f"{where}（{name}）：port {raw} 超出 1..65535 范围")
     return raw
 
 
@@ -318,9 +306,7 @@ def suggest_command(root: Path) -> tuple[list[str] | None, str]:
         if _makefile_has_target(root / "Makefile", "dev"):
             return ["make", "dev"], "Makefile 里有 dev 目标"
         return None, "检测到 Makefile 但没有 dev 目标 —— 请填上实际启动命令"
-    return None, (
-        "没有检测到常见的项目类型 —— 请填上实际启动命令（应用必须监听 $PORT）"
-    )
+    return None, ("没有检测到常见的项目类型 —— 请填上实际启动命令（应用必须监听 $PORT）")
 
 
 def _ports_hint(ports: list[str]) -> str:
@@ -365,8 +351,19 @@ def _suggest_php_command(
 
 # 这些端口跟 devproxy 无关（应用不会因为它们被接管）
 _NON_WEB_PORT_WORDS = (
-    "DB", "DATABASE", "MYSQL", "POSTGRES", "REDIS", "MEMCACHE",
-    "LDAP", "MONGO", "KAFKA", "RABBIT", "DEFAULT", "ADMIN", "DEBUG",
+    "DB",
+    "DATABASE",
+    "MYSQL",
+    "POSTGRES",
+    "REDIS",
+    "MEMCACHE",
+    "LDAP",
+    "MONGO",
+    "KAFKA",
+    "RABBIT",
+    "DEFAULT",
+    "ADMIN",
+    "DEBUG",
 )
 
 
@@ -439,9 +436,7 @@ def route_name_from_dir(root: Path) -> str:
     return cleaned or "app"
 
 
-def render_project_file(
-    routes: list[ProjectRoute], *, notes: list[str] | None = None
-) -> str:
+def render_project_file(routes: list[ProjectRoute], *, notes: list[str] | None = None) -> str:
     """渲染成 devproxy.toml 的文本。
 
     注释只说**为什么**与**有哪些坑**，不复述字段名（那是文档的事）。

@@ -10,27 +10,26 @@ import pytest
 
 from devproxy.core.backup import load_backup
 from devproxy.core.config import Config
-from devproxy.lifecycle.migrate import (
-    LegacyState,
-    MigrationError,
-    MigrationRequest,
-    default_dns_route,
-    detect_legacy,
-    legacy_storage_path,
-    load_legacy_storage,
-    resolve_storage_details,
-    rollback,
-    run_migration,
-    split_caddyfile,
-    split_caddyfile_blocks,
-    unit_config_path,
-    unit_env,
-    unit_environment_files,
-    wildcard_addresses,
-)
 from devproxy.core.paths import Paths
+from devproxy.lifecycle.migrate import LegacyState
+from devproxy.lifecycle.migrate import MigrationError
+from devproxy.lifecycle.migrate import MigrationRequest
+from devproxy.lifecycle.migrate import default_dns_route
+from devproxy.lifecycle.migrate import detect_legacy
+from devproxy.lifecycle.migrate import legacy_storage_path
+from devproxy.lifecycle.migrate import load_legacy_storage
+from devproxy.lifecycle.migrate import resolve_storage_details
+from devproxy.lifecycle.migrate import rollback
+from devproxy.lifecycle.migrate import run_migration
+from devproxy.lifecycle.migrate import split_caddyfile
+from devproxy.lifecycle.migrate import split_caddyfile_blocks
+from devproxy.lifecycle.migrate import unit_config_path
+from devproxy.lifecycle.migrate import unit_env
+from devproxy.lifecycle.migrate import unit_environment_files
+from devproxy.lifecycle.migrate import wildcard_addresses
 from devproxy.platform.fake import FakePlatform
-from tests.support import ElevatedReader, UnreadablePath
+from tests.support import ElevatedReader
+from tests.support import UnreadablePath
 
 
 class _UnreadableUnitPlatform(FakePlatform):
@@ -111,7 +110,7 @@ def test_split_keeps_personal_sites_and_drops_test_blocks():
         "\t\ton_demand\n"
         "\t\tissuer internal\n"
         "\t}\n"
-        "\trespond \"nope\" 404\n"
+        '\trespond "nope" 404\n'
         "}\n"
         "\n"
         "http://*.test {\n"
@@ -159,7 +158,7 @@ def test_split_keeps_comments_with_their_site():
         "\ttls {\n"
         "\t\ton_demand\n"
         "\t}\n"
-        "\trespond \"nope\" 404\n"
+        '\trespond "nope" 404\n'
         "}\n"
     )
     personal, dropped = split_caddyfile(legacy)
@@ -178,11 +177,7 @@ def test_split_ignores_braces_inside_comments():
 
 def test_split_ignores_braces_inside_inline_comments():
     """`example.test { # 站点 } 说明` 不能把块当场截断。"""
-    legacy = (
-        "example.test { # 站点 } 说明\n"
-        "\treverse_proxy 1.2.3.4:80\n"
-        "}\n"
-    )
+    legacy = "example.test { # 站点 } 说明\n\treverse_proxy 1.2.3.4:80\n}\n"
     personal, dropped = split_caddyfile_blocks(legacy)
     assert dropped == []
     assert len(personal) == 1
@@ -242,9 +237,7 @@ def test_wildcard_detection_follows_custom_suffix():
 
 def test_wildcard_addresses_reports_scheme_form():
     """doctor 必须能看见 https://*.test —— 漏报会让 TLS 握手整体失败。"""
-    assert wildcard_addresses("https://*.test {\n\trespond 404\n}\n") == [
-        "https://*.test"
-    ]
+    assert wildcard_addresses("https://*.test {\n\trespond 404\n}\n") == ["https://*.test"]
 
 
 # -- 单元解析 -----------------------------------------------------------------
@@ -285,9 +278,7 @@ def test_detect_legacy_accepts_equals_form(tmp_path):
     paths = _paths(tmp_path)
     platform = FakePlatform()
     unit_path = tmp_path / "caddy.service"
-    unit_path.write_text(
-        "[Service]\nExecStart=/bin/caddy run --config=/old/Caddyfile\n"
-    )
+    unit_path.write_text("[Service]\nExecStart=/bin/caddy run --config=/old/Caddyfile\n")
     state = detect_legacy(platform, paths, unit_dir=tmp_path, home=tmp_path)
     assert state is not None, "--config=<path> 不能被当成没有遗留环境"
     assert state.config_path == Path("/old/Caddyfile")
@@ -316,11 +307,7 @@ def test_unit_env_handles_multiple_assignments_per_line():
 
 
 def test_unit_environment_files_detected():
-    unit = (
-        "[Service]\n"
-        "EnvironmentFile=/etc/default/caddy\n"
-        "EnvironmentFile=-/etc/caddy/env\n"
-    )
+    unit = "[Service]\nEnvironmentFile=/etc/default/caddy\nEnvironmentFile=-/etc/caddy/env\n"
     assert unit_environment_files(unit) == ["/etc/default/caddy", "/etc/caddy/env"]
 
 
@@ -424,9 +411,7 @@ def test_migrate_backs_up_before_writing(tmp_path):
     old_cfg.parent.mkdir(parents=True)
     old_cfg.write_text("localhost {\n\ttls internal\n}\n")
 
-    state = LegacyState(
-        unit_path=unit_path, config_path=old_cfg, env={"MINIKUBE_IP": "1.2.3.4"}
-    )
+    state = LegacyState(unit_path=unit_path, config_path=old_cfg, env={"MINIKUBE_IP": "1.2.3.4"})
     backup = _migrate(platform, paths, Config(), state, tmp_path)
     assert backup.entries, "迁移必须产生备份"
     assert (backup.directory / "MANIFEST.txt").exists()
@@ -479,16 +464,12 @@ def test_migrate_does_not_overwrite_existing_sites_caddy(tmp_path):
     """工具只 import sites.caddy —— 用户自己写的内容一个字都不能动。"""
     paths = _paths(tmp_path)
     paths.ensure_files()
-    paths.sites_caddy.write_text("mine.example { respond \"hi\" }\n", encoding="utf-8")
+    paths.sites_caddy.write_text('mine.example { respond "hi" }\n', encoding="utf-8")
     platform = FakePlatform()
-    state = _legacy_state(
-        tmp_path, caddyfile_text="localhost {\n\ttls internal\n}\n"
-    )
+    state = _legacy_state(tmp_path, caddyfile_text="localhost {\n\ttls internal\n}\n")
     outcome = _run_migration(platform, paths, Config(), state, tmp_path)
-    assert paths.sites_caddy.read_text() == "mine.example { respond \"hi\" }\n"
-    assert any(
-        "sites.caddy" in n for n in outcome.notes
-    ), "必须告诉用户个人站点没被迁走"
+    assert paths.sites_caddy.read_text() == 'mine.example { respond "hi" }\n'
+    assert any("sites.caddy" in n for n in outcome.notes), "必须告诉用户个人站点没被迁走"
 
 
 def test_migrate_states_that_personal_sites_are_no_longer_served(tmp_path):
@@ -499,14 +480,12 @@ def test_migrate_states_that_personal_sites_are_no_longer_served(tmp_path):
     """
     paths = _paths(tmp_path)
     paths.ensure_files()
-    paths.sites_caddy.write_text("mine.example { respond \"hi\" }\n", encoding="utf-8")
+    paths.sites_caddy.write_text('mine.example { respond "hi" }\n', encoding="utf-8")
     platform = FakePlatform()
     state = _legacy_state(
         tmp_path,
         caddyfile_text=(
-            "localhost {\n\ttls internal\n}\n"
-            "\n"
-            "api.example.com {\n\treverse_proxy 1.2.3.4:80\n}\n"
+            "localhost {\n\ttls internal\n}\n\napi.example.com {\n\treverse_proxy 1.2.3.4:80\n}\n"
         ),
     )
     outcome = _run_migration(platform, paths, Config(), state, tmp_path)
@@ -531,10 +510,7 @@ def test_migrate_unit_falls_back_to_legacy_binary_when_config_binary_missing(tmp
     legacy_bin.write_text("#!/bin/sh\n", encoding="utf-8")
     state = _legacy_state(
         tmp_path,
-        unit_text=(
-            "[Service]\n"
-            f"ExecStart={legacy_bin} run --config /old/Caddyfile\n"
-        ),
+        unit_text=(f"[Service]\nExecStart={legacy_bin} run --config /old/Caddyfile\n"),
     )
     outcome = _run_migration(
         platform,
@@ -545,9 +521,7 @@ def test_migrate_unit_falls_back_to_legacy_binary_when_config_binary_missing(tmp
     )
     unit = platform.services["caddy"]
     assert f"ExecStart={legacy_bin} run" in unit, unit
-    assert any(
-        "沿用遗留" in n for n in outcome.notes
-    ), f"必须说明用了哪个二进制：{outcome.notes}"
+    assert any("沿用遗留" in n for n in outcome.notes), f"必须说明用了哪个二进制：{outcome.notes}"
 
 
 def test_migrate_preserves_unit_env(tmp_path):
@@ -580,13 +554,7 @@ def test_migrate_persists_unit_env_for_later_setup(tmp_path):
     comp = CaddyComponent(platform, paths, Config())
     assert comp.extra_env == {"MINIKUBE_IP": "1.2.3.4"}
     platform.services.clear()
-    comp.apply(
-        [
-            Action(
-                description="装单元", kind="run", command=["install-service", "caddy"]
-            )
-        ]
-    )
+    comp.apply([Action(description="装单元", kind="run", command=["install-service", "caddy"])])
     assert "MINIKUBE_IP=1.2.3.4" in platform.services["caddy"]
 
 
@@ -680,9 +648,7 @@ def test_migrate_refuses_unconfirmed_legacy_state(tmp_path):
     platform = FakePlatform()
     unit_path = tmp_path / "caddy.service"
     unit_path.write_text("ORIGINAL\n", encoding="utf-8")
-    state = LegacyState(
-        unit_path=unit_path, config_path=None, error="无法确认遗留 caddy 单元"
-    )
+    state = LegacyState(unit_path=unit_path, config_path=None, error="无法确认遗留 caddy 单元")
     with pytest.raises(MigrationError) as ei:
         _migrate(platform, paths, Config(), state, tmp_path)
     assert "无法确认" in str(ei.value)
@@ -851,10 +817,7 @@ def test_validate_falls_back_to_legacy_unit_binary(tmp_path, monkeypatch):
     legacy_bin.write_text("#!/bin/sh\n", encoding="utf-8")
     state = _legacy_state(
         tmp_path,
-        unit_text=(
-            "[Service]\n"
-            f"ExecStart={legacy_bin} run --config /old/Caddyfile\n"
-        ),
+        unit_text=(f"[Service]\nExecStart={legacy_bin} run --config /old/Caddyfile\n"),
     )
     calls = []
 
@@ -896,9 +859,12 @@ def test_validate_still_skips_when_no_binary_anywhere(tmp_path):
 def test_unit_exec_start_parsed():
     from devproxy.lifecycle.migrate import unit_exec_start
 
-    assert unit_exec_start(
-        "[Service]\nExecStart=/opt/caddy run --config /etc/Caddyfile\n"
-    ) == ["/opt/caddy", "run", "--config", "/etc/Caddyfile"]
+    assert unit_exec_start("[Service]\nExecStart=/opt/caddy run --config /etc/Caddyfile\n") == [
+        "/opt/caddy",
+        "run",
+        "--config",
+        "/etc/Caddyfile",
+    ]
     assert unit_exec_start("[Service]\nEnvironment=X=1\n") is None
 
 
@@ -916,9 +882,7 @@ def test_legacy_storage_path_none_without_global_block():
 
 def test_legacy_storage_path_strips_inline_comment():
     """`storage file_system /data # old ca` 的路径是 /data，不是带注释的整串。"""
-    assert legacy_storage_path("{\n\tstorage file_system /data # old ca\n}\n") == Path(
-        "/data"
-    )
+    assert legacy_storage_path("{\n\tstorage file_system /data # old ca\n}\n") == Path("/data")
 
 
 def test_legacy_storage_path_keeps_quoted_path_with_spaces():
@@ -940,10 +904,7 @@ def test_migrate_keeps_legacy_storage_so_ca_stays(tmp_path):
     state = _legacy_state(
         tmp_path,
         caddyfile_text=(
-            "{\n"
-            f"\tstorage file_system {legacy_storage}\n"
-            "}\n\n"
-            "localhost {\n\ttls internal\n}\n"
+            f"{{\n\tstorage file_system {legacy_storage}\n}}\n\nlocalhost {{\n\ttls internal\n}}\n"
         ),
     )
     outcome = run_migration(
@@ -958,9 +919,7 @@ def test_migrate_keeps_legacy_storage_so_ca_stays(tmp_path):
     )
     caddyfile = paths.caddyfile.read_text(encoding="utf-8")
     assert f"storage file_system {legacy_storage}" in caddyfile
-    assert any(
-        "storage" in n and str(legacy_storage) in n for n in outcome.notes
-    ), "差异必须说出来"
+    assert any("storage" in n and str(legacy_storage) in n for n in outcome.notes), "差异必须说出来"
     # 生效配置必须带回：setup 要用它继续组件流程，不能写回旧 storage
     assert outcome.config.storage_path == legacy_storage
     # 留档：之后的 setup 必须用同一个地方，否则 CA 会重新生成
@@ -1108,7 +1067,8 @@ def test_resolve_storage_details_returns_path_when_already_same(tmp_path):
 
 def test_load_extra_env_fails_loudly_on_corrupt_archive(tmp_path):
     """留档存在却解析不了 → 抛异常，绝不静默当成空（会丢 MINIKUBE_IP）。"""
-    from devproxy.core.caddy_env import CaddyEnvArchiveError, load_extra_env
+    from devproxy.core.caddy_env import CaddyEnvArchiveError
+    from devproxy.core.caddy_env import load_extra_env
 
     paths = _paths(tmp_path)
     paths.ensure_files()
@@ -1123,7 +1083,8 @@ def test_load_extra_env_fails_loudly_on_corrupt_archive(tmp_path):
 
 def test_load_extra_env_rejects_non_object_json(tmp_path):
     """合法 JSON 但不是对象（如数组）同样是坏留档。"""
-    from devproxy.core.caddy_env import CaddyEnvArchiveError, load_extra_env
+    from devproxy.core.caddy_env import CaddyEnvArchiveError
+    from devproxy.core.caddy_env import load_extra_env
 
     paths = _paths(tmp_path)
     paths.ensure_files()
@@ -1142,7 +1103,8 @@ def test_load_extra_env_missing_file_is_silent(tmp_path):
 
 
 def test_load_extra_env_roundtrip(tmp_path):
-    from devproxy.core.caddy_env import load_extra_env, save_extra_env
+    from devproxy.core.caddy_env import load_extra_env
+    from devproxy.core.caddy_env import save_extra_env
 
     paths = _paths(tmp_path)
     save_extra_env(paths, {"MINIKUBE_IP": "1.2.3.4"})
@@ -1173,9 +1135,7 @@ def test_save_extra_env_is_atomic_when_replace_fails(tmp_path, monkeypatch):
     with pytest.raises(OSError):
         save_extra_env(paths, {"A": "2"})
     assert paths.caddy_env.read_text(encoding="utf-8") == before
-    leftovers = [
-        p.name for p in paths.caddy_env.parent.iterdir() if p.name.startswith(".")
-    ]
+    leftovers = [p.name for p in paths.caddy_env.parent.iterdir() if p.name.startswith(".")]
     assert leftovers == [], f"临时文件必须清理：{leftovers}"
 
 

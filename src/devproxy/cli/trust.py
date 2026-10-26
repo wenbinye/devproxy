@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-from rich.markup import escape
 import typer
+from rich.markup import escape
 
+from devproxy.cli import _shared as s
 from devproxy.cli import app
 from devproxy.cli._shared import EXIT_OK
 from devproxy.cli._shared import EXIT_SUDO
-
-from devproxy.cli import _shared as s
 
 
 def _print_firefox_note(comp) -> None:
@@ -41,7 +40,7 @@ def trust(
         comp.apply(actions)
     except PermissionError as e:
         s.err_console.print(f"devproxy: {escape(str(e))}")
-        raise typer.Exit(EXIT_SUDO)
+        raise typer.Exit(EXIT_SUDO) from e
     except RuntimeError as e:
         # 组件的 documented 契约只有 PermissionError / RuntimeError；
         # 其余异常是程序 bug，不能被伪装成运维错误

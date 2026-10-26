@@ -1,15 +1,15 @@
 from __future__ import annotations
 
+import typer
 from rich.markup import escape
 from rich.table import Table
-import typer
 
+from devproxy.cli import _shared as s
 from devproxy.cli import app
 from devproxy.cli._shared import EXIT_OK
 from devproxy.gateway.routes import RouteTableError
 from devproxy.gateway.runner import reachable
 
-from devproxy.cli import _shared as s
 
 def _list_routes() -> None:
     """列出所有已注册路由。"""

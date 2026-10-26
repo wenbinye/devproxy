@@ -14,14 +14,13 @@ from pathlib import Path
 import pytest
 
 from devproxy.platform import macos as macos_mod
-from devproxy.platform.base import ElevatedSession, Platform
-from devproxy.platform.macos import (
-    MacOSElevated,
-    MacOSPlatform,
-    get_platform,
-    render_plist,
-    render_resolver_file,
-)
+from devproxy.platform.base import ElevatedSession
+from devproxy.platform.base import Platform
+from devproxy.platform.macos import MacOSElevated
+from devproxy.platform.macos import MacOSPlatform
+from devproxy.platform.macos import get_platform
+from devproxy.platform.macos import render_plist
+from devproxy.platform.macos import render_resolver_file
 
 
 @pytest.fixture
@@ -230,6 +229,7 @@ def test_macos_elevated_raises_when_both_sudo_probes_fail(
     tmp_path, monkeypatch, allow_platform_mutation
 ):
     """两条路都走不通 → PermissionError，信息要带上两条命令的输出。"""
+
     def fake_run(argv, timeout=None):
         if argv == ["sudo", "-v"]:
             return 1, "sudo: a terminal is required to authenticate"
@@ -245,9 +245,7 @@ def test_macos_elevated_raises_when_both_sudo_probes_fail(
     assert "sudo -n true" in message and "a password is required" in message
 
 
-def test_elevated_write_creates_parent_dir_then_installs_644(
-    monkeypatch, tmp_path
-):
+def test_elevated_write_creates_parent_dir_then_installs_644(monkeypatch, tmp_path):
     """/etc/resolver 可能压根不存在 —— 先建目录，再 install -m 644 写入。"""
     calls = []
 
@@ -307,7 +305,7 @@ def test_elevated_copy_installs_644_root_wheel(monkeypatch, tmp_path):
     monkeypatch.setattr(
         macos_mod,
         "_run",
-        lambda argv, timeout=None: (calls.append(list(argv)) or (0, "")),
+        lambda argv, timeout=None: calls.append(list(argv)) or (0, ""),
     )
     src = tmp_path / "src.txt"
     src.write_text("data", encoding="utf-8")
@@ -349,7 +347,7 @@ def test_binary_version_returns_first_token(tmp_path, monkeypatch):
     monkeypatch.setattr(
         macos_mod,
         "_run",
-        lambda argv, timeout=None: (calls.append(list(argv)) or (0, "v2.11.7 h1:abc=")),
+        lambda argv, timeout=None: calls.append(list(argv)) or (0, "v2.11.7 h1:abc="),
     )
     binary = tmp_path / "caddy"
     binary.write_text("#!/bin/sh\n", encoding="utf-8")
@@ -358,9 +356,7 @@ def test_binary_version_returns_first_token(tmp_path, monkeypatch):
 
 
 def test_binary_version_empty_when_missing(tmp_path, monkeypatch):
-    monkeypatch.setattr(
-        macos_mod, "_run", lambda argv, timeout=None: pytest.fail("不该执行")
-    )
+    monkeypatch.setattr(macos_mod, "_run", lambda argv, timeout=None: pytest.fail("不该执行"))
     assert MacOSPlatform().binary_version(tmp_path / "absent") == ""
 
 
@@ -369,7 +365,7 @@ def test_service_active_system_scope_uses_launchctl_print(tmp_path, monkeypatch)
     monkeypatch.setattr(
         macos_mod,
         "_run",
-        lambda argv, timeout=None: (calls.append(list(argv)) or (0, "state = running")),
+        lambda argv, timeout=None: calls.append(list(argv)) or (0, "state = running"),
     )
     assert MacOSPlatform(user_home=tmp_path).service_active("caddy") is True
     assert calls[0] == ["launchctl", "print", "system/com.devproxy.caddy"]
@@ -380,7 +376,7 @@ def test_service_active_user_scope_uses_gui_domain(tmp_path, monkeypatch):
     monkeypatch.setattr(
         macos_mod,
         "_run",
-        lambda argv, timeout=None: (calls.append(list(argv)) or (1, "")),
+        lambda argv, timeout=None: calls.append(list(argv)) or (1, ""),
     )
     p = MacOSPlatform(user_home=tmp_path)
     assert p.service_active("dnsmasq") is False
@@ -393,9 +389,7 @@ def test_service_active_user_scope_uses_gui_domain(tmp_path, monkeypatch):
 
 def test_resolved_active_is_false(monkeypatch):
     """macOS 没有 systemd-resolved —— auto 后端绝不能选它。"""
-    monkeypatch.setattr(
-        macos_mod, "_run", lambda argv, timeout=None: pytest.fail("不该执行")
-    )
+    monkeypatch.setattr(macos_mod, "_run", lambda argv, timeout=None: pytest.fail("不该执行"))
     assert MacOSPlatform().resolved_active() is False
 
 
@@ -450,7 +444,7 @@ def test_http_ok_uses_bounded_curl(monkeypatch):
     monkeypatch.setattr(
         macos_mod,
         "_run",
-        lambda argv, timeout=None: (calls.append(list(argv)) or (0, "")),
+        lambda argv, timeout=None: calls.append(list(argv)) or (0, ""),
     )
     assert MacOSPlatform().http_ok("https://localhost") is True
     assert calls[0][:3] == ["curl", "--noproxy", "*"], "本地探测必须绕过用户代理"
@@ -469,7 +463,7 @@ def test_ca_trusted_verifies_against_system_trust(monkeypatch, tmp_path):
     monkeypatch.setattr(
         macos_mod,
         "_run",
-        lambda argv, timeout=None: (calls.append(list(argv)) or (0, "cert verify OK")),
+        lambda argv, timeout=None: calls.append(list(argv)) or (0, "cert verify OK"),
     )
     ca = tmp_path / "root.crt"
     ca.write_text("CA", encoding="utf-8")
@@ -479,9 +473,7 @@ def test_ca_trusted_verifies_against_system_trust(monkeypatch, tmp_path):
 
 
 def test_ca_trusted_false_when_verify_fails(monkeypatch, tmp_path):
-    monkeypatch.setattr(
-        macos_mod, "_run", lambda argv, timeout=None: (1, "cert not trusted")
-    )
+    monkeypatch.setattr(macos_mod, "_run", lambda argv, timeout=None: (1, "cert not trusted"))
     ca = tmp_path / "root.crt"
     ca.write_text("CA", encoding="utf-8")
     assert MacOSPlatform().ca_trusted(ca) is False
@@ -489,9 +481,7 @@ def test_ca_trusted_false_when_verify_fails(monkeypatch, tmp_path):
 
 def test_nss_trusted_is_true(monkeypatch):
     """macOS 没有 NSS 库 —— 恒为真，证书组件才不会去装 NSS 证书。"""
-    monkeypatch.setattr(
-        macos_mod, "_run", lambda argv, timeout=None: pytest.fail("不该执行")
-    )
+    monkeypatch.setattr(macos_mod, "_run", lambda argv, timeout=None: pytest.fail("不该执行"))
     assert MacOSPlatform().nss_trusted(Path("/tmp/root.crt")) is True
 
 
@@ -510,18 +500,14 @@ def test_dns_route_installed_checks_resolver_file(monkeypatch, tmp_path):
 
 def test_enable_linger_is_not_applicable(monkeypatch):
     """macOS 没有 systemd-linger —— 不适用，且不得失败。"""
-    monkeypatch.setattr(
-        macos_mod, "_run", lambda argv, timeout=None: pytest.fail("不该执行")
-    )
+    monkeypatch.setattr(macos_mod, "_run", lambda argv, timeout=None: pytest.fail("不该执行"))
     code, msg = MacOSPlatform().enable_linger()
     assert code == 0
     assert "不适用" in msg
 
 
 def test_linger_enabled_is_true(monkeypatch):
-    monkeypatch.setattr(
-        macos_mod, "_run", lambda argv, timeout=None: pytest.fail("不该执行")
-    )
+    monkeypatch.setattr(macos_mod, "_run", lambda argv, timeout=None: pytest.fail("不该执行"))
     assert MacOSPlatform().linger_enabled() is True
 
 
@@ -574,9 +560,7 @@ def test_install_service_system_scope_uses_elevated_write(
     monkeypatch.setattr(p, "service_unit_path", lambda name: target)
     p.install_service("caddy", exec_start=["/opt/caddy", "run"], env={})
 
-    assert any(
-        c[:3] == ["sudo", "install", "-m"] for c in calls
-    ), "system scope 必须走特权写入"
+    assert any(c[:3] == ["sudo", "install", "-m"] for c in calls), "system scope 必须走特权写入"
     assert any(c[:2] == ["sudo", "launchctl"] or c[:2] == ["launchctl", "bootstrap"] for c in calls)
 
 
@@ -616,14 +600,12 @@ def test_restart_service_uses_kickstart(tmp_path, fake_run):
     ] in fake_run
 
 
-def test_restart_service_system_scope_is_elevated(
-    tmp_path, monkeypatch, allow_platform_mutation
-):
+def test_restart_service_system_scope_is_elevated(tmp_path, monkeypatch, allow_platform_mutation):
     calls = []
     monkeypatch.setattr(
         macos_mod,
         "_run",
-        lambda argv, timeout=None: (calls.append(list(argv)) or (0, "")),
+        lambda argv, timeout=None: calls.append(list(argv)) or (0, ""),
     )
     MacOSPlatform(user_home=tmp_path).restart_service("caddy")
     assert [
@@ -774,9 +756,7 @@ def test_install_service_system_scope_makes_plist_readable(
     assert argv[3] == "644", "单元必须落成 0644"
     assert argv[4:8] == ["-o", "root", "-g", "wheel"]
     assert argv[-1] == str(target)
-    assert not [c for c in calls if c[:2] == ["sudo", "cp"]], (
-        "cp 会把 mkstemp 的 0600 带到目标"
-    )
+    assert not [c for c in calls if c[:2] == ["sudo", "cp"]], "cp 会把 mkstemp 的 0600 带到目标"
     # 不再需要事后再跑一次 chmod/chown
     assert not [c for c in calls if c[:2] == ["sudo", "chmod"]]
     assert not [c for c in calls if c[:2] == ["sudo", "chown"]]
@@ -816,9 +796,7 @@ def test_log_path_follows_the_shared_state_dir(tmp_path, monkeypatch):
 
 def test_elevated_session_cannot_be_constructed_under_test(monkeypatch):
     """直接构造提权会话会真的跑 sudo -v —— 护栏必须连构造函数一起拦。"""
-    monkeypatch.setattr(
-        macos_mod, "_run", lambda argv, timeout=None: pytest.fail("不该执行 sudo")
-    )
+    monkeypatch.setattr(macos_mod, "_run", lambda argv, timeout=None: pytest.fail("不该执行 sudo"))
     with pytest.raises(RuntimeError, match="禁止"):
         MacOSElevated()
 
@@ -890,7 +868,7 @@ def test_macos_http_ok_bypasses_proxy_env(monkeypatch):
     monkeypatch.setattr(
         macos_mod,
         "_run",
-        lambda argv, timeout=None: (calls.append(list(argv)) or (0, "")),
+        lambda argv, timeout=None: calls.append(list(argv)) or (0, ""),
     )
     assert MacOSPlatform().http_ok("https://codeup.test") is True
     assert calls[0][1:3] == ["--noproxy", "*"]
@@ -938,5 +916,3 @@ def test_macos_platform_refuses_to_run_as_root(tmp_path, monkeypatch):
     monkeypatch.setattr(macos_mod.os, "geteuid", lambda: 0)
     with pytest.raises(RuntimeError, match="普通用户"):
         MacOSPlatform(user_home=tmp_path)
-
-

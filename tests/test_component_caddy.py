@@ -1,26 +1,26 @@
 import hashlib
+import io
 import json
 import tarfile
-import io
 from pathlib import Path
 
 import pytest
 
-from devproxy.components.base import has_localhost_site, probe_url
-from devproxy.components.caddy import (
-    CADDY_SHA256,
-    CADDY_VERSION,
-    CaddyComponent,
-    _binary_version,
-    caddy_asset_name,
-    current_platform_key,
-    download_caddy,
-)
+from devproxy.components.base import has_localhost_site
+from devproxy.components.base import probe_url
+from devproxy.components.caddy import CADDY_SHA256
+from devproxy.components.caddy import CADDY_VERSION
+from devproxy.components.caddy import CaddyComponent
+from devproxy.components.caddy import _binary_version
+from devproxy.components.caddy import caddy_asset_name
+from devproxy.components.caddy import current_platform_key
+from devproxy.components.caddy import download_caddy
 from devproxy.core.caddy_env import CaddyEnvArchiveError
 from devproxy.core.config import Config
 from devproxy.core.paths import Paths
 from devproxy.platform.fake import FakePlatform
-from tests.support import ElevatedReader, UnreadablePath
+from tests.support import ElevatedReader
+from tests.support import UnreadablePath
 
 
 def _paths(tmp_path):
@@ -38,9 +38,7 @@ def _component(tmp_path, platform=None, downloader=None):
     paths = _paths(tmp_path)
     paths.ensure_files()
     cfg = Config(storage=str(paths.data_dir), caddy_bin=str(tmp_path / "bin" / "caddy"))
-    comp = CaddyComponent(
-        platform or FakePlatform(), paths, cfg, downloader or _fake_downloader
-    )
+    comp = CaddyComponent(platform or FakePlatform(), paths, cfg, downloader or _fake_downloader)
     return comp, paths, cfg
 
 
@@ -105,18 +103,16 @@ def test_asset_name_uses_mac_not_darwin():
 
 def test_has_localhost_site_matches_address_tokens_not_substrings(tmp_path):
     site = tmp_path / "sites.caddy"
-    site.write_text(
-        "https://localhost:8443, example.test { respond \"hi\" }\n", encoding="utf-8"
-    )
+    site.write_text('https://localhost:8443, example.test { respond "hi" }\n', encoding="utf-8")
     assert has_localhost_site(site) is True
 
-    site.write_text("foo.localhost.test { respond \"hi\" }\n", encoding="utf-8")
+    site.write_text('foo.localhost.test { respond "hi" }\n', encoding="utf-8")
     assert has_localhost_site(site) is False
 
 
 def test_probe_url_prefers_route_over_localhost(tmp_path):
     site = tmp_path / "sites.caddy"
-    site.write_text("localhost { respond \"hi\" }\n", encoding="utf-8")
+    site.write_text('localhost { respond "hi" }\n', encoding="utf-8")
     routes = tmp_path / "routes.json"
     routes.write_text(
         json.dumps({"version": 1, "routes": [{"domain": "codeup.test"}]}),
@@ -127,7 +123,7 @@ def test_probe_url_prefers_route_over_localhost(tmp_path):
 
 def test_probe_url_none_without_route_or_localhost_site(tmp_path):
     site = tmp_path / "sites.caddy"
-    site.write_text("codeup.test { respond \"hi\" }\n", encoding="utf-8")
+    site.write_text('codeup.test { respond "hi" }\n', encoding="utf-8")
     assert probe_url(tmp_path / "missing.json", site) is None
 
 
@@ -163,9 +159,9 @@ def test_check_not_ok_when_caddyfile_missing(tmp_path):
     assert "Caddyfile" in status.detail
     assert status.hint
     actions = comp.plan()
-    assert any(
-        a.kind == "write" and a.path == paths.caddyfile for a in actions
-    ), "Caddyfile 缺失时 plan 必须包含生成动作"
+    assert any(a.kind == "write" and a.path == paths.caddyfile for a in actions), (
+        "Caddyfile 缺失时 plan 必须包含生成动作"
+    )
 
 
 def test_check_not_ok_when_caddyfile_stale(tmp_path):
@@ -175,9 +171,7 @@ def test_check_not_ok_when_caddyfile_stale(tmp_path):
     _make_ready(comp, platform, cfg)
     paths.caddyfile.write_text("旧的配置\n", encoding="utf-8")
     assert comp.check().ok is False
-    assert any(
-        a.kind == "write" and a.path == paths.caddyfile for a in comp.plan()
-    )
+    assert any(a.kind == "write" and a.path == paths.caddyfile for a in comp.plan())
 
 
 def test_plan_reinstalls_unit_when_execstart_points_elsewhere(tmp_path):
@@ -249,9 +243,9 @@ def test_apply_creates_main_caddyfile(tmp_path):
 def test_sites_caddy_is_not_overwritten(tmp_path):
     """sites.caddy 是用户的，工具只 import 不覆盖。"""
     comp, paths, cfg = _component(tmp_path)
-    paths.sites_caddy.write_text("localhost { respond \"hi\" }\n")
+    paths.sites_caddy.write_text('localhost { respond "hi" }\n')
     comp.apply(comp.plan())
-    assert paths.sites_caddy.read_text() == "localhost { respond \"hi\" }\n"
+    assert paths.sites_caddy.read_text() == 'localhost { respond "hi" }\n'
 
 
 def test_verify_fails_when_service_inactive(tmp_path):
@@ -389,9 +383,7 @@ def _patch_download(monkeypatch, payload: bytes):
     monkeypatch.setattr(caddy_mod.tarfile, "open", lambda path: _FakeTar(payload))
 
 
-def test_download_caddy_verifies_binary_version_and_replaces_atomically(
-    tmp_path, monkeypatch
-):
+def test_download_caddy_verifies_binary_version_and_replaces_atomically(tmp_path, monkeypatch):
     _patch_download(monkeypatch, b'#!/bin/sh\necho "v' + CADDY_VERSION.encode() + b'"\n')
     dest = tmp_path / "bin" / "caddy"
     download_caddy(dest)
@@ -459,7 +451,7 @@ def test_verify_checks_real_tls_handshake(tmp_path):
     platform = FakePlatform()
     comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
     _make_ready(comp, platform, cfg)
-    paths.sites_caddy.write_text("localhost { respond \"hi\" }\n", encoding="utf-8")
+    paths.sites_caddy.write_text('localhost { respond "hi" }\n', encoding="utf-8")
     status = comp.verify()
     assert status.ok is True, status.detail
     assert "https://localhost" in platform.http_probes
@@ -470,7 +462,7 @@ def test_verify_fails_when_tls_probe_fails(tmp_path):
     platform = FakePlatform()
     comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
     _make_ready(comp, platform, cfg)
-    paths.sites_caddy.write_text("localhost { respond \"hi\" }\n", encoding="utf-8")
+    paths.sites_caddy.write_text('localhost { respond "hi" }\n', encoding="utf-8")
     platform.http_result = False
     status = comp.verify()
     assert status.ok is False
@@ -499,7 +491,7 @@ def test_verify_probes_first_route_domain(tmp_path):
     platform = FakePlatform()
     comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
     _make_ready(comp, platform, cfg)
-    paths.sites_caddy.write_text("codeup.test { respond \"hi\" }\n", encoding="utf-8")
+    paths.sites_caddy.write_text('codeup.test { respond "hi" }\n', encoding="utf-8")
     paths.routes_json.parent.mkdir(parents=True, exist_ok=True)
     paths.routes_json.write_text(
         json.dumps(
@@ -530,7 +522,7 @@ def test_verify_without_route_and_without_localhost_site_is_ok(tmp_path):
     platform = FakePlatform()
     comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
     _make_ready(comp, platform, cfg)
-    paths.sites_caddy.write_text("codeup.test { respond \"hi\" }\n", encoding="utf-8")
+    paths.sites_caddy.write_text('codeup.test { respond "hi" }\n', encoding="utf-8")
     status = comp.verify()
     assert status.ok is True, status.detail
     assert platform.http_probes == []
@@ -582,9 +574,7 @@ def test_plan_restarts_service_when_only_main_caddyfile_changed(tmp_path):
         i for i, a in enumerate(actions) if a.kind == "write" and a.path == paths.caddyfile
     )
     idx_restart = next(
-        i
-        for i, a in enumerate(actions)
-        if a.command[:2] == ["restart-service", "caddy"]
+        i for i, a in enumerate(actions) if a.command[:2] == ["restart-service", "caddy"]
     )
     assert idx_write < idx_restart, "必须先写文件再重启"
 
@@ -597,9 +587,7 @@ def test_apply_restarts_service_for_caddyfile_only_change(tmp_path):
     platform = FakePlatform()
     comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
     _make_ready(comp, platform, cfg)
-    comp = CaddyComponent(
-        platform, paths, replace(cfg, https_port=8443), _fake_downloader
-    )
+    comp = CaddyComponent(platform, paths, replace(cfg, https_port=8443), _fake_downloader)
     restarted = []
     platform.restart_service = lambda name: restarted.append(name)
     comp.apply(comp.plan())
@@ -666,9 +654,7 @@ def test_plan_restarts_service_when_binary_is_replaced(tmp_path):
     assert any(a.command[:1] == ["download-caddy"] for a in actions)
     assert any(a.command[:2] == ["restart-service", "caddy"] for a in actions), actions
     # 重启必须排在 setcap 之后 —— 否则重启后绑不上 80/443
-    idx_cap = next(
-        i for i, a in enumerate(actions) if a.command[:1] == ["setcap"]
-    )
+    idx_cap = next(i for i, a in enumerate(actions) if a.command[:1] == ["setcap"])
     idx_restart = next(
         i for i, a in enumerate(actions) if a.command[:2] == ["restart-service", "caddy"]
     )
@@ -721,8 +707,9 @@ class _MacPlatform(FakePlatform):
         """macOS 没有 systemd-linger —— 恒为"无需启用"。"""
         return True
 
-    def install_service(self, name, *, exec_start, exec_reload=None, exec_stop=None,
-                        env, description=""):
+    def install_service(
+        self, name, *, exec_start, exec_reload=None, exec_stop=None, env, description=""
+    ):
         import plistlib
 
         data = {
@@ -892,4 +879,3 @@ def test_unit_current_is_false_when_unit_missing(tmp_path):
     _make_ready(comp, platform, cfg)
     Path(platform.service_unit_path("caddy")).unlink()
     assert comp._unit_current() is False
-

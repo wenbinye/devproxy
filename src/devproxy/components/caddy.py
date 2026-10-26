@@ -14,14 +14,18 @@ import subprocess
 import tarfile
 import tempfile
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
-from devproxy.components.base import has_localhost_site, probe_url
-from devproxy.core.config import Config
+from devproxy.components.base import has_localhost_site
+from devproxy.components.base import probe_url
 from devproxy.core.caddy_env import load_extra_env
+from devproxy.core.config import Config
 from devproxy.core.paths import Paths
-from devproxy.platform.base import Action, Platform, Status, unit_exec_argv
+from devproxy.platform.base import Action
+from devproxy.platform.base import Platform
+from devproxy.platform.base import Status
+from devproxy.platform.base import unit_exec_argv
 
 CADDY_VERSION = "2.11.7"
 
@@ -76,7 +80,7 @@ def _exec_line_argv(text: str, field: str) -> list[str] | None:
     for raw in text.splitlines():
         line = raw.strip()
         if line.startswith(prefix):
-            args = line[len(prefix):].split()
+            args = line[len(prefix) :].split()
             return args or None
     return None
 
@@ -84,9 +88,7 @@ def _exec_line_argv(text: str, field: str) -> list[str] | None:
 def _binary_version(binary: Path) -> str:
     """运行 `caddy version`，返回首个字段（如 v2.11.7）；失败返回空串。"""
     try:
-        proc = subprocess.run(
-            [str(binary), "version"], capture_output=True, text=True, timeout=10
-        )
+        proc = subprocess.run([str(binary), "version"], capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.TimeoutExpired):
         return ""
     if proc.returncode != 0:
@@ -125,7 +127,10 @@ def download_caddy(dest: Path, version: str = CADDY_VERSION) -> None:
                 )
             with tarfile.open(tgz) as tf:
                 member = tf.getmember("caddy")
-                with tf.extractfile(member) as src, os.fdopen(fd, "wb") as out:
+                src = tf.extractfile(member)
+                if src is None:
+                    raise RuntimeError(f"caddy 包里读不出 caddy 这个文件：{tgz}")
+                with src, os.fdopen(fd, "wb") as out:
                     fd = -1  # 已交给 fdopen 管理，避免重复关闭
                     shutil.copyfileobj(src, out)
         tmp_dest.chmod(0o755)
@@ -275,10 +280,7 @@ class CaddyComponent:
         if self._need_binary(version):
             return Status(
                 ok=False,
-                detail=(
-                    f"caddy 版本不符: 期望 v{CADDY_VERSION}，"
-                    f"实际 {version or '无法读取'}"
-                ),
+                detail=(f"caddy 版本不符: 期望 v{CADDY_VERSION}，实际 {version or '无法读取'}"),
                 hint="devproxy setup 会替换为固定版本",
             )
         if not self._caddyfile_current():
@@ -488,10 +490,7 @@ class CaddyComponent:
                 text = path.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError):
                 continue
-            if any(
-                line.strip() and not line.strip().startswith("#")
-                for line in text.splitlines()
-            ):
+            if any(line.strip() and not line.strip().startswith("#") for line in text.splitlines()):
                 return True
         return False
 
@@ -542,7 +541,8 @@ class CaddyComponent:
         return Status(ok=True, detail=f"caddy 服务运行中，{url} 可访问")
 
     def _main_caddyfile(self) -> str:
-        from devproxy.gateway.caddy import MainCaddyfileSpec, build_main_caddyfile
+        from devproxy.gateway.caddy import MainCaddyfileSpec
+        from devproxy.gateway.caddy import build_main_caddyfile
 
         return build_main_caddyfile(
             MainCaddyfileSpec(
