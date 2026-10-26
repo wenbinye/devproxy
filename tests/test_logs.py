@@ -411,13 +411,45 @@ def test_logs_edit_falls_back_to_visual(log_dir, monkeypatch):
 
 
 def test_logs_edit_without_editor_exits_2(log_dir, monkeypatch):
-    """EDITOR 与 VISUAL 都没设 → 按参数错误退 2，并告诉用户怎么设。"""
+    """EDITOR / VISUAL 都没设、PATH 里也没有候选编辑器 → 按参数错误退 2。"""
     monkeypatch.delenv("EDITOR", raising=False)
     monkeypatch.delenv("VISUAL", raising=False)
+    monkeypatch.setattr("devproxy.cli.logs.which", lambda name: None)
 
     result = _invoke(["logs", "myapp", "--edit"])
     assert result.exit_code == 2, result.output
     assert "EDITOR" in result.output
+    assert "vim" in result.output, "应把候选编辑器说清楚"
+
+
+def test_logs_edit_falls_back_to_first_available_editor(log_dir, monkeypatch):
+    """没设 EDITOR：依次探测 vim / vi / nano，用第一个在 PATH 里的。"""
+    platform = _RecordingPlatform()
+    monkeypatch.setattr("devproxy.cli._shared._platform", lambda: platform)
+    monkeypatch.delenv("EDITOR", raising=False)
+    monkeypatch.delenv("VISUAL", raising=False)
+    # vim 没装、vi 没装、nano 有 → 用 nano
+    monkeypatch.setattr(
+        "devproxy.cli.logs.which",
+        lambda name: "/usr/bin/nano" if name == "nano" else None,
+    )
+
+    result = _invoke(["logs", "myapp", "-e"])
+    assert result.exit_code == 0, result.output
+    assert platform.calls == [(log_dir.log_dir / "routes" / "myapp.log", "nano")]
+
+
+def test_logs_edit_falls_back_to_vim_when_available(log_dir, monkeypatch):
+    """没设 EDITOR 且 vim 可用 → 用 vim（候选顺序的第一位）。"""
+    platform = _RecordingPlatform()
+    monkeypatch.setattr("devproxy.cli._shared._platform", lambda: platform)
+    monkeypatch.delenv("EDITOR", raising=False)
+    monkeypatch.delenv("VISUAL", raising=False)
+    monkeypatch.setattr("devproxy.cli.logs.which", lambda name: "/usr/bin/" + name)
+
+    result = _invoke(["logs", "myapp", "--edit"])
+    assert result.exit_code == 0, result.output
+    assert platform.calls == [(log_dir.log_dir / "routes" / "myapp.log", "vim")]
 
 
 def test_logs_edit_rejects_service_logs(monkeypatch):

@@ -520,13 +520,15 @@ devproxy: 1 个步骤失败：把 CA 根证书加入系统钥匙串（…）
 
 ### F12. `logs --edit` 用编辑器打开日志
 
-- 检查：① `EDITOR=vim devproxy logs <路由名> --edit`，改点什么保存退出；
+- 检查：① `EDITOR=vim devproxy logs <路由名> --edit`（或 `-e`），改点什么保存退出；
   ② `devproxy logs caddy --edit`；③ `env -u EDITOR -u VISUAL devproxy logs <路由名> --edit`；
   ④ `devproxy logs --edit`（不给名字）；⑤ `devproxy logs --list --edit`。
-- 预期：① 编辑器**接管终端**打开的是该路由的日志文件（`~/.local/state/devproxy/logs/routes/<名字>.log`），
-  保存后文件内容确实变了；② 服务日志**报错退 2** 并提示改用跟随（journalctl 里的日志不是文件）；
-  ③ 退 2 并提示 `export EDITOR=vim`（**不猜**用哪个编辑器）；④ 退 2 并说明要给名字；
-  ⑤ 退 2（`--list` 与 `--edit` 互斥）。
+- 预期：① 编辑器**接管终端**打开的是该路由的日志文件
+  （`~/.local/state/devproxy/logs/routes/<名字>.log`），保存后文件内容确实变了；
+  ② 服务日志**报错退 2** 并提示改用跟随（journalctl 里的日志不是文件）；
+  ③ 没设 `EDITOR` 时依次找 `vim` / `vi` / `nano`，用第一个在 PATH 里的打开；
+  PATH 里一个都没有才退 2 并提示 `export EDITOR=vim`；
+  ④ 退 2 并说明要给名字；⑤ 退 2（`--list` 与 `--edit` 互斥）。
 
 ---
 

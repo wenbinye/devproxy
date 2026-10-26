@@ -167,7 +167,7 @@ Caddy 的内部 CA **在第一次加载 `tls internal` 站点时**才生成 —�
 | `devproxy down <name>` | 注销路由；若该路由的子进程还在，一并收掉 |
 | `devproxy ls` / `devproxy ps` | 列出所有已注册路由（含可达性），按应用名升序 |
 | `devproxy logs [caddy\|dnsmasq\|<路由名>]` | 跟随日志：服务本身（默认 `caddy`）或 sync 起的应用 |
-| `devproxy logs <路由名> --edit` | 用 `$EDITOR` 打开该路由的日志文件（`--list` 看有哪些、连完整路径） |
+| `devproxy logs <路由名> --edit` | 用 `$EDITOR` 打开该路由的日志文件（未设时依次找 `vim` / `vi` / `nano`；`--list` 看有哪些、连完整路径） |
 | `devproxy trust` | 单独安装 CA 根证书（系统信任库 + NSS 库 / 系统钥匙串） |
 | `devproxy config` | 显示当前生效配置与渲染出的路由片段 |
 | `devproxy selftest` | 隔离 Caddy 实例端到端自检 |

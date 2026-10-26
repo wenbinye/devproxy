@@ -45,9 +45,12 @@
   - 需求：新增一个选项（如 `devproxy logs <名字> --edit`），用环境变量 `EDITOR`（可回退 `VISUAL`）打开对应的日志文件，而不是只能跟随。
   - 现状：`logs` 目前只有 `--list` 一个选项，跟随走 `follow_log` / `follow_many`（`src/devproxy/cli/logs.py:198`）。
   - 待定：`EDITOR` 未设置时的行为（报错退出 2 / 回退到某个默认编辑器）；服务日志（caddy / dnsmasq）没有文件，是否支持 --edit。
-  - **落定**（2026-10-26 与用户确认）：
-    - `EDITOR` 没设就看 `VISUAL`；两个都没有 → **报错退出 2** 并给出 `export EDITOR=vim` 的提示
-      （不猜：硬塞一个 nano/vi 比报错更糟）。
+  - **落定**（2026-10-26 与用户确认；同日按用户反馈修订）：
+    - `EDITOR` 没设就看 `VISUAL`；两个都没有 → **依次探测 `vim` / `vi` / `nano`**
+      （`shutil.which`，用第一个在 PATH 里的）；一个都没有 → **报错退出 2** 并给出
+      `export EDITOR=vim` 的提示（候选是探测出来的，不是硬塞 —— 硬塞一个没装的
+      只会换来 "command not found"）。
+    - 短选项 `-e` 与 `--edit` 等价（用户反馈第一条就是想敲 `logs wrs-api -e`）。
     - **服务日志不支持 `--edit`**：caddy / dnsmasq 是 journalctl 里的滚动日志，不是文件，
       编辑器打不开 → 明确报错并指向 `devproxy logs caddy`（跟随）。
     - `--edit` 必须带目标名；与 `--list` 互斥（同时给 → 退出 2）。
@@ -57,7 +60,8 @@
       linux / macos 各自实现（`shlex.split(editor)` 拆词 + 文件路径，**继承 stdio** —— 编辑器要接管终端）；
       `fake.py` 记录调用不真开。
     - `src/devproxy/cli/logs.py` 的 `_resolve_editor()` / `_edit_log()` 与 `--edit` 选项。
-  - 验证：`tests/test_logs.py` 新增 9 个 `--edit` 用例（正常打开 / VISUAL 兜底 / 没设 EDITOR 退 2 /
-    服务日志退 2 / 未知路由退 2 / 缺目标名退 2 / 与 --list 互斥 / 编辑器非 0 退出码 / 编辑器不存在）；
+  - 验证：`tests/test_logs.py` 新增 11 个 `--edit` 用例（正常打开 / VISUAL 兜底 /
+    没设 EDITOR 时探测候选、候选全缺退 2 / 服务日志退 2 / 未知路由退 2 / 缺目标名退 2 /
+    与 --list 互斥 / 编辑器非 0 退出码 / 编辑器不存在）；
     `tests/test_platform_linux.py::test_linux_open_in_editor_splits_command_and_streams`；
-    全量 1072 passed。
+    全量 1074 passed。

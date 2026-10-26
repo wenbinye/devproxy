@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from shutil import which
 
 from rich.markup import escape
 from rich.text import Text
@@ -145,20 +146,28 @@ def _print_one(service: str) -> None:
     raise typer.Exit(EXIT_USAGE)
 
 
-def _resolve_editor() -> str:
-    """用哪个编辑器：$EDITOR 优先，其次 $VISUAL。
+# 找不到 EDITOR 时的候选：按顺序探测 PATH，用第一个存在的
+_EDITOR_CANDIDATES = ("vim", "vi", "nano")
 
-    两个都没设置就报错退出 —— **不猜**。猜错了（硬塞一个 nano / vi）比报错更糟：
-    用户看到的是编辑器突然接管了终端，却不知道是自己没配好。
+
+def _resolve_editor() -> str:
+    """用哪个编辑器：$EDITOR 优先，其次 $VISUAL，都没有就找 vim / vi / nano。
+
+    候选是**探测**出来的（which），不是硬塞 —— 硬塞一个用户机器上根本没装的
+    编辑器，只会换来一句 "command not found"。三个都没有才报错退出 2。
     """
     editor = (os.environ.get("EDITOR") or os.environ.get("VISUAL") or "").strip()
-    if not editor:
-        s.err_console.print(
-            "devproxy: 不知道用哪个编辑器打开日志 —— 没有设置 EDITOR（或 VISUAL）。\n"
-            "   例：export EDITOR=vim   然后重跑 devproxy logs <名字> --edit"
-        )
-        raise typer.Exit(EXIT_USAGE)
-    return editor
+    if editor:
+        return editor
+    for candidate in _EDITOR_CANDIDATES:
+        if which(candidate):
+            return candidate
+    s.err_console.print(
+        "devproxy: 不知道用哪个编辑器打开日志 —— 没有设置 EDITOR（或 VISUAL），"
+        "PATH 里也没有 vim / vi / nano。\n"
+        "   例：export EDITOR=vim   然后重跑 devproxy logs <名字> --edit"
+    )
+    raise typer.Exit(EXIT_USAGE)
 
 
 def _edit_log(service: str) -> None:
@@ -258,7 +267,10 @@ def logs(
         False, "--list", help="列出能跟的日志目标（项目里只列本项目的），不跟随"
     ),
     edit: bool = typer.Option(
-        False, "--edit", help="用 $EDITOR 打开日志文件（只对路由日志有效）"
+        False,
+        "--edit",
+        "-e",
+        help="用 $EDITOR 打开日志文件（只对路由日志有效；没设 EDITOR 就依次找 vim / vi / nano）",
     ),
 ) -> None:
     """跟踪日志：服务（caddy / dnsmasq）或路由（sync 起的应用）。"""
