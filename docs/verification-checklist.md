@@ -12,7 +12,7 @@
 | C. 迁移检测的残留风险 | 1 | `migrate.detect_legacy()`「读不到遗留单元 ⇒ 视为没有遗留环境」 |
 | **小计（A+B+C）** | **28** | |
 | D. Linux 真机检查 | 8 | 单元测试覆盖不到的 Linux 侧行为（不计入 28） |
-| F. 新增功能的真机检查 | 11 | 2026-10-23 起新增的 `uninstall` / `sync` / `run` / 域名后缀护栏 / 子进程超时（F10 已于 2026-10-25 用 ubuntu:24.04 容器验证） |
+| F. 新增功能的真机检查 | 11 | 2026-10-23 起新增的 `uninstall` / `up`（原 sync）/ `run` / 域名后缀护栏 / 子进程超时（F10 已于 2026-10-25 用 ubuntu:24.04 容器验证） |
 
 约定：
 
@@ -436,14 +436,14 @@ devproxy: 1 个步骤失败：把 CA 根证书加入系统钥匙串（…）
 - 检查：连跑两次 `devproxy uninstall --yes`。
 - 预期：第二次输出「没有可卸载的东西」并**退出码 0**。
 
-### F6. `sync` 端到端：声明 → 起服务 → 域名可访问
+### F6. `up` 端到端：声明 → 起服务 → 域名可访问
 
-- 检查：项目根放一份 `devproxy.toml`（`[[routes]]` + `command`），跑 `devproxy sync`，
+- 检查：项目根放一份 `devproxy.toml`（`[[routes]]` + `command`），跑 `devproxy up`，
   然后 `curl -k https://<name>.test/`。
 - 预期：进程起来、路由注册、**域名真的能通**；应用日志在
   `~/.local/state/devproxy/logs/routes/<name>.log` 里。
 
-### F7. `sync` 的冲突报告**不杀进程**
+### F7. `up` 的冲突报告**不杀进程**
 
 - 检查：跑一次 `sync` 后改 `devproxy.toml` 里的 `command` 再跑。
 - 预期：报告冲突（现状 vs 期望 + 修复命令），**旧进程仍在**（`ps` 可见），

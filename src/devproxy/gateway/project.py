@@ -450,7 +450,7 @@ def render_project_file(
         "# devproxy.toml —— 本项目的本地开发路由声明",
         "#",
         "# 提交进仓库，全组共享：每个人跑一次 `devproxy up` 就得到同一套域名。",
-        "# 完整说明见 devproxy 的 README「项目级配置」。",
+        "# 完整说明见 devproxy 仓库的 docs/project-config.md。",
         "#",
         "# command 是 argv 数组，不经过 shell —— $PORT 不会自动展开。",
         "# 需要端口参数的应用要自己包一层 sh -c，让 shell 在端口分配之后再展开：",
