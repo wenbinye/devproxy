@@ -427,6 +427,9 @@ devproxy: 1 个步骤失败：把 CA 根证书加入系统钥匙串（…）
 | 项 | 结论 |
 |---|---|
 | A1 plist 的 8 个键 | ✅ 全在：Description / EnvironmentVariables / KeepAlive / Label / ProgramArguments / RunAtLoad / StandardErrorPath / StandardOutPath |
+| A3 `launchctl bootstrap` / `bootout` | ✅ 重复 bootstrap 以 exit **5** 失败（「Bootstrap failed: 5: Input/output error」）且**不破坏**已运行的作业；`bootout` 把它停掉；重新 bootstrap 又回来了（`state = running`）；错误域以 exit **112** 失败（「Could not find domain for user gui: 999999」） |
+| A4 `launchctl kickstart -k` | ✅ 真重启：pid 29145 → 84675，全程 `state = running` |
+| A12 BSD `install -d` / `cp` | ✅ `install -d /etc/resolver` 幂等（exit 0）；`cp` 探针文件成功（exit 0）且能读回；`rm -f` 删掉（exit 0）。**活的 `/etc/resolver/test` 没被碰** —— 事后目录里只剩原有的那几个文件 |
 | A2 + A20 `launchctl print` | ✅ exit 0、顶层 `state = running`、pid、stdout/stderr 路径（内层还有个 `state = active`；代码认的是顶层那行） |
 | A5 `/etc/resolver/test` | ✅ `nameserver 127.0.0.1` + **`port 5300` —— `port` 指令被 mDNSResponder 认了**（这一组最大的疑问，答案是：认） |
 | A7 `security verify-cert`（不受信证书） | ✅ 同样 `CSSMERR_TP_NOT_TRUSTED`，exit 1 |
@@ -444,9 +447,9 @@ devproxy: 1 个步骤失败：把 CA 根证书加入系统钥匙串（…）
 | A22 dnsmasq 配置 | ✅ 本工具写的（`port=5300`、`address=/.test/…`）；Homebrew 自己那份没掺和 |
 | A6 钥匙串信任 | ❌ **仍然没法非交互完成**：`security add-trusted-cert -d -r trustRoot` 即使有 sudo 也报 `SecTrustSettingsSetTrustSettings: The authorization was denied since no user interaction was possible`。证书确实进了钥匙串，但**信任标志没设上** —— `verify-cert` 仍报 NOT_TRUSTED，`doctor` 仍报 cert 缺失。与 E2b 同一个结论，现在定位到了「设信任标志」这一步 |
 
-仍未跑：**A3**（`launchctl bootstrap` / `bootout`）、**A4**（`kickstart -k`）、
-**A12**（BSD `install -d` / `cp`）—— 它们要重启 launchd 作业或往 `/etc/resolver` 下写东西，
-没有在无人值守的情况下执行。
+**A 组 22 条现在全部有结论**（A6 的结论是「非交互下做不到」，这本身就是结论）。
+其中要动运行中作业或写 `/etc/resolver` 的三条，是在明确授权后跑的；
+那台机器的最终状态与开始时一致（dnsmasq 作业照常在跑，探针文件已删）。
 
 ## F. 新增功能的真机检查（12 项）
 

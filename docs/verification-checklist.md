@@ -522,6 +522,9 @@ password piped from a local `.env.local` (never in argv, never echoed).
 | Item | Result |
 |---|---|
 | A1 plist keys | ✅ all eight present: Description / EnvironmentVariables / KeepAlive / Label / ProgramArguments / RunAtLoad / StandardErrorPath / StandardOutPath |
+| A3 `launchctl bootstrap` / `bootout` | ✅ repeated bootstrap fails with exit **5** ("Bootstrap failed: 5: Input/output error") and leaves the running job alone; `bootout` stops it; bootstrapping again brings it back (`state = running`); a wrong domain fails with exit **112** ("Could not find domain for user gui: 999999") |
+| A4 `launchctl kickstart -k` | ✅ really restarts: pid 29145 → 84675, `state = running` throughout |
+| A12 BSD `install -d` / `cp` | ✅ `install -d /etc/resolver` is idempotent (exit 0), `cp` of a probe file works (exit 0) and reads back, `rm -f` removes it (exit 0). The live `/etc/resolver/test` was **not** touched — the directory afterwards holds only the files it had before |
 | A2 + A20 `launchctl print` | ✅ exit 0, top-level `state = running`, pid, stdout/stderr paths (there is also an inner `state = active` — the "running" line is the one the code keys on) |
 | A5 `/etc/resolver/test` | ✅ `nameserver 127.0.0.1` + **`port 5300` — the `port` directive IS honoured by mDNSResponder** (the biggest open question of that group) |
 | A7 `security verify-cert` (untrusted cert) | ✅ same `CSSMERR_TP_NOT_TRUSTED`, exit 1 |
@@ -539,9 +542,11 @@ password piped from a local `.env.local` (never in argv, never echoed).
 | A22 dnsmasq config | ✅ written by this tool (`port=5300`, `address=/.test/…`); Homebrew's own config is not involved |
 | A6 keychain trust | ❌ **still impossible without a graphical session**: `security add-trusted-cert -d -r trustRoot` fails with `SecTrustSettingsSetTrustSettings: The authorization was denied since no user interaction was possible` **even with sudo**. The certificate does land in the keychain, but the **trust flag** does not — so `verify-cert` still reports NOT_TRUSTED and `doctor` still reports the cert missing. Same conclusion as E2b, now pinned to the trust-settings step |
 
-Still open: **A3** (`launchctl bootstrap` / `bootout`) and **A4** (`kickstart -k`),
-**A12** (BSD `install -d` / `cp`) — they restart a launchd job or write under
-`/etc/resolver`, so they were not run unattended.
+**All 22 items of group A now have a conclusion** (A6 is a "cannot be done
+non-interactively", which is itself the conclusion). The three that touch a running
+job or write under `/etc/resolver` were run with explicit authorization; the machine
+was left exactly as it was found (the dnsmasq job is running again, the probe file is
+gone).
 
 ## F. Real-machine checks for new features (12 items)
 
