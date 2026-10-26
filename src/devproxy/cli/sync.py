@@ -34,19 +34,13 @@ _STATUS_MARKS = {
 }
 
 
-@app.command()
-def sync(
-    file: Path = typer.Option(
-        None, "--file", help="显式指定 devproxy.toml（默认从当前目录向上查找）"
-    ),
-    prune: bool = typer.Option(
-        False, "--prune", help="移除本文件里已删掉的路由（只动本文件声明过的）"
-    ),
-    yes: bool = typer.Option(
-        False, "--yes", help="非交互模式，不询问（--prune 在非交互时必须给）"
-    ),
+def run_project_sync(
+    *, file: Path | None = None, prune: bool = False, yes: bool = False
 ) -> None:
-    """按项目根目录的 devproxy.toml 同步路由声明（全组共享一份）。"""
+    """按项目根目录的 devproxy.toml 应用路由声明（`devproxy up` 的实现）。
+
+    由 cli/up.py 在「没给路由名」时调用 —— compose 的 `up -d` 语义。
+    """
     # 1) 定位并解析项目文件 —— 找不到 / 写错了都是「用法错误」（退出码 2）
     try:
         path = resolve_project_file(file)

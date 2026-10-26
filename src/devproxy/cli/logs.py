@@ -90,7 +90,7 @@ def _follow_project(project_path: Path, names: list[str]) -> None:
 
     if not targets:
         s.err_console.print(
-            f"devproxy: 本项目声明了 {'、'.join(names)}，但还没有日志 —— 跑一次 devproxy sync"
+            f"devproxy: 本项目声明了 {'、'.join(names)}，但还没有日志 —— 跑一次 devproxy up"
         )
         raise typer.Exit(EXIT_USAGE)
     if missing:
@@ -163,10 +163,10 @@ def _print_list(project_names: set[str] | None, project_path: Path | None) -> No
         if in_project:
             s.console.print(
                 "路由日志：（本项目声明了 "
-                f"{'、'.join(sorted(project_names))}，但还没有日志 —— 跑一次 devproxy sync）"
+                f"{'、'.join(sorted(project_names))}，但还没有日志 —— 跑一次 devproxy up）"
             )
         else:
-            s.console.print("路由日志：（没有 —— 跑一次 devproxy sync 就会有）")
+            s.console.print("路由日志：（没有 —— 跑一次 devproxy up 就会有）")
         s.console.print("")
         s.console.print("用 devproxy logs <名字> 跟随。")
         return
@@ -189,7 +189,7 @@ def _print_list(project_names: set[str] | None, project_path: Path | None) -> No
         have = {f.stem for f in files}
         missing = sorted(project_names - have)
         if missing:
-            s.console.print(f"  已声明但还没有日志：{'、'.join(missing)}（跑一次 devproxy sync）")
+            s.console.print(f"  已声明但还没有日志：{'、'.join(missing)}（跑一次 devproxy up）")
 
     s.console.print("")
     s.console.print("用 devproxy logs <名字> 跟随。")
@@ -249,7 +249,7 @@ def logs(
         if known:
             s.err_console.print(f"   可用的路由日志：{'、'.join(known)}")
         else:
-            s.err_console.print("   （当前没有路由日志 —— 跑一次 devproxy sync 就会有）")
+            s.err_console.print("   （当前没有路由日志 —— 跑一次 devproxy up 就会有）")
         raise typer.Exit(EXIT_USAGE)
 
     paths, _, _, _ = s.build_context()

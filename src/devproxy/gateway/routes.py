@@ -46,7 +46,7 @@ class Route:
     created_at: str = ""
     # 声明来源：项目级配置文件（devproxy.toml）的**绝对路径**。
     # None = 手工 `devproxy up` / `devproxy expose` 出来的路由 ——
-    # `devproxy sync --prune` 永远不碰它们（用户自己起的进程不该被文件清掉）。
+    # `devproxy up --prune` 永远不碰它们（用户自己起的进程不该被文件清掉）。
     source: str | None = None
 
     def to_dict(self) -> dict:

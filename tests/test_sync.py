@@ -264,14 +264,14 @@ def test_conflict_reason_is_none_for_consistent_declaration(tmp_path):
 
 def test_sync_without_project_file_exits_2(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    res = CliRunner().invoke(app, ["sync"])
+    res = CliRunner().invoke(app, ["up"])
     assert res.exit_code == 2, res.output
     assert "devproxy.toml" in res.output
 
 
 def test_sync_with_broken_toml_exits_2(project_dir):
     (project_dir / "devproxy.toml").write_text("[[routes]\nname='web'\n")
-    res = CliRunner().invoke(app, ["sync"])
+    res = CliRunner().invoke(app, ["up"])
     assert res.exit_code == 2, res.output
     assert "TOML" in res.output
 
@@ -280,7 +280,7 @@ def test_sync_requires_caddy_running(ctx, project_dir):
     paths, cfg, store, admin = ctx
     admin.alive = False
     (project_dir / "devproxy.toml").write_text(UP_TOML)
-    res = CliRunner().invoke(app, ["sync"])
+    res = CliRunner().invoke(app, ["up"])
     assert res.exit_code == 3, res.output
 
 
@@ -288,7 +288,7 @@ def test_sync_creates_up_route(ctx, env, project_dir, monkeypatch):
     paths, cfg, store, admin = ctx
     (project_dir / "devproxy.toml").write_text(UP_TOML)
     _stub_spawn(monkeypatch, store)
-    res = CliRunner().invoke(app, ["sync"])
+    res = CliRunner().invoke(app, ["up"])
     assert res.exit_code == 0, res.output
     routes = _routes_json(env)
     assert len(routes) == 1
@@ -301,7 +301,7 @@ def test_sync_creates_up_route(ctx, env, project_dir, monkeypatch):
 def test_sync_creates_expose_route(ctx, env, project_dir):
     paths, cfg, store, admin = ctx
     (project_dir / "devproxy.toml").write_text(EXPOSE_TOML)
-    res = CliRunner().invoke(app, ["sync"])
+    res = CliRunner().invoke(app, ["up"])
     assert res.exit_code == 0, res.output
     routes = _routes_json(env)
     assert routes[0]["name"] == "legacy"
@@ -314,11 +314,11 @@ def test_sync_is_idempotent(ctx, env, project_dir, monkeypatch):
     paths, cfg, store, admin = ctx
     (project_dir / "devproxy.toml").write_text(UP_TOML)
     _stub_spawn(monkeypatch, store)
-    first = CliRunner().invoke(app, ["sync"])
+    first = CliRunner().invoke(app, ["up"])
     assert first.exit_code == 0, first.output
     before = (env / "state" / "routes.json").read_text()
 
-    second = CliRunner().invoke(app, ["sync"])
+    second = CliRunner().invoke(app, ["up"])
     assert second.exit_code == 0, second.output
     assert "全部已是最新" in second.output
     assert (env / "state" / "routes.json").read_text() == before, "第二次不得改动路由表"
@@ -340,7 +340,7 @@ def test_sync_reports_conflict_without_touching_anything(ctx, env, project_dir):
     store.mutate(lambda t: t.upsert(old))
     before = (env / "state" / "routes.json").read_text()
 
-    res = CliRunner().invoke(app, ["sync"])
+    res = CliRunner().invoke(app, ["up"])
     assert res.exit_code == 1, res.output
     assert "冲突" in res.output
     assert "devproxy down web" in res.output
@@ -371,7 +371,7 @@ def test_sync_prune_removes_only_file_declared_routes(ctx, env, project_dir, mon
     )
     store.mutate(lambda t: (t.upsert(mine), t.upsert(manual)))
 
-    res = CliRunner().invoke(app, ["sync", "--prune", "--yes"])
+    res = CliRunner().invoke(app, ["up", "--prune", "--yes"])
     assert res.exit_code == 0, res.output
     names = [r["name"] for r in _routes_json(env)]
     assert "stale" not in names, "本文件声明过的路由应被 prune"
@@ -390,7 +390,7 @@ def test_sync_prune_without_yes_in_non_interactive_exits_4(ctx, env, project_dir
         source=str(project_dir / "devproxy.toml"),
     )
     store.mutate(lambda t: t.upsert(mine))
-    res = CliRunner().invoke(app, ["sync", "--prune"])
+    res = CliRunner().invoke(app, ["up", "--prune"])
     assert res.exit_code == 4, res.output
     assert [r["name"] for r in _routes_json(env)] == ["stale"], "拒绝后什么都没改"
 
@@ -422,7 +422,7 @@ def test_sync_partial_failure_exits_1_and_continues(ctx, env, project_dir, monke
         return FakeProc()
 
     monkeypatch.setattr("devproxy.gateway.sync._spawn_worker", spawn)
-    res = CliRunner().invoke(app, ["sync"])
+    res = CliRunner().invoke(app, ["up"])
     assert res.exit_code == 1, res.output
     assert "失败" in res.output
     assert [r["name"] for r in _routes_json(env)] == ["api"], "其余路由仍应被创建"
@@ -432,7 +432,7 @@ def test_sync_uses_explicit_file(ctx, env, tmp_path, monkeypatch):
     paths, cfg, store, admin = ctx
     other = tmp_path / "elsewhere.toml"
     other.write_text(EXPOSE_TOML, encoding="utf-8")
-    res = CliRunner().invoke(app, ["sync", "--file", str(other)])
+    res = CliRunner().invoke(app, ["up", "--file", str(other)])
     assert res.exit_code == 0, res.output
     assert _routes_json(env)[0]["name"] == "legacy"
 
@@ -447,7 +447,7 @@ def test_sync_spawns_real_worker_and_reports_its_failure(ctx, env, project_dir):
     (project_dir / "devproxy.toml").write_text(
         '[[routes]]\nname = "web"\ncommand = ["/nonexistent/devproxy-sync-test-cmd"]\n'
     )
-    res = CliRunner().invoke(app, ["sync"])
+    res = CliRunner().invoke(app, ["up"])
     assert res.exit_code == 1, res.output
     assert "失败" in res.output
     log = paths.log_dir / "routes" / "web.log"
@@ -546,3 +546,71 @@ def test_worker_runs_app_in_project_dir(monkeypatch, tmp_path):
     assert rc == 0
     assert marker.read_text(encoding="utf-8") == str(project_dir)
     assert recorded[0]["routes"][0]["source"] == source
+
+
+# -- 应用已死 → 重建而不是跳过 -------------------------------------------
+
+
+def _up_route(name: str, pid: int | None, proc_start: str | None = None) -> Route:
+    return Route(
+        name=name,
+        domain=f"{name}.test",
+        port=45671,
+        mode="up",
+        upstream=f"127.0.0.1:45671",
+        command=["npm", "run", "dev"],
+        pid=pid,
+        proc_start=proc_start,
+    )
+
+
+def test_plan_restarts_route_whose_app_died(tmp_path):
+    """应用进程已退出（pid 不存在）→ 重建，而不是骗用户"已是最最新"。"""
+    import os
+
+    project = _project(tmp_path, UP_TOML)
+    dead_pid = 999_999_999  # 不存在的 pid
+    assert not os.path.exists(f"/proc/{dead_pid}")
+    existing = [_up_route("web", pid=dead_pid)]
+    plan = build_sync_plan(project, existing)
+    assert [r.name for r in plan.create_up] == ["web"], "死了就该重建"
+    assert not plan.skip
+
+
+def test_plan_skips_route_whose_app_is_alive(tmp_path):
+    """进程活着 → 照常跳过。"""
+    import os
+
+    project = _project(tmp_path, UP_TOML)
+    existing = [_up_route("web", pid=os.getpid())]  # 测试进程自己，肯定活着
+    plan = build_sync_plan(project, existing)
+    assert plan.skip and plan.skip[0][0].name == "web"
+    assert not plan.create_up
+
+
+def test_plan_restarts_when_pid_was_reused(tmp_path):
+    """pid 存在但 proc_start 对不上 = 被系统复用给了别的进程 → 重建。"""
+    import os
+
+    project = _project(tmp_path, UP_TOML)
+    existing = [_up_route("web", pid=os.getpid(), proc_start="1")]
+    plan = build_sync_plan(project, existing)
+    assert [r.name for r in plan.create_up] == ["web"]
+    assert not plan.skip
+
+
+def test_plan_skips_expose_route_without_pid(tmp_path):
+    """expose 路由没有受管进程 —— 无从判断，不重建。"""
+    project = _project(tmp_path, EXPOSE_TOML)
+    existing = [
+        Route(
+            name="legacy",
+            domain="legacy.test",
+            port=3000,
+            mode="expose",
+            upstream="127.0.0.1:3000",
+        )
+    ]
+    plan = build_sync_plan(project, existing)
+    assert plan.skip and plan.skip[0][0].name == "legacy"
+    assert not plan.create_expose

@@ -133,7 +133,7 @@ devproxy down codeup        # 注销路由（子进程也一并收掉）
 devproxy logs caddy         # 跟随日志（Ctrl-C 退出，不会自己结束）
 
 # 项目里有一份 devproxy.toml（提交进仓库、全组共享）时：
-devproxy sync               # 按声明同步路由
+devproxy up               # 按声明同步路由
 ```
 
 ### CA 根证书是在第一条路由注册之后才存在的
@@ -161,16 +161,16 @@ Caddy 的内部 CA **在第一次加载 `tls internal` 站点时**才生成 —�
 | `devproxy up <name> [--port N] [--ready-timeout S] -- CMD...` | 分配端口、启动命令、注册 `https://<name>.test` |
 | `devproxy expose <name> --port N` | 给已在运行的服务开域名，注册后立即返回，路由常驻（上游暂时无响应时只告警，路由照样注册） |
 | `devproxy down <name>` | 注销路由；若该路由的子进程还在，一并收掉 |
-| `devproxy ls` | 列出所有已注册路由（含可达性） |
+| `devproxy ls` / `devproxy ps` | 列出所有已注册路由（含可达性） |
 | `devproxy logs [caddy\|dnsmasq\|<路由名>]` | 跟随日志：服务本身（默认 `caddy`）或 sync 起的应用 |
 | `devproxy trust` | 单独安装 CA 根证书（系统信任库 + NSS 库 / 系统钥匙串） |
 | `devproxy config` | 显示当前生效配置与渲染出的路由片段 |
 | `devproxy selftest` | 隔离 Caddy 实例端到端自检 |
 | `devproxy uninstall` | 卸载：停服务、移除单元、DNS 路由与（可选）CA。默认保守保留你的配置、个人站点、Caddy 存储与备份 |
-| `devproxy sync` | 按项目根目录的 `devproxy.toml` 同步路由声明（全组共享一份） |
+| `devproxy up` | 在项目里：按 `devproxy.toml` 应用**全部**声明（compose 的 `up -d`） |
+| `devproxy down` | 在项目里：停掉本项目声明的**所有**应用；带路由名则只停那一条 |
 | `devproxy run` | **前台**托管 Caddy（不装服务、不留状态，Ctrl-C 退出）。没有 systemd 的环境（容器 / WSL）用它替代服务 |
 | `devproxy init` | 在项目里生成 `devproxy.toml`（路由名取目录名，启动命令按项目类型猜或用 `--command` / `--from` 指定） |
-| `devproxy stop` | 停掉本项目（`devproxy.toml`）声明的**所有**应用。重新启动：`devproxy sync` |
 
 常用选项：
 
@@ -179,7 +179,7 @@ Caddy 的内部 CA **在第一次加载 `tls internal` 站点时**才生成 —�
 | `--dns-backend auto\|resolved\|system` | `setup` / `doctor` | 强制 DNS 后端（默认取 `config.toml` 的 `dns_backend`） |
 | `--domain-suffix <后缀>` | `setup` | 临时覆盖域名后缀（会过校验，非法值退出码 2） |
 | `--no-trust` | `setup` | 跳过证书信任 |
-| `--yes` | `setup` / `trust` / `sync` / `uninstall` | 非交互模式，不询问（需要提权、或要跳过确认的场景必须加） |
+| `--yes` | `setup` / `trust` / `up` / `uninstall` | 非交互模式，不询问（需要提权、或要跳过确认的场景必须加） |
 | `--rollback <目录>` | `setup` | 从指定备份目录回滚 |
 | `--dry-run` | `uninstall` | 只打印将要执行的步骤，不做任何变更、不需要 sudo |
 | `--purge` | `uninstall` | 直接删除 Caddy 存储、备份目录与下载的 caddy 二进制（不给就在交互时问） |
@@ -188,8 +188,8 @@ Caddy 的内部 CA **在第一次加载 `tls internal` 站点时**才生成 —�
 | `--port N` | `expose` | **必填**：上游已在监听的端口 |
 | `--ready-timeout S` | `up` | 就绪等待秒数（默认取 `config.toml` 的 `ready_timeout`） |
 | `--list` | `logs` | 列出能跟的日志目标，不跟随（项目里只列本项目的） |
-| `--file <路径>` | `sync` | 显式指定 `devproxy.toml`（默认从当前目录逐级向上查找） |
-| `--prune` | `sync` | 移除本文件里已删掉的路由（只动本文件声明过的；非交互时须加 `--yes`） |
+| `--file <路径>` | `up` | 显式指定 `devproxy.toml`（默认从当前目录逐级向上查找） |
+| `--prune` | `up` | 移除本文件里已删掉的路由（只动本文件声明过的；非交互时须加 `--yes`） |
 | `--config <路径>` | `run` | 要加载的 Caddyfile（默认主 Caddyfile） |
 | `--name <名字>` | `init` | 路由名（默认取项目目录名） |
 | `--command <命令>` | `init` | 启动命令，如 `"npm run dev"`（不给就按项目类型猜） |
@@ -539,11 +539,11 @@ devproxy up <name> -- <原来的启动命令>
 
 ---
 
-## 项目级配置 `devproxy.toml`
+## 项目级配置 `devproxy.toml`（`devproxy up` / `devproxy down`）
 
 `config.toml` 是**你机器的**配置（存 `~/.config/devproxy/`，不进版本库）。
 `devproxy.toml` 是**项目的**配置 —— 放在项目仓库根目录、**提交进版本库**，
-全组每个人 clone 下来跑一次 `devproxy sync`，就得到同一套路由。
+全组每个人 clone 下来跑一次 `devproxy up`，就得到同一套路由。
 
 ### 快速创建：`devproxy init`
 
@@ -576,7 +576,7 @@ $ devproxy init
 下一步：
   1. 检查上面的启动命令对不对（多半要改）
   2. devproxy setup    # 只需一次：装 Caddy、写 DNS 路由、装 CA 信任
-  3. devproxy sync     # 起服务
+  3. devproxy up     # 起服务
 ```
 
 文件已存在时会拒绝（退出码 2），要覆盖加 `--force`。
@@ -646,10 +646,10 @@ command = ["sh", "-c", "npx vite --port $PORT --host 127.0.0.1"]
 ### 怎么用
 
 ```bash
-devproxy sync                # 从当前目录逐级向上找 devproxy.toml 并同步
-devproxy sync --file <路径>  # 显式指定
-devproxy sync --prune        # 顺带移除本文件里已删掉的路由
-devproxy stop                # 停掉本项目的所有应用（重新启动：devproxy sync）
+devproxy up                # 从当前目录逐级向上找 devproxy.toml 并同步
+devproxy up --file <路径>  # 显式指定
+devproxy up --prune        # 顺带移除本文件里已删掉的路由
+devproxy stop                # 停掉本项目的所有应用（重新启动：devproxy up）
 ```
 
 **文件发现**：从当前工作目录逐级向上找 `devproxy.toml`，找到第一个就用
@@ -726,7 +726,7 @@ devproxy logs --list
 本项目（devproxy.toml：/home/me/work/xxl-job/devproxy.toml）：
   xxl-job-admin            8 MB
   xxl-job-executor        13 KB
-已声明但还没有日志：xxl-job-executor（跑一次 devproxy sync）
+已声明但还没有日志：xxl-job-executor（跑一次 devproxy up）
 ```
 
 看**单个**日志的信息（路径、大小、跟随命令）：
@@ -750,7 +750,7 @@ devproxy stop
 
 一条命令停掉 `devproxy.toml` 声明的**所有**应用（进程 + 路由一起清）。
 只动本文件声明的路由 —— 手工 `up` 的、别的项目的不受影响。
-全部停了之后 `devproxy sync` 一条命令再拉起来。
+全部停了之后 `devproxy up` 一条命令再拉起来。
 
 单条路由的操作仍是 `devproxy down <名字>`。
 
@@ -776,7 +776,7 @@ name = "codeup-web"
 command = ["sh", "-c", "cd frontend && API_TARGET=https://codeup-api.test NODE_EXTRA_CA_CERTS=$HOME/.local/share/caddy/pki/authorities/local/root.crt __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=codeup-web.test ./node_modules/.bin/vite --host 127.0.0.1 --port $PORT"]
 ```
 
-一次 `devproxy sync` 得到 `https://codeup-web.test` 与 `https://codeup-api.test/docs`，
+一次 `devproxy up` 得到 `https://codeup-web.test` 与 `https://codeup-api.test/docs`，
 **两个端口都是自动分配的**。这里有三个值得抄的点：
 
 1. **前端要代理到后端时，代理到后端的「域名」而不是端口**（`API_TARGET`）——

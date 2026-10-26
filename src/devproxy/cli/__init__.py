@@ -37,10 +37,8 @@ from devproxy.cli import (  # noqa: E402,F401
     trust,
     logs,
     uninstall,
-    sync,
     run,
     init,
-    stop,
 )
 
 

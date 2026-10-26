@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import typer
 
 from devproxy.cli import app
@@ -42,12 +44,35 @@ def _validate_cli_args(name: str, port: int | None, ready_timeout: int | None) -
 @app.command(context_settings={"ignore_unknown_options": True})
 def up(
     ctx: typer.Context,
-    name: str = typer.Argument(..., help="路由名（\\[a-z0-9-]，单标签）"),
+    name: str = typer.Argument(
+        None,
+        help="路由名（\\[a-z0-9-]，单标签）。"
+        "省略 = 应用本项目 devproxy.toml 的全部声明（compose 的 up -d）",
+    ),
     port: int = typer.Option(None, "--port", help="显式端口（默认自动分配）"),
     ready_timeout: int = typer.Option(None, "--ready-timeout", help="就绪超时秒数"),
+    file: Path = typer.Option(
+        None, "--file", help="[项目模式] 显式指定 devproxy.toml（默认向上查找）"
+    ),
+    prune: bool = typer.Option(
+        False, "--prune", help="[项目模式] 移除本文件里已删掉的路由（非交互时须加 --yes）"
+    ),
+    yes: bool = typer.Option(False, "--yes", help="[项目模式] 非交互模式，不询问"),
 ) -> None:
     """分配端口、启动命令并注册 https://<name>.test。"""
     data = ctx.ensure_object(dict)
+    if name is None:
+        # 项目模式（compose 的 up -d）：应用 devproxy.toml 的全部声明
+        if not data.get("has_sep"):
+            from devproxy.cli.sync import run_project_sync
+
+            run_project_sync(file=file, prune=prune, yes=yes)
+            raise typer.Exit(EXIT_OK)
+        s.fail(
+            "缺少路由名：起单个应用用 devproxy up <name> -- CMD...；"
+            "起本项目的全部应用直接 devproxy up",
+            EXIT_USAGE,
+        )
     if not data.get("has_sep"):
         s.fail("缺少 '--'：devproxy up <name> [选项] -- CMD...", EXIT_USAGE)
     cmd = list(data.get("trailing") or [])

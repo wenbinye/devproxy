@@ -14,8 +14,17 @@ from devproxy.cli import _shared as s
 
 
 @app.command()
-def down(name: str = typer.Argument(..., help="路由名")) -> None:
-    """注销路由；若该路由的子进程还在，一并收掉。"""
+def down(
+    name: str = typer.Argument(
+        None, help="路由名。省略 = 停掉本项目（devproxy.toml）声明的所有应用"
+    ),
+) -> None:
+    """注销路由；子进程还在则一并收掉。不带名字 = 停掉本项目全部应用。"""
+    if name is None:
+        from devproxy.cli.stop import stop_project_apps
+
+        stop_project_apps()
+        raise typer.Exit(0)
     try:
         validate_name(name)
     except InvalidNameError as e:

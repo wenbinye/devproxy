@@ -82,10 +82,33 @@ def route_log_path(paths: Paths, name: str) -> Path:
     return paths.log_dir / "routes" / f"{name}.log"
 
 
+def app_process_alive(route: Route) -> bool:
+    """up 模式的应用进程还在吗。
+
+    expose 路由没有受管进程（上游是外部服务），无从判断，按"活着"处理；
+    无 pid 的老路由同样。**pid 已不存在**、或 proc_start 对不上（pid 被系统
+    复用给了别的进程）都算死了 —— 这正是 sync 跳过判定最容易漏的：
+    路由记录还在，应用却早已退出，sync 会说「已是最最新」而域名是死的。
+    """
+    if route.mode != MODE_UP or route.pid is None:
+        return True
+    if not os.path.exists(f"/proc/{route.pid}"):
+        return False
+    if route.proc_start is not None:
+        from devproxy.gateway.runner import proc_start_time
+
+        return proc_start_time(route.pid) == route.proc_start
+    return True
+
+
 def build_sync_plan(
     project: ProjectFile, existing: list[Route], prune: bool = False
 ) -> SyncPlan:
-    """把声明与现状比对成计划。纯函数 —— 不碰文件系统。"""
+    """把声明与现状比对成计划。
+
+    会读 /proc 判断 up 模式应用是否还活着（docstring 说"纯函数"是老黄历了：
+    应用死掉但路由记录还在是最常见的坏状态，必须在这里识别出来）。
+    """
     plan = SyncPlan()
     by_name = {r.name: r for r in existing}
     for declared in project.routes:
@@ -98,6 +121,10 @@ def build_sync_plan(
             continue
         reason = conflict_reason(current, declared)
         if reason is None:
+            if not app_process_alive(current):
+                # 应用已死、路由记录还在 → 重建。UpRunner 会清理同名旧路由
+                plan.create_up.append(declared)
+                continue
             plan.skip.append((declared, current))
         else:
             plan.conflict.append((declared, current, reason))
@@ -226,7 +253,7 @@ def execute_sync_plan(
                 f"{reason}；现状：{_describe(current)}",
                 domain=current.domain,
                 port=current.port,
-                hint=f"devproxy down {declared.name} 后重新运行 devproxy sync",
+                hint=f"devproxy down {declared.name} 后重新运行 devproxy up",
             )
         )
 

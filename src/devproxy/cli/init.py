@@ -83,7 +83,7 @@ def init(
     s.console.print("下一步：")
     s.console.print("  1. 检查上面的启动命令对不对（多半要改）")
     s.console.print("  2. devproxy setup    # 只需一次：装 Caddy、写 DNS 路由、装 CA 信任")
-    s.console.print("  3. devproxy sync     # 起服务")
+    s.console.print("  3. devproxy up        # 起服务")
     raise typer.Exit(EXIT_OK)
 
 

@@ -11,8 +11,7 @@ from devproxy.gateway.runner import reachable
 
 from devproxy.cli import _shared as s
 
-@app.command()
-def ls() -> None:
+def _list_routes() -> None:
     """列出所有已注册路由。"""
     _, _, store, _ = s.build_context()
     try:
@@ -40,3 +39,13 @@ def ls() -> None:
             "● reachable" if ok else "⛔ 不可达",
         )
     s.console.print(table)
+
+
+@app.command(name="ls", help="列出所有已注册路由（= ps）")
+def ls() -> None:
+    _list_routes()
+
+
+@app.command(name="ps", help="列出所有已注册路由（= ls，对齐 docker compose）")
+def ps() -> None:
+    _list_routes()

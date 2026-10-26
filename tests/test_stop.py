@@ -11,7 +11,7 @@ from devproxy.cli import app
 
 
 def _invoke(args: list[str]):
-    return CliRunner().invoke(app, ["stop", *args])
+    return CliRunner().invoke(app, ["down", *args])
 
 
 @pytest.fixture

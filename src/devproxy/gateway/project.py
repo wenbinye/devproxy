@@ -1,7 +1,7 @@
 """项目级配置文件 devproxy.toml：发现、解析、校验。
 
 文件放在**项目仓库根目录**，随代码提交，全组共享 —— 一份声明，
-每个人的机器上跑 `devproxy sync` 就得到同一套域名。
+每个人的机器上跑 `devproxy up` 就得到同一套域名。
 
 格式（完整说明见 README）：
 
@@ -449,7 +449,7 @@ def render_project_file(
     lines: list[str] = [
         "# devproxy.toml —— 本项目的本地开发路由声明",
         "#",
-        "# 提交进仓库，全组共享：每个人跑一次 `devproxy sync` 就得到同一套域名。",
+        "# 提交进仓库，全组共享：每个人跑一次 `devproxy up` 就得到同一套域名。",
         "# 完整说明见 devproxy 的 README「项目级配置」。",
         "#",
         "# command 是 argv 数组，不经过 shell —— $PORT 不会自动展开。",

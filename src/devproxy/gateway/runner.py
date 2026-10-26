@@ -62,7 +62,7 @@ class UpRequest:
     # 用户在子目录里执行 sync 时，应用的 cwd 仍必须是项目根目录。
     cwd: Path | None = None
     # 声明来源（devproxy.toml 的绝对路径）。落到路由表里，
-    # `devproxy sync --prune` 据此判断「这条路由是不是本文件声明的」。
+    # `devproxy up --prune` 据此判断「这条路由是不是本文件声明的」。
     source: str | None = None
     # 应用输出的日志文件。给了就把子进程的输出收进管道、由 devproxy 自己
     # 写进这个文件 —— 只有自己持有句柄才能在运行中轮转（见 core.logs）。
@@ -425,7 +425,7 @@ class UpRunner:
         """按 UpRequest 执行一次 up —— 编排的唯一入口。
 
         `run()` 只是把位置参数收敛成 UpRequest 后的薄封装；需要 cwd /
-        source 这类附加信息的调用方（devproxy sync 的后台工作进程）
+        source 这类附加信息的调用方（devproxy up 的后台工作进程）
         直接构造 UpRequest 调这里。
         """
         return self._execute(req)
