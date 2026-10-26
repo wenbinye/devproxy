@@ -12,8 +12,7 @@ powershell），命令名与选项的补全不用自己写 —— 这里只补**
 from __future__ import annotations
 
 from collections.abc import Iterable
-
-from click import Context
+from typing import Any
 
 from devproxy.core.paths import default_paths
 from devproxy.gateway.routes import RouteTableError
@@ -36,11 +35,16 @@ def _complete(candidates: Iterable[str], incomplete: str) -> list[str]:
     return [c for c in candidates if c.startswith(incomplete)]
 
 
-def route_names(ctx: Context, args: list[str], incomplete: str) -> list[str]:
+# ctx 的类型是 typer 传进来的上下文（typer 0.24 是 click.Context，0.27 是内置的
+# typer._click.Context）—— **不能 import click**：安装环境里的 typer 可能不带 click
+# （0.27 起把 click 收编为 typer._click，不再是独立依赖）。这里用不到它，Any 即可。
+
+
+def route_names(ctx: Any, args: list[str], incomplete: str) -> list[str]:
     """路由名候选（`down <名字>`、`logs <名字>`）。"""
     return _complete(_route_names(), incomplete)
 
 
-def log_targets(ctx: Context, args: list[str], incomplete: str) -> list[str]:
+def log_targets(ctx: Any, args: list[str], incomplete: str) -> list[str]:
     """`logs <名字>` 的候选：服务日志名 + 路由名。"""
     return _complete((*SERVICE_LOGS, *_route_names()), incomplete)
