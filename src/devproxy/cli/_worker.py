@@ -1,16 +1,17 @@
-"""后台 up 工作进程：`devproxy up` 拉起应用时用它托管子进程。
+"""The background up worker: it supervises the child process when `devproxy up` starts an app.
 
-为什么要有这个进程：`devproxy up` 是**前台**命令 —— 它一直陪着应用跑，
-应用退出时顺手注销路由、Caddy 丢路由时心跳把它补回来。sync 要一次拉起
-好几条路由还必须自己返回，不能阻塞在前台命令上，于是把同一套「陪伴」
-逻辑搬到这个独立进程里：
+Why this process exists: `devproxy up` is a **foreground** command -- it stays with the
+app, unregisters the route when the app exits, and re-adds the route when a Caddy
+heartbeat shows it is gone. sync has to start several routes at once and still return,
+so it cannot block on a foreground command; the same "stay with the app" logic therefore
+lives in this separate process:
 
-- sync 启动它（独立会话），它启动应用、注册路由，然后一直陪着；
-- 应用退出 → 路由自动注销（与前台 `devproxy up` 同语义）；
-- sync 退出不影响它 —— 它在自己的会话里，继续陪着应用。
+- sync starts it (in its own session); it starts the app, registers the route, and stays;
+- app exits -> the route is unregistered automatically (same semantics as foreground `devproxy up`);
+- sync exiting does not affect it -- it lives in its own session and keeps the app company.
 
-工作负载从环境变量 `DEVPROXY_UP_PAYLOAD` 读（JSON），命令行参数留给
-`python -m` 自身，避免应用命令里的参数与 devproxy 的参数混在一起。
+The payload comes from the `DEVPROXY_UP_PAYLOAD` environment variable (JSON); the command
+line stays for `python -m` itself, so the app's own arguments never mix with devproxy's.
 """
 
 from __future__ import annotations
@@ -37,15 +38,15 @@ PAYLOAD_ENV = "DEVPROXY_UP_PAYLOAD"
 def _load_payload() -> dict:
     raw = os.environ.get(PAYLOAD_ENV)
     if not raw:
-        raise ValueError(f"缺少环境变量 {PAYLOAD_ENV}")
+        raise ValueError(f"missing environment variable {PAYLOAD_ENV}")
     payload = json.loads(raw)
     if not isinstance(payload, dict):
-        raise ValueError("工作负载必须是 JSON 对象")
+        raise ValueError("the payload must be a JSON object")
     return payload
 
 
 class _LogProxy:
-    """把 worker 的输出追加进日志文件（每次写都重新打开）。"""
+    """Append the worker's output to the log file (reopened on every write)."""
 
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -58,7 +59,7 @@ class _LogProxy:
             with self.path.open("a", encoding="utf-8", errors="replace") as handle:
                 handle.write(data)
         except OSError:
-            pass  # 日志写不进去不该让 worker 崩掉
+            pass  # a failed log write must not take the worker down
         return len(data)
 
     def flush(self) -> None:
@@ -69,7 +70,7 @@ class _LogProxy:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """跑一次 up 并陪着应用。返回进程退出码。"""
+    """Run one up and stay with the app. Returns the process exit code."""
     try:
         payload = _load_payload()
     except (ValueError, json.JSONDecodeError) as e:
@@ -79,14 +80,15 @@ def main(argv: list[str] | None = None) -> int:
         name = str(payload["name"])
         command = [str(part) for part in payload["command"]]
     except (KeyError, TypeError) as e:
-        print(f"devproxy: 工作负载缺少字段：{e}", file=sys.stderr)
+        print(f"devproxy: the payload is missing a field: {e}", file=sys.stderr)
         return 2
 
     cwd = payload.get("cwd")
     log_path = payload.get("log_path")
     if log_path:
-        # worker 自己的输出也进日志文件：每次写都重新打开，文件被轮转后
-        # 下一条消息会落到**新**文件，而不是跟着旧 inode 跑进 .log.1
+        # The worker's own output goes into the log file too: reopened on every write, so
+        # after a rotation the next message lands in the **new** file instead of following
+        # the old inode into .log.1
         proxy = _LogProxy(Path(log_path))
         sys.stdout = proxy
         sys.stderr = proxy
@@ -105,7 +107,7 @@ def main(argv: list[str] | None = None) -> int:
         runner = UpRunner(store, config, admin)
         return runner.run_request(request)
     except typer.Exit as e:
-        # 前置条件不满足（Caddyfile 不存在等）—— fail() 抛的就是它
+        # Unmet precondition (missing Caddyfile, ...) -- this is what fail() raises
         return int(e.exit_code)
     except PreconditionError as e:
         print(f"devproxy: {e}", file=sys.stderr)
@@ -115,5 +117,5 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
 
-if __name__ == "__main__":  # pragma: no cover - 进程入口
+if __name__ == "__main__":  # pragma: no cover - process entry point
     sys.exit(main())

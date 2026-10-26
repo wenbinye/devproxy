@@ -34,8 +34,8 @@ def test_build_plan_collects_reports():
 def test_plan_needs_sudo_lists_privileged_actions():
     c = FakeComponent(
         "caddy",
-        Status(ok=False, detail="缺"),
-        [Action(description="setcap", privileged=True), Action(description="写文件")],
+        Status(ok=False, detail="missing"),
+        [Action(description="setcap", privileged=True), Action(description="write file")],
     )
     plan = build_plan([c])
     assert len(plan.needs_sudo) == 1
@@ -55,14 +55,14 @@ def test_apply_plan_applies_each_component():
 def test_apply_plan_continues_after_failure():
     class Boom(FakeComponent):
         def apply(self, actions):
-            raise RuntimeError("炸了")
+            raise RuntimeError("boom")
 
     good = FakeComponent("good", Status(ok=True), [Action(description="x")])
     bad = Boom("bad", Status(ok=True), [Action(description="y")])
     results = apply_plan(build_plan([good, bad]))
     statuses = dict(results)
     assert statuses["bad"].ok is False
-    assert "炸了" in statuses["bad"].detail
+    assert "boom" in statuses["bad"].detail
     assert statuses["good"].ok is True
 
 
@@ -71,7 +71,7 @@ def test_apply_plan_uses_verify_when_available():
         def verify(self):
             return Status(ok=True, detail="verified")
 
-    c = WithVerify("a", Status(ok=False, detail="缺"), [Action(description="x")])
+    c = WithVerify("a", Status(ok=False, detail="missing"), [Action(description="x")])
     results = apply_plan(build_plan([c]))
     assert dict(results)["a"].detail == "verified"
 
@@ -83,76 +83,76 @@ def test_build_plan_keeps_component_reference():
 
 
 def test_build_plan_isolates_check_exception():
-    """某个组件的 check() 抛异常，不能带崩整个 setup。"""
+    """One component's check() raising must not take down the whole setup."""
 
     class BoomCheck(FakeComponent):
         def check(self):
-            raise RuntimeError("检查炸了")
+            raise RuntimeError("check boom")
 
     bad = BoomCheck("bad", Status(ok=True))
     good = FakeComponent("good", Status(ok=True))
     plan = build_plan([bad, good])
     assert [r.name for r in plan.reports] == ["bad", "good"]
     assert plan.reports[0].status.ok is False
-    assert "检查炸了" in plan.reports[0].status.detail
+    assert "check boom" in plan.reports[0].status.detail
     assert plan.reports[1].status.ok is True
 
 
 def test_build_plan_isolates_plan_exception():
     class BoomPlan(FakeComponent):
         def plan(self):
-            raise RuntimeError("算计划炸了")
+            raise RuntimeError("plan boom")
 
     bad = BoomPlan("bad", Status(ok=True))
     good = FakeComponent("good", Status(ok=True))
     plan = build_plan([bad, good])
     assert plan.reports[0].status.ok is False
-    assert "算计划炸了" in plan.reports[0].status.detail
+    assert "plan boom" in plan.reports[0].status.detail
     assert plan.reports[0].actions == []
     assert plan.reports[1].status.ok is True
 
 
 def test_apply_plan_keeps_plan_failure_even_if_verify_would_pass():
-    """plan() 抛异常时组件什么都没做 —— verify() 成功也不能覆盖失败。"""
+    """When plan() raises the component did nothing -- a successful verify() must not mask the failure."""
 
     class PlanBoom(FakeComponent):
         def plan(self):
-            raise RuntimeError("配置读不出来")
+            raise RuntimeError("cannot read config")
 
         def verify(self):
-            return Status(ok=True, detail="服务在跑")
+            return Status(ok=True, detail="service is running")
 
     c = PlanBoom("bad", Status(ok=True))
     results = apply_plan(build_plan([c]))
     status = dict(results)["bad"]
     assert status.ok is False
-    assert "配置读不出来" in status.detail
+    assert "cannot read config" in status.detail
 
 
 def test_apply_plan_keeps_check_failure_even_if_verify_would_pass():
     class CheckBoom(FakeComponent):
         def check(self):
-            raise PermissionError("二进制不可执行")
+            raise PermissionError("binary not executable")
 
         def verify(self):
-            return Status(ok=True, detail="服务在跑")
+            return Status(ok=True, detail="service is running")
 
     c = CheckBoom("bad", Status(ok=True))
     results = apply_plan(build_plan([c]))
     status = dict(results)["bad"]
     assert status.ok is False
-    assert "二进制不可执行" in status.detail
+    assert "binary not executable" in status.detail
 
 
-# -- CLI：setup 编排 --------------------------------------------------------
+# -- CLI: setup orchestration -------------------------------------------------
 
 
 class FakeCliComponent:
-    """CLI 用的假组件：记录 apply 调用。"""
+    """Fake component for the CLI: records apply calls."""
 
     def __init__(self, name, status=None, actions=(), fail=False):
         self.name = name
-        self._status = status or Status(ok=True, detail="就绪")
+        self._status = status or Status(ok=True, detail="ready")
         self._actions = list(actions)
         self._fail = fail
         self.applied = None
@@ -165,21 +165,21 @@ class FakeCliComponent:
 
     def apply(self, actions):
         if self._fail:
-            raise RuntimeError("炸了")
+            raise RuntimeError("boom")
         self.applied = actions
 
     def verify(self):
-        return Status(ok=True, detail="已生效")
+        return Status(ok=True, detail="in effect")
 
 
 def _fake_components_seam(components):
-    """模拟 `_components` 的接缝，包括 `include_cert=False` 的过滤语义。"""
+    """Simulate the `_components` seam, including the filtering semantics of `include_cert=False`."""
 
     def build(paths, config, dns_backend=None, platform=None, *, include_cert=True):
         selected = list(components)
         if not include_cert:
-            # 生产实现按 CertComponent 类型过滤；测试替身没有类型可认，
-            # 用 name 模拟同一语义
+            # The production implementation filters by CertComponent type; the test
+            # double has no type to recognize, so simulate the same semantics by name
             selected = [c for c in selected if getattr(c, "name", None) != "cert"]
         return selected
 
@@ -198,8 +198,9 @@ def _patch_cli(monkeypatch, tmp_path, components):
         "devproxy.cli._shared.build_context", lambda *a, **k: (paths, cfg, None, None)
     )
     monkeypatch.setattr("devproxy.cli._shared._components", _fake_components_seam(components))
-    # 平台也必须换成假的：setup 的迁移检测会去看真实单元目录，
-    # 迁移一旦跑起来就会改写用户机器上的 caddy.service
+    # The platform must also be swapped for a fake one: setup's migration detection
+    # looks at the real unit directory, and once migration runs it rewrites the user
+    # machine's caddy.service
     monkeypatch.setattr("devproxy.cli._shared._platform", lambda: FakePlatform())
     return paths, cfg
 
@@ -213,7 +214,7 @@ def test_cli_setup_noop_exits_ok(tmp_path, monkeypatch):
     _patch_cli(monkeypatch, tmp_path, comps)
     result = CliRunner().invoke(app, ["setup"])
     assert result.exit_code == 0, result.stdout
-    assert "所有组件已就绪，无需变更。" in result.stdout
+    assert "All components are ready; nothing to change." in result.stdout
     assert comps[0].applied is None
 
 
@@ -225,14 +226,14 @@ def test_cli_setup_refuses_privileged_without_yes(tmp_path, monkeypatch):
     comps = [
         FakeCliComponent(
             "caddy",
-            Status(ok=False, detail="缺"),
-            [Action(description="写 /etc", privileged=True)],
+            Status(ok=False, detail="missing"),
+            [Action(description="write /etc", privileged=True)],
         )
     ]
     _patch_cli(monkeypatch, tmp_path, comps)
     result = CliRunner().invoke(app, ["setup"])
     assert result.exit_code == 4
-    assert "写 /etc" in result.stdout
+    assert "write /etc" in result.stdout
     assert comps[0].applied is None
 
 
@@ -244,8 +245,8 @@ def test_cli_setup_applies_with_yes(tmp_path, monkeypatch):
     comps = [
         FakeCliComponent(
             "caddy",
-            Status(ok=False, detail="缺"),
-            [Action(description="写 /etc", privileged=True)],
+            Status(ok=False, detail="missing"),
+            [Action(description="write /etc", privileged=True)],
         )
     ]
     _patch_cli(monkeypatch, tmp_path, comps)
@@ -262,14 +263,14 @@ def test_cli_setup_reports_failure_with_exit_1(tmp_path, monkeypatch):
 
     comps = [
         FakeCliComponent(
-            "bad", Status(ok=False, detail="缺"), [Action(description="x")], fail=True
+            "bad", Status(ok=False, detail="missing"), [Action(description="x")], fail=True
         ),
-        FakeCliComponent("good", Status(ok=False, detail="缺"), [Action(description="y")]),
+        FakeCliComponent("good", Status(ok=False, detail="missing"), [Action(description="y")]),
     ]
     _patch_cli(monkeypatch, tmp_path, comps)
     result = CliRunner().invoke(app, ["setup", "--yes"])
     assert result.exit_code == 1
-    assert "炸了" in result.stdout
+    assert "boom" in result.stdout
     assert comps[1].applied is not None
 
 
@@ -308,7 +309,7 @@ def test_cli_setup_domain_suffix_override(tmp_path, monkeypatch):
 
 
 def test_cli_setup_rejects_invalid_domain_suffix(tmp_path, monkeypatch):
-    """--domain-suffix 会流进 Caddyfile 与 /etc 下的配置 —— 必须过配置校验。"""
+    """--domain-suffix flows into the Caddyfile and config files under /etc -- it must pass config validation."""
     from typer.testing import CliRunner
 
     from devproxy.cli import app
@@ -333,20 +334,20 @@ def test_cli_setup_rejects_invalid_dns_backend(tmp_path, monkeypatch):
 
 
 def test_cli_setup_noop_with_unhealthy_component_exits_precondition(tmp_path, monkeypatch):
-    """没有可执行的动作、但组件本身不健康 —— 不能谎报「已就绪」。"""
+    """No executable actions, but the component itself is unhealthy -- must not falsely report "ready"."""
     from typer.testing import CliRunner
 
     from devproxy.cli import app
 
-    comps = [FakeCliComponent("caddy", Status(ok=False, detail="坏了"))]
+    comps = [FakeCliComponent("caddy", Status(ok=False, detail="broken"))]
     _patch_cli(monkeypatch, tmp_path, comps)
     result = CliRunner().invoke(app, ["setup"])
     assert result.exit_code == 3
-    assert "坏了" in result.stdout or "坏了" in result.stderr
+    assert "broken" in result.stdout or "broken" in result.stderr
 
 
 class FakeCertComponent(FakeCliComponent):
-    """带结构化 ca_path 的假证书组件（`_status_cell` 用它判断提示状态）。"""
+    """Fake certificate component with a structured ca_path (`_status_cell` uses it to decide the hint state)."""
 
     def __init__(self, name, status, ca_path):
         super().__init__(name, status)
@@ -363,7 +364,7 @@ def _write_ca(storage: Path) -> Path:
 
 
 def test_cli_setup_shows_cert_note_without_useless_trust_hint(tmp_path, monkeypatch):
-    """CA 尚未生成时表格展示提示；但没有 CA 就没什么可 trust，不该提示。"""
+    """When the CA has not been generated yet the table shows a hint; with no CA there is nothing to trust, so no trust hint."""
     from typer.testing import CliRunner
 
     from devproxy.cli import app
@@ -371,19 +372,22 @@ def test_cli_setup_shows_cert_note_without_useless_trust_hint(tmp_path, monkeypa
     comps = [
         FakeCertComponent(
             "cert",
-            Status(ok=True, detail="尚无 CA 根证书（将在首条路由注册时由 Caddy 生成）"),
+            Status(
+                ok=True,
+                detail="no CA root certificate yet (Caddy will generate it on first route registration)",
+            ),
             tmp_path / "missing" / "root.crt",
         )
     ]
     _patch_cli(monkeypatch, tmp_path, comps)
     result = CliRunner().invoke(app, ["setup", "--yes"])
     assert result.exit_code == 0, result.stdout
-    assert "尚无 CA" in result.stdout
+    assert "no CA root certificate yet" in result.stdout
     assert "devproxy trust" not in result.stdout
 
 
 def test_cli_setup_prints_trust_hint_when_ca_exists_but_untrusted(tmp_path, monkeypatch):
-    """第二次 setup（CA 已生成但未信任）才提示 trust。"""
+    """Only the second setup (CA generated but untrusted) shows the trust hint."""
     from typer.testing import CliRunner
 
     from devproxy.cli import app
@@ -399,7 +403,7 @@ def test_cli_setup_prints_trust_hint_when_ca_exists_but_untrusted(tmp_path, monk
 
 
 def test_cli_setup_no_trust_hint_when_ca_already_trusted(tmp_path, monkeypatch):
-    """CA 已完全信任时不再重复提示（M8）。"""
+    """Do not repeat the hint when the CA is already fully trusted (M8)."""
     from typer.testing import CliRunner
 
     from devproxy.cli import app
@@ -417,26 +421,28 @@ def test_cli_setup_no_trust_hint_when_ca_already_trusted(tmp_path, monkeypatch):
 
 
 def test_cli_setup_permission_error_during_apply_exits_4(tmp_path, monkeypatch):
-    """apply 阶段提权失败 = 退出码 4（与 trust 一致），不是普通失败 1。"""
+    """Elevation failure during apply = exit code 4 (same as trust), not an ordinary failure of 1."""
     from typer.testing import CliRunner
 
     from devproxy.cli import app
 
     class SudoFail(FakeCliComponent):
         def apply(self, actions):
-            raise PermissionError("sudo 需要密码且当前不可用")
+            raise PermissionError("sudo needs a password and is currently unavailable")
 
-    comps = [SudoFail("caddy", Status(ok=False, detail="缺"), [Action(description="写 /etc")])]
+    comps = [
+        SudoFail("caddy", Status(ok=False, detail="missing"), [Action(description="write /etc")])
+    ]
     _patch_cli(monkeypatch, tmp_path, comps)
     result = CliRunner().invoke(app, ["setup", "--yes"])
     assert result.exit_code == 4, result.output
-    assert "提权失败" in result.output
-    assert "sudo 需要密码且当前不可用" in result.output
+    assert "elevation failed" in result.output
+    assert "sudo needs a password and is currently unavailable" in result.output
     assert "Traceback" not in result.output
 
 
 def test_components_include_cert_flag_controls_cert_component(tmp_path):
-    """M4：--no-trust 不能靠调用方自己删组件；`include_cert` 必须真的生效。"""
+    """M4: --no-trust must not rely on the caller removing the component; `include_cert` must really take effect."""
     from devproxy.cli._shared import _components
     from devproxy.core.config import Config
     from devproxy.core.paths import Paths
@@ -457,7 +463,7 @@ def test_components_include_cert_flag_controls_cert_component(tmp_path):
 
 
 def test_cli_setup_noop_unhealthy_prints_fix_hint(tmp_path, monkeypatch):
-    """M5：没有可执行动作时也要给出修复提示，不能只说“坏了”。"""
+    """M5: even with no executable actions, give a fix hint; do not just say "broken"."""
     from typer.testing import CliRunner
 
     from devproxy.cli import app
@@ -465,41 +471,41 @@ def test_cli_setup_noop_unhealthy_prints_fix_hint(tmp_path, monkeypatch):
     comps = [
         FakeCliComponent(
             "caddy",
-            Status(ok=False, detail="服务未运行", hint="devproxy setup"),
+            Status(ok=False, detail="service not running", hint="devproxy setup"),
         )
     ]
     _patch_cli(monkeypatch, tmp_path, comps)
     result = CliRunner().invoke(app, ["setup", "--yes"])
     assert result.exit_code == 3, result.output
-    assert "修复: devproxy setup" in result.output
+    assert "Fix: devproxy setup" in result.output
 
 
 def test_cli_setup_scope_note_exception_does_not_crash(tmp_path, monkeypatch):
-    """M9：组件探测整机作用域失败只能降级为警告，不能带崩 setup。"""
+    """M9: a component failing to probe machine-wide scope may only degrade to a warning, not crash setup."""
     from typer.testing import CliRunner
 
     from devproxy.cli import app
 
     class BoomNote(FakeCliComponent):
         def global_scope_note(self):
-            raise RuntimeError("探测炸了")
+            raise RuntimeError("probe boom")
 
     comps = [
         BoomNote(
             "dns",
-            Status(ok=False, detail="缺"),
-            [Action(description="写 /etc/resolv.conf")],
+            Status(ok=False, detail="missing"),
+            [Action(description="write /etc/resolv.conf")],
         )
     ]
     _patch_cli(monkeypatch, tmp_path, comps)
     result = CliRunner().invoke(app, ["setup", "--yes"])
     assert result.exit_code == 0, result.output
-    assert "无法获取 dns 的整机作用域说明" in result.output
+    assert "cannot get the machine-wide scope note for dns" in result.output
     assert "Traceback" not in result.output
 
 
 def test_cli_setup_macos_rejects_resolved_backend(tmp_path, monkeypatch):
-    """macOS + 显式 resolved 是参数错误（退出码 2），不能等组件抛 traceback。"""
+    """macOS + explicit resolved is an argument error (exit code 2); do not wait for the component to raise a traceback."""
     from types import SimpleNamespace
 
     from typer.testing import CliRunner
@@ -511,13 +517,13 @@ def test_cli_setup_macos_rejects_resolved_backend(tmp_path, monkeypatch):
     monkeypatch.setattr("devproxy.cli._shared._platform", lambda: SimpleNamespace(name="mac"))
     result = CliRunner().invoke(app, ["setup", "--dns-backend", "resolved", "--yes"])
     assert result.exit_code == 2, result.output
-    assert "macOS 不支持 resolved" in result.output
+    assert "macOS does not support the resolved backend" in result.output
     assert "Traceback" not in result.output
     assert comps[0].applied is None
 
 
 def test_cli_setup_rejects_explicit_empty_dns_backend(tmp_path, monkeypatch):
-    """--dns-backend "" 是参数错误，不能靠 falsy 悄悄退回 auto。"""
+    """--dns-backend "" is an argument error; do not silently fall back to auto because the value is falsy."""
     from typer.testing import CliRunner
 
     from devproxy.cli import app
@@ -535,7 +541,9 @@ def test_cli_setup_asks_for_confirmation_interactively(tmp_path, monkeypatch):
     from devproxy.cli import app
 
     comps = [
-        FakeCliComponent("caddy", Status(ok=False, detail="缺"), [Action(description="写文件")])
+        FakeCliComponent(
+            "caddy", Status(ok=False, detail="missing"), [Action(description="write file")]
+        )
     ]
     _patch_cli(monkeypatch, tmp_path, comps)
     monkeypatch.setattr("devproxy.cli._shared._interactive", lambda: True)
@@ -546,21 +554,23 @@ def test_cli_setup_asks_for_confirmation_interactively(tmp_path, monkeypatch):
     )
     result = CliRunner().invoke(app, ["setup"])
     assert result.exit_code == 0, result.stdout
-    assert asked, "交互模式必须先确认"
+    assert asked, "interactive mode must confirm first"
     assert comps[0].applied is not None
 
 
 def test_cli_setup_aborts_when_user_declines(tmp_path, monkeypatch):
-    """用户拒绝确认 = "什么都没装" —— 绝不能以退出码 0 结束。
+    """The user declining confirmation means "nothing installed" -- must never end with exit code 0.
 
-    `devproxy setup && devproxy up …` 会把"没装"当成"装好了"继续跑。
+    `devproxy setup && devproxy up ...` would treat "not installed" as "installed" and continue.
     """
     from typer.testing import CliRunner
 
     from devproxy.cli import app
 
     comps = [
-        FakeCliComponent("caddy", Status(ok=False, detail="缺"), [Action(description="写文件")])
+        FakeCliComponent(
+            "caddy", Status(ok=False, detail="missing"), [Action(description="write file")]
+        )
     ]
     _patch_cli(monkeypatch, tmp_path, comps)
     monkeypatch.setattr("devproxy.cli._shared._interactive", lambda: True)
@@ -568,15 +578,15 @@ def test_cli_setup_aborts_when_user_declines(tmp_path, monkeypatch):
     result = CliRunner().invoke(app, ["setup"])
     assert result.exit_code == 4, result.stdout
     assert comps[0].applied is None
-    assert "已取消" in result.stdout
-    assert "什么都没改" in result.stdout
+    assert "Cancelled" in result.stdout
+    assert "nothing was changed" in result.stdout
 
 
-# -- 整机作用域的披露（Finding 8） -----------------------------------------
+# -- Machine-wide scope disclosure (Finding 8) --------------------------------
 
 
 class FakeScopeComponent(FakeCliComponent):
-    """带整机作用域披露的假组件。"""
+    """Fake component with a machine-wide scope disclosure."""
 
     def __init__(self, name, note, status=None, actions=()):
         super().__init__(name, status, actions)
@@ -587,7 +597,7 @@ class FakeScopeComponent(FakeCliComponent):
 
 
 def test_cli_setup_prints_global_scope_disclosure(tmp_path, monkeypatch):
-    """变更清单必须点名整机作用域 —— 表格放不下，就单独打一遍。"""
+    """The change list must name machine-wide scope -- it does not fit in the table, so print it separately."""
     from typer.testing import CliRunner
 
     from devproxy.cli import app
@@ -595,31 +605,33 @@ def test_cli_setup_prints_global_scope_disclosure(tmp_path, monkeypatch):
     comps = [
         FakeScopeComponent(
             "dns",
-            "⚠ 整机作用域（这台机器全部域名，不只是 *.test）\n"
-            "  · DNS=127.0.0.1:5353：全机解析先问用户级 dnsmasq\n"
-            "  · FallbackDNS=1.1.1.1 8.8.8.8：整机兜底\n"
-            "    dnsmasq 起不来时，全机解析退化为公共 DNS",
-            Status(ok=False, detail="缺"),
-            [Action(description="写 /etc/systemd/resolved.conf.d/devproxy.conf")],
+            "⚠ machine-wide scope (all domains on this machine, not just *.test)\n"
+            "  · DNS=127.0.0.1:5353: machine-wide resolution asks the user-scope dnsmasq first\n"
+            "  · FallbackDNS=1.1.1.1 8.8.8.8: machine-wide fallback\n"
+            "    if dnsmasq would not start, machine-wide resolution degrades to public DNS",
+            Status(ok=False, detail="missing"),
+            [Action(description="write /etc/systemd/resolved.conf.d/devproxy.conf")],
         )
     ]
     _patch_cli(monkeypatch, tmp_path, comps)
     result = CliRunner().invoke(app, ["setup", "--yes"])
     assert result.exit_code == 0, result.stdout
-    assert "整机作用域" in result.stdout
+    assert "machine-wide scope" in result.stdout
     assert "DNS=127.0.0.1:5353" in result.stdout
     assert "FallbackDNS=1.1.1.1 8.8.8.8" in result.stdout
-    assert "dnsmasq 起不来" in result.stdout
+    assert "dnsmasq would not start" in result.stdout
 
 
 def test_cli_setup_without_global_scope_component_prints_no_disclosure(tmp_path, monkeypatch):
-    """组件不涉及整机时不多嘴。"""
+    """Do not add noise when the component has no machine-wide effect."""
     from typer.testing import CliRunner
 
     from devproxy.cli import app
 
-    comps = [FakeCliComponent("caddy", Status(ok=False, detail="缺"), [Action(description="x")])]
+    comps = [
+        FakeCliComponent("caddy", Status(ok=False, detail="missing"), [Action(description="x")])
+    ]
     _patch_cli(monkeypatch, tmp_path, comps)
     result = CliRunner().invoke(app, ["setup", "--yes"])
     assert result.exit_code == 0, result.stdout
-    assert "整机作用域" not in result.stdout
+    assert "machine-wide scope" not in result.stdout

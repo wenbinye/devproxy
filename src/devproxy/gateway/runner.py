@@ -1,11 +1,16 @@
-"""up 的子进程生命周期：端口分配、启动、就绪等待、信号转发、按组清理。
+"""Subprocess lifecycle for up: port allocation, start, readiness wait,
+signal forwarding, group cleanup.
 
-沿用 devp 的成熟做法：子进程以 start_new_session=True 启动（独立进程组），
-信号按组转发，退出时按组 SIGTERM→SIGKILL，确保孙进程不残留。
+Following devp's proven approach: the child starts with
+start_new_session=True (its own process group), signals are forwarded to the
+group, and on exit the group gets SIGTERM -> SIGKILL so no grandchildren are
+left behind.
 
-pid 复用防护：组长在按组补刀完成之前一律保留为僵尸（waitid + WNOWAIT）——
-僵尸存在期间内核不会复用它的 pid，killpg 打到的必然还是当初那个进程组。
-只有组长已被别处回收、且记录的身份与当前不符时，才放弃按组清理。
+pid-reuse protection: the leader is kept as a zombie (waitid + WNOWAIT)
+until the group cleanup finishes -- while the zombie exists the kernel will
+not reuse its pid, so killpg necessarily hits the original process group.
+Only when the leader has already been reaped elsewhere and the recorded
+identity no longer matches do we give up group cleanup.
 """
 
 from __future__ import annotations
@@ -37,52 +42,62 @@ from devproxy.gateway.store import RouteStoreError
 
 HEARTBEAT_INTERVAL = 30.0
 
-# os.waitid 的 WNOWAIT 只在部分 Unix 上可用。缺失时退回 Popen.wait()，
-# 那会提前回收组长 —— stop_process_group 会因此放弃按组补刀（宁可留下
-# 残留进程，也不对可能被复用的 pgid 发信号）。
+# os.waitid's WNOWAIT is only available on some Unixes. When absent we fall
+# back to Popen.wait(), which reaps the leader early -- stop_process_group
+# then gives up on group cleanup (better to leave a stray process than to
+# signal a pgid that may have been reused).
 _HAS_WAITID = hasattr(os, "waitid") and hasattr(os, "WNOWAIT")
 
 
 class _RouteGone(Exception):
-    """路由表里已经没有这条路由（用户已 down 或已被新的 up 接管）。"""
+    """The route is gone from the route table (the user ran down, or a new up
+    took it over)."""
 
 
 class UpError(RuntimeError):
-    """up 失败。"""
+    """up failed."""
 
 
 class PreconditionError(UpError):
-    """前置条件不满足（如 Caddy 未运行）——CLI 层应映射为退出码 3。"""
+    """A precondition is not met (e.g. Caddy is not running) -- the CLI should
+    map this to exit code 3."""
 
 
 @dataclass
 class UpRequest:
-    """一次 up 的输入。参数收敛在这里，避免编排函数继续膨胀。"""
+    """Input for one up. Parameters are consolidated here so the orchestration
+    function does not keep growing."""
 
     name: str
     cmd: list[str]
     port: int | None = None
     ready_timeout: int | None = None
     on_ready: Callable[[str, int], None] | None = None
-    # 子进程的工作目录。None = 继承 devproxy 进程的当前目录（老行为）。
-    # 项目级配置（devproxy.toml）在项目根目录，命令通常要在**那里**跑 ——
-    # 用户在子目录里执行 sync 时，应用的 cwd 仍必须是项目根目录。
+    # Working directory for the child. None = inherit devproxy's current
+    # directory (old behavior). The project-level config (devproxy.toml)
+    # lives in the project root and commands usually must run **there** --
+    # when the user runs sync from a subdirectory, the app's cwd must still
+    # be the project root.
     cwd: Path | None = None
-    # 声明来源（devproxy.toml 的绝对路径）。落到路由表里，
-    # `devproxy up --prune` 据此判断「这条路由是不是本文件声明的」。
+    # Declaration source (absolute path of devproxy.toml). Stored in the
+    # route table; `devproxy up --prune` uses it to decide "was this route
+    # declared by this file?".
     source: str | None = None
-    # 应用输出的日志文件。给了就把子进程的输出收进管道、由 devproxy 自己
-    # 写进这个文件 —— 只有自己持有句柄才能在运行中轮转（见 core.logs）。
-    # None = 输出继承当前终端（前台 `devproxy up` 的老行为）。
+    # Log file for app output. When set, the child's output is captured in a
+    # pipe and written to this file by devproxy itself -- only holding the
+    # handle ourselves allows rotation at runtime (see core.logs). None =
+    # output inherits the current terminal (old behavior of foreground
+    # `devproxy up`).
     log_path: Path | None = None
 
 
 def _start_log_pump(stream, path: Path) -> None:
-    """把子进程的输出搬进日志文件（后台线程）。
+    """Move the child's output into the log file (background thread).
 
-    这个线程**必须一直把管道读空** —— 管道缓冲区满了，子进程下一次 write
-    就会阻塞，应用会莫名其妙卡住。所以：写失败（磁盘满之类）时丢弃内容
-    但继续读；只有真的读到 EOF 才收工。
+    This thread **must keep draining the pipe** -- once the pipe buffer is
+    full, the child's next write blocks and the app mysteriously hangs. So:
+    on write failure (disk full and the like) discard the content but keep
+    reading; only stop on a real EOF.
     """
 
     def pump() -> None:
@@ -108,7 +123,8 @@ def _start_log_pump(stream, path: Path) -> None:
 
 
 class _ChildHandle:
-    """已启动子进程及其进程组身份，供信号处理与清理共享。"""
+    """A started child process and its process group identity, shared by
+    signal handling and cleanup."""
 
     def __init__(self) -> None:
         self.proc: subprocess.Popen | None = None
@@ -117,7 +133,8 @@ class _ChildHandle:
 
 
 def alloc_port() -> int:
-    """绑定 :0 取一个随机空闲端口后立即释放。存在微小时隙竞争。"""
+    """Bind :0 to get a random free port, then release it immediately. There
+    is a tiny race window."""
     s = socket.socket()
     s.bind(("127.0.0.1", 0))
     port = s.getsockname()[1]
@@ -134,11 +151,12 @@ def reachable(port: int, timeout: float = 0.5) -> bool:
 
 
 def _config_hosts_contains(config: object, domain: str) -> bool:
-    """在 /config/ 的结构化 JSON 里找 host 匹配。
+    """Find a host match in the structured JSON from /config/.
 
-    不能对整份 JSON 做子串匹配：用户的 sites.caddy 里可能有
-    `header X-Dev "foo.test"` 或含该域名的 TLS SAN，子串会把它当成
-    路由存活，导致真正丢失的路由永远不被补写。
+    Do not substring-match the whole JSON: the user's sites.caddy may contain
+    `header X-Dev "foo.test"` or a TLS SAN with that domain, and a substring
+    match would treat it as a live route, so a genuinely lost route would
+    never be rewritten.
     """
     apps = config.get("apps") if isinstance(config, dict) else None
     http = apps.get("http") if isinstance(apps, dict) else None
@@ -163,7 +181,8 @@ def _config_hosts_contains(config: object, domain: str) -> bool:
 
 
 def _route_live(admin: CaddyAdmin, domain: str) -> bool:
-    """路由是否真的在 Caddy 当前配置里（按 host 列表结构化判断）。"""
+    """Whether the route is really in Caddy's current config (judged
+    structurally from host lists)."""
     code, body = admin.api("GET", "/config/")
     if code != 200 or body is None:
         return False
@@ -171,10 +190,12 @@ def _route_live(admin: CaddyAdmin, domain: str) -> bool:
 
 
 def _pid_is_running(pid: int) -> bool:
-    """进程是否存在且不是僵尸（僵尸等同于已退出）。
+    """Whether the process exists and is not a zombie (a zombie counts as
+    exited).
 
-    没有 /proc 的平台（macOS）退回 `ps -o stat=`；两种方式都拿不到时
-    按「已退出」处理 —— 清理流程等的是「不再运行」，不是「pid 还在」。
+    On platforms without /proc (macOS) fall back to `ps -o stat=`; when
+    neither works, treat it as "exited" -- the cleanup flow waits for "no
+    longer running", not "the pid still exists".
     """
     try:
         stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
@@ -195,7 +216,8 @@ def _pid_is_running(pid: int) -> bool:
 
 
 def _leader_status(proc: subprocess.Popen) -> int | None:
-    """非阻塞读取组长退出状态，但不回收（WNOWAIT）；None = 仍在运行。"""
+    """Non-blocking read of the leader's exit status without reaping
+    (WNOWAIT); None = still running."""
     if proc.returncode is not None:
         return proc.returncode
     if _HAS_WAITID:
@@ -212,7 +234,8 @@ def _leader_status(proc: subprocess.Popen) -> int | None:
 
 
 def _wait_leader(proc: subprocess.Popen) -> int:
-    """等待组长退出，但把回收留给清理阶段（僵尸期间 pid 不会被复用）。"""
+    """Wait for the leader to exit, leaving reaping to the cleanup phase (the
+    pid is not reused while it is a zombie)."""
     while True:
         status = _leader_status(proc)
         if status is not None:
@@ -221,10 +244,12 @@ def _wait_leader(proc: subprocess.Popen) -> int:
 
 
 def _wait_exit_unreaped(proc: subprocess.Popen, timeout: float) -> bool:
-    """等组长退出但保留僵尸；返回是否仍「钉住」pgid（未被回收）。
+    """Wait for the leader to exit but keep it as a zombie; returns whether
+    the pgid is still "pinned" (not reaped).
 
-    返回 False 表示平台不支持 WNOWAIT、或组长已被别处回收 —— 此时调用方
-    必须放弃后续的按组补刀。
+    A False return means the platform lacks WNOWAIT or the leader was already
+    reaped elsewhere -- in that case the caller must give up the subsequent
+    group cleanup.
     """
     if not _HAS_WAITID:
         try:
@@ -241,7 +266,8 @@ def _wait_exit_unreaped(proc: subprocess.Popen, timeout: float) -> bool:
         if info is not None:
             return True
         time.sleep(0.05)
-    # 超时仍未退出：组长还活着，pid 同样不会被复用
+    # Timed out without exiting: the leader is still alive, so the pid will
+    # not be reused either
     return True
 
 
@@ -251,13 +277,16 @@ def stop_process_group(
     sig: int = signal.SIGTERM,
     expected_start: str | None = None,
 ) -> None:
-    """向子进程组发信号 → 有限等待 → SIGKILL 进程组，确保孙进程也不残留。
+    """Signal the child process group -> bounded wait -> SIGKILL the group,
+    so no grandchildren are left either.
 
-    pgid 在启动时捕获：组长先退出时（launcher 场景）进程组里仍留着孙进程。
+    pgid is captured at startup: when the leader exits first (the launcher
+    case) grandchildren remain in the process group.
 
-    安全前提：发信号时组长必须仍未被回收（僵尸也算），或者记录的启动时刻
-    与 pgid 当前的身份一致。组长一旦被回收，pid/pgid 就可能被内核复用，
-    盲目 killpg 会杀掉无关进程组。
+    Safety precondition: when signaling, the leader must still be unreaped (a
+    zombie counts), or the recorded start time must match the pgid's current
+    identity. Once the leader is reaped, the pid/pgid may be reused by the
+    kernel, and a blind killpg would kill an unrelated process group.
     """
     if proc is None:
         return
@@ -268,11 +297,13 @@ def stop_process_group(
             pgid = proc.pid
 
     if proc.returncode is not None:
-        # 组长已被别处回收：只有身份仍匹配才敢按组发信号。
+        # Leader already reaped elsewhere: only signal the group when the
+        # identity still matches.
         if expected_start is None or proc_start_time(pgid) != expected_start:
             print(
-                f"⚠️  devproxy: 进程组 {pgid} 的组长已被回收、身份无法核实，"
-                "跳过按组清理（孙进程可能残留）",
+                f"⚠️  devproxy: leader of process group {pgid} was reaped and "
+                "its identity cannot be verified; skipping group cleanup "
+                "(grandchildren may remain)",
                 file=sys.stderr,
             )
             return
@@ -283,14 +314,16 @@ def stop_process_group(
             pass
         return
 
-    # 组长未被回收（活着或僵尸）→ pid 不可能被复用，按组发信号是安全的。
+    # Leader not reaped (alive or zombie) -> the pid cannot be reused, so
+    # signaling the group is safe.
     try:
         os.killpg(pgid, sig)
     except (ProcessLookupError, PermissionError):
         pass
 
     if _wait_exit_unreaped(proc, 5):
-        # 组长已退出但仍是僵尸，pgid 仍被钉住：补一刀清理组内孙进程。
+        # Leader has exited but is still a zombie and the pgid is still
+        # pinned: send one more signal to clear grandchildren in the group.
         try:
             os.killpg(pgid, signal.SIGKILL)
         except (ProcessLookupError, PermissionError):
@@ -302,7 +335,8 @@ def stop_process_group(
 
 
 def _wait_group_gone(pid: int, expected_start: str, timeout: float) -> bool:
-    """轮询到 pid 不再是「运行中的进程」（含僵尸）或身份已变。"""
+    """Poll until the pid is no longer a "running process" (zombies included)
+    or its identity changed."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if not _pid_is_running(pid):
@@ -314,41 +348,47 @@ def _wait_group_gone(pid: int, expected_start: str, timeout: float) -> bool:
 
 
 def kill_pid_group(pid: int, proc_start: str | None = None, timeout: float = 5.0) -> bool:
-    """按进程组杀掉残留的上一次 up 子进程（pid == pgid）。
+    """Kill a leftover child from the previous up by process group
+    (pid == pgid).
 
-    routes.json 会跨重启存活，pid 会被 OS 回收复用 —— 只有当前进程的
-    启动时刻与注册时记录的一致才发信号；身份对不上或无法核实时宁可
-    留下残留进程也不误杀无辜进程组（up 自己的 finally 仍按直接句柄
-    清理自己的孩子）。
+    routes.json survives restarts and pids are recycled by the OS -- signal
+    only when the current process start time matches what was recorded at
+    registration; if the identity does not match or cannot be verified,
+    prefer leaving a stray process over killing an innocent process group
+    (up's own finally still cleans up its children through the direct
+    handle).
 
-    先 SIGTERM，有界等待后仍未退出再 SIGKILL —— 与 stop_process_group
-    的策略一致，也保证返回时监听端口已经释放。返回是否真的向已核实的
-    进程组发出过信号。
+    SIGTERM first, then SIGKILL if it still has not exited after a bounded
+    wait -- consistent with stop_process_group's policy, and it guarantees
+    the listening port is released on return. Returns whether a signal was
+    actually sent to a verified process group.
     """
     current = proc_start_time(pid)
     if current is None:
-        return False  # 进程已不在，无从下手
+        return False  # process no longer exists; nothing to do
     if proc_start is None:
         print(
-            f"⚠️  无法核实进程 {pid} 的身份（路由表缺少 proc_start），跳过清理",
+            f"⚠️  cannot verify the identity of process {pid} "
+            "(route table is missing proc_start); skipping cleanup",
             file=sys.stderr,
         )
         return False
     if proc_start != current:
         print(
-            f"⚠️  进程 {pid} 已被复用（记录的启动时刻与当前不符），跳过清理",
+            f"⚠️  pid {pid} was reused "
+            "(recorded start time does not match the current one); skipping cleanup",
             file=sys.stderr,
         )
         return False
     if not _pid_is_running(pid):
-        return False  # 只剩僵尸，端口已释放
+        return False  # only a zombie remains; the port is already released
     try:
         os.killpg(pid, signal.SIGTERM)
     except (ProcessLookupError, PermissionError):
         return False
     if _wait_group_gone(pid, proc_start, timeout):
         return True
-    # SIGTERM 超时且身份仍然匹配 → 升级 SIGKILL
+    # SIGTERM timed out and the identity still matches -> escalate to SIGKILL
     if proc_start_time(pid) != proc_start or not _pid_is_running(pid):
         return True
     try:
@@ -360,11 +400,13 @@ def kill_pid_group(pid: int, proc_start: str | None = None, timeout: float = 5.0
 
 
 def proc_start_time(pid: int) -> str | None:
-    """读取进程「身份」：/proc/<pid>/stat 第 22 字段（启动时刻，clock ticks）。
+    """Read the process "identity": /proc/<pid>/stat field 22 (start time,
+    clock ticks).
 
-    pid 会被 OS 回收复用，单看 pid 无法断定还是不是当初那个进程 ——
-    启动时刻是检测 pid 复用的标准做法。没有 /proc 的平台（macOS）
-    退回 `ps -o lstart=`。两者都拿不到时返回 None（= 无法核实）。
+    Pids are recycled by the OS, and the pid alone cannot tell whether it is
+    still the original process -- the start time is the standard way to
+    detect pid reuse. On platforms without /proc (macOS) fall back to
+    `ps -o lstart=`. Return None when neither works (= cannot verify).
     """
     try:
         stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
@@ -379,8 +421,9 @@ def proc_start_time(pid: int) -> str | None:
         except (OSError, subprocess.SubprocessError):
             return None
         return proc.stdout.strip() or None
-    # 第 2 字段 comm 带括号且可能含空格 —— 只能在最后一个 ')' 之后切分；
-    # 切完后第一个字段是第 3 字段 state，第 22 字段 starttime 位于索引 19
+    # Field 2, comm, is parenthesized and may contain spaces -- split only
+    # after the last ')'. After the split the first field is field 3 state,
+    # and field 22 starttime is at index 19.
     fields = stat.rsplit(")", 1)[1].split()
     if len(fields) <= 19:
         return None
@@ -388,7 +431,8 @@ def proc_start_time(pid: int) -> str | None:
 
 
 def _same_owner(current: Route, expected: Route) -> bool:
-    """同名路由的归属判断：name 相同不够，pid/port 也必须一致。"""
+    """Ownership check for same-named routes: matching name is not enough;
+    pid/port must match too."""
     return (
         current.name == expected.name
         and current.pid == expected.pid
@@ -412,10 +456,13 @@ class UpRunner:
         ready_timeout: int | None = None,
         on_ready: Callable[[str, int], None] | None = None,
     ) -> int:
-        """兼容 CLI 的入口；真正的编排在 `_execute`。
+        """CLI-compatible entry point; the real orchestration lives in
+        `_execute`.
 
-        参数签名暂时保留（cli/up.py 直接按位置/关键字调用），内部统一
-        收敛成 UpRequest，后续新增选项不必再扩散到编排逻辑里。
+        The parameter signature is kept for now (cli/up.py calls it
+        positionally/by keyword); internally everything is consolidated into
+        UpRequest so new options need not spread into the orchestration
+        logic.
         """
         return self.run_request(
             UpRequest(
@@ -428,11 +475,13 @@ class UpRunner:
         )
 
     def run_request(self, req: UpRequest) -> int:
-        """按 UpRequest 执行一次 up —— 编排的唯一入口。
+        """Execute one up from an UpRequest -- the single orchestration entry
+        point.
 
-        `run()` 只是把位置参数收敛成 UpRequest 后的薄封装；需要 cwd /
-        source 这类附加信息的调用方（devproxy up 的后台工作进程）
-        直接构造 UpRequest 调这里。
+        `run()` is only a thin wrapper that consolidates positional
+        parameters into an UpRequest; callers that need extra information
+        such as cwd / source (the background worker of `devproxy up`)
+        construct an UpRequest directly and call this.
         """
         return self._execute(req)
 
@@ -440,10 +489,10 @@ class UpRunner:
         self._validate_request(req)
         if not self.admin.is_alive():
             raise PreconditionError(
-                "Caddy 未运行（Admin API 不可达），请先执行 devproxy setup 或启动 Caddy"
+                "Caddy is not running (Admin API unreachable); run devproxy setup first or start Caddy"
             )
 
-        # 同名路由先清理（旧子进程一并收掉）
+        # Clean up any same-named route first (taking down the old child too)
         self._reclaim_existing(req.name)
         port = self._choose_port(req.port)
 
@@ -458,9 +507,11 @@ class UpRunner:
             self._wait_ready(proc, port, self._timeout(req))
 
             route = self._make_route(req, port, child)
-            # 先置位再注册：信号可能在 mutate（validate+reload，秒级窗口）内部
-            # 落下并抛 SystemExit，此时 finally 仍要尝试注销，不能留下指向死
-            # 端口的路由；条件删除保证不会误删同名的新路由。
+            # Set the flag before registering: a signal may arrive inside
+            # mutate (validate+reload, a window of seconds) and raise
+            # SystemExit, in which case finally must still try to deregister
+            # so no route points at a dead port; conditional removal ensures
+            # a new same-named route is not deleted by mistake.
             registered = True
             self.store.mutate(lambda t: t.upsert(route))
             watcher = threading.Thread(target=self._watch, args=(route, stop), daemon=True)
@@ -470,8 +521,9 @@ class UpRunner:
             rc = _wait_leader(proc)
         finally:
             stop.set()
-            # 先杀进程组再 join/注销：缩短清理窗口，也避免 watcher 在子进程
-            # 死后仍把路由补写回去。
+            # Kill the process group before join/deregister: this shortens
+            # the cleanup window and prevents the watcher from writing the
+            # route back after the child dies.
             stop_process_group(child.proc, child.pgid, expected_start=child.start)
             if watcher is not None:
                 watcher.join(timeout=10)
@@ -479,7 +531,8 @@ class UpRunner:
                 self._deregister(route)
             for s, handler in old_handlers.items():
                 signal.signal(s, handler)
-        # 被信号杀死时 wait() 返回 -n；映射成 shell 约定的 128+n
+        # When killed by a signal wait() returns -n; map it to the shell
+        # convention 128+n
         return 128 - rc if rc < 0 else rc
 
     def _validate_request(self, req: UpRequest) -> None:
@@ -488,17 +541,20 @@ class UpRunner:
         except ValueError as e:
             raise UpError(str(e)) from e
         if req.port is not None and not (1 <= req.port <= 65535):
-            raise UpError(f"非法端口 {req.port}：必须在 1..65535 之间")
+            raise UpError(f"invalid port {req.port}: must be between 1 and 65535")
 
     def _timeout(self, req: UpRequest) -> int:
         return req.ready_timeout if req.ready_timeout is not None else self.config.ready_timeout
 
     def _reclaim_existing(self, name: str) -> None:
-        """注销同名旧路由并杀掉旧子进程。
+        """Unregister the old same-named route and kill the old child.
 
-        「读旧路由 + 删除」必须在同一个 mutate 回调里完成（持 flock），
-        否则并发 up/down 可以在检查与写入之间插入，删掉对方的活路由。
-        旧路由通过闭包容器带出锁外，杀进程放在锁外做（可能耗时数秒）。
+        "Read old route + remove" must happen in the same mutate callback
+        (holding flock), otherwise a concurrent up/down can slip in between
+        the check and the write and delete the other's live route. The old
+        route is carried out of the lock through a closure container, and
+        killing the process happens outside the lock (it may take several
+        seconds).
         """
         if self.store.get(name) is None:
             return
@@ -520,30 +576,35 @@ class UpRunner:
     def _choose_port(self, explicit: int | None) -> int:
         if explicit is None:
             return alloc_port()
-        # 旧进程已在 _reclaim_existing 里等死（kill_pid_group 返回时端口
-        # 已释放），这里再探测才是可靠的「真的被别的服务占着」。
+        # The old process has already been waited out in _reclaim_existing
+        # (kill_pid_group returns only after the port is released); probing
+        # here is what reliably answers "is another service really holding
+        # it".
         if reachable(explicit, timeout=0.2):
-            raise UpError(f"端口 {explicit} 已被占用")
+            raise UpError(f"port {explicit} is already in use")
         return explicit
 
     def _spawn(self, req: UpRequest, port: int, child: _ChildHandle) -> subprocess.Popen:
         env = dict(os.environ, PORT=str(port))
         try:
-            # cwd=None 时与从前完全一致（继承当前工作目录）；
-            # 给了 cwd 就把子进程放进那个目录（项目根目录）。
+            # cwd=None behaves exactly as before (inherit the current working
+            # directory); when cwd is set, place the child in that directory
+            # (the project root).
             extra: dict[str, Any] = {}
             if req.log_path is not None:
-                # 收进管道：devproxy 自己写日志文件，才能在运行中轮转。
-                # 代价是多一个泵线程 —— 它必须**一直把管道读空**，
-                # 否则子进程写满管道缓冲区后会卡死。
+                # Capture into a pipe: devproxy writes the log file itself so
+                # it can rotate at runtime. The cost is an extra pump thread
+                # -- it **must keep draining the pipe** or the child will
+                # hang once the pipe buffer fills.
                 extra = {"stdout": subprocess.PIPE, "stderr": subprocess.STDOUT}
             proc = subprocess.Popen(req.cmd, env=env, cwd=req.cwd, start_new_session=True, **extra)
         except OSError as e:
-            # 覆盖 FileNotFoundError / PermissionError / Exec format error：
-            # 都映射成 UpError，CLI 才会给出格式化错误而不是裸 traceback。
-            raise UpError(f"无法启动命令 {req.cmd[0]!r}: {e}") from e
+            # Covers FileNotFoundError / PermissionError / Exec format error:
+            # all map to UpError so the CLI prints a formatted error instead
+            # of a raw traceback.
+            raise UpError(f"cannot start command {req.cmd[0]!r}: {e}") from e
         child.proc = proc
-        child.pgid = proc.pid  # start_new_session=True → 子进程是进程组 leader
+        child.pgid = proc.pid  # start_new_session=True -> child is process group leader
         child.start = proc_start_time(proc.pid)
         if req.log_path is not None and proc.stdout is not None:
             _start_log_pump(proc.stdout, req.log_path)
@@ -554,16 +615,19 @@ class UpRunner:
         while time.time() < deadline:
             status = _leader_status(proc)
             if status is not None:
-                raise UpError(f"子进程先退出（code={status}），未注册")
+                raise UpError(f"child exited first (code={status}); not registered")
             if reachable(port, timeout=1):
                 return
             time.sleep(0.3)
-        raise UpError(f"就绪超时（{timeout}s）——应用可能未使用 $PORT，可用 --port 显式指定")
+        raise UpError(
+            f"ready timeout ({timeout}s) -- the app may not be using $PORT; "
+            "specify one explicitly with --port"
+        )
 
     def _make_route(self, req: UpRequest, port: int, child: _ChildHandle) -> Route:
         proc = child.proc
-        if proc is None:  # pragma: no cover - _spawn 成功后才调用
-            raise UpError("内部错误：子进程尚未启动")
+        if proc is None:  # pragma: no cover - only called after _spawn succeeds
+            raise UpError("internal error: child process has not started")
         return Route(
             name=req.name,
             domain=domain_for(req.name, self.config.domain_suffix),
@@ -578,7 +642,8 @@ class UpRunner:
         )
 
     def _deregister(self, route: Route) -> None:
-        """注销本进程注册的那条路由 —— 同名的新路由不得被误删。"""
+        """Deregister the route this process registered -- a new same-named
+        route must not be deleted by mistake."""
 
         def apply(t: RouteTable) -> None:
             current = t.get(route.name)
@@ -588,9 +653,11 @@ class UpRunner:
         try:
             self.store.mutate(apply)
         except Exception:
-            # 静默吞掉会让残留路由指向已被杀死的子进程 —— 必须提示用户
+            # Swallowing it silently would leave a stale route pointing at a
+            # killed child -- the user must be told
             print(
-                f"⚠️  devproxy: 注销失败，残留路由请执行 devproxy down {route.name}",
+                f"⚠️  devproxy: deregistration failed; to remove the stale route "
+                f"run devproxy down {route.name}",
                 file=sys.stderr,
             )
 
@@ -598,7 +665,8 @@ class UpRunner:
         self, stop: threading.Event, child: _ChildHandle
     ) -> dict[int, signal.Handlers | Callable[[int, FrameType | None], Any] | int | None]:
         def on_signal(signum, frame):
-            # 清理期间收到第二个信号时直接忽略，避免中断 finally 留下残留
+            # Ignore a second signal during cleanup so finally is not
+            # interrupted and leaves stragglers
             if stop.is_set():
                 return
             stop.set()
@@ -615,17 +683,23 @@ class UpRunner:
         }
 
     def _watch(self, route: Route, stop: threading.Event) -> None:
-        """每 heartbeat_interval 秒确认路由还在 Caddy 里。
+        """Every heartbeat_interval seconds, confirm the route is still in
+        Caddy.
 
-        路由是文件化的，正常情况下 Caddy 重启会自动加载；这个自检兜住
-        "Caddy 是用别的配置启动的" 与 "有人手改了渲染产物" 两种情况。
-        「路由表里还有没有它」的检查必须放在 mutate 回调里、与写回同一把
-        flock 之下 —— 检查在锁外的话，down 可以恰好插在检查与写回之间，
-        把刚注销的路由复活成指向死端口的条目。
+        Routes are file-based, and normally a Caddy restart loads them
+        automatically; this self-check covers "Caddy was started with a
+        different config" and "someone edited the rendered output by hand".
+        The check for "is it still in the route table" must live inside the
+        mutate callback, under the same flock as the write-back -- if the
+        check were outside the lock, down could slip in exactly between the
+        check and the write-back and resurrect a just-unregistered route as
+        an entry pointing at a dead port.
 
-        失败不能被无声吞掉：Caddy reload 持续失败时用户必须知道，否则
-        路由 404/502 而 `devproxy list` 仍显示一切正常。相同的错误只报
-        一次（按错误文本去重），未知异常记录后让线程结束。
+        Failures must not be swallowed silently: when Caddy reload keeps
+        failing the user has to know, otherwise routes return 404/502 while
+        `devproxy list` still shows everything is fine. The same error is
+        reported only once (deduplicated by error text); an unknown exception
+        is logged and then ends the thread.
         """
         last_error: str | None = None
         while not stop.wait(self.heartbeat_interval):
@@ -636,29 +710,33 @@ class UpRunner:
                 def apply(t: RouteTable) -> None:
                     current = t.get(route.name)
                     if current is None:
-                        raise _RouteGone  # 用户已注销 —— 不复活
+                        raise _RouteGone  # user already unregistered -- do not resurrect
                     if not _same_owner(current, route):
-                        raise _RouteGone  # 已被同名的新 up 接管 —— 旧心跳不得覆盖
+                        raise _RouteGone  # new same-named up took over -- old heartbeat must not overwrite
 
                     t.upsert(route)
 
-                # 异常从回调里抛出会先于渲染/落盘/reload 穿出 mutate，
-                # 事务什么都不写就结束 —— 既不复活路由，也不空转 reload
+                # An exception raised from the callback escapes mutate before
+                # render/write/reload, so the transaction ends without writing
+                # anything -- it neither resurrects the route nor wastes a
+                # reload
                 try:
                     self.store.mutate(apply)
                 except _RouteGone:
-                    return  # 路由已不存在，线程结束
+                    return  # route no longer exists; end the thread
             except (RouteStoreError, RouteTableError, CaddyError, OSError) as e:
                 message = f"{type(e).__name__}: {e}"
                 if message != last_error:
                     print(
-                        f"⚠️  devproxy: 路由 {route.name} 心跳失败（将继续重试）：{message}",
+                        f"⚠️  devproxy: heartbeat failed for route {route.name} "
+                        f"(will keep retrying): {message}",
                         file=sys.stderr,
                     )
                     last_error = message
-            except Exception as e:  # noqa: BLE001 - 未知异常不能杀死守护线程而无声
+            except Exception as e:  # noqa: BLE001 - an unknown exception must not kill the daemon thread silently
                 print(
-                    f"⚠️  devproxy: 路由 {route.name} 心跳异常，已停止：{e}",
+                    f"⚠️  devproxy: heartbeat for route {route.name} hit an "
+                    f"unexpected exception; stopping: {e}",
                     file=sys.stderr,
                 )
                 return

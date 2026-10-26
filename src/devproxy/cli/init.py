@@ -1,6 +1,6 @@
-"""init 命令：在项目里生成一份 devproxy.toml。
+"""The init command: generate a devproxy.toml in the project.
 
-只做交互与退出码 —— 生成逻辑在 `gateway.project`。
+Only interaction and exit codes live here -- generation is in `gateway.project`.
 """
 
 from __future__ import annotations
@@ -29,23 +29,29 @@ from devproxy.gateway.routes import load_table
 
 @app.command()
 def init(
-    name: str = typer.Option(None, "--name", help="路由名（默认取项目目录名）"),
+    name: str = typer.Option(
+        None, "--name", help="Route name (defaults to the project directory name)"
+    ),
     command: str = typer.Option(
-        None, "--command", help='启动命令，如 "npm run dev"（不写则按项目类型猜）'
+        None,
+        "--command",
+        help='Start command, e.g. "npm run dev" (guessed from the project type if omitted)',
     ),
     from_route: str = typer.Option(
         None,
         "--from",
-        help="从已注册的同名路由导入它的启动命令（路由表是全局的，所以要指名）",
+        help="Import the start command from an already-registered route of this name "
+        "(the route table is global, so the name must be given)",
     ),
-    force: bool = typer.Option(False, "--force", help="覆盖已存在的 devproxy.toml"),
+    force: bool = typer.Option(False, "--force", help="Overwrite an existing devproxy.toml"),
 ) -> None:
-    """在项目里生成 devproxy.toml。"""
+    """Generate a devproxy.toml in this project."""
     root = detect_project_root()
     target = root / PROJECT_FILE_NAME
     if target.exists() and not force:
         s.fail(
-            f"{target} 已存在。要覆盖请加 --force（覆盖前建议先看一眼现有内容）",
+            f"{target} already exists. Pass --force to overwrite "
+            "(take a look at the current contents first)",
             EXIT_USAGE,
         )
 
@@ -53,7 +59,7 @@ def init(
     try:
         validate_name(route_name)
     except InvalidNameError as e:
-        s.fail(f"非法路由名 {route_name!r}：{e}", EXIT_USAGE)
+        s.fail(f"invalid route name {route_name!r}: {e}", EXIT_USAGE)
 
     argv, notes = _resolve_command(root, command, from_route)
 
@@ -64,60 +70,63 @@ def init(
     try:
         target.write_text(content, encoding="utf-8")
     except OSError as e:
-        s.fail(f"写入 {target} 失败: {e}", EXIT_FAIL)
+        s.fail(f"failed to write {target}: {e}", EXIT_FAIL)
 
-    s.console.print(f"✔ 已生成 {target}")
-    s.console.print(f"  路由名: {route_name}  →  https://{route_name}.<后缀>")
+    s.console.print(f"✔ Generated {target}")
+    s.console.print(f"  Route name: {route_name}  →  https://{route_name}.<suffix>")
     if argv:
-        s.console.print(f"  启动命令: {' '.join(argv)}")
+        s.console.print(f"  Start command: {' '.join(argv)}")
     else:
-        s.console.print("  启动命令: （空）—— 请填上实际命令")
+        s.console.print("  Start command: (empty) -- fill in the real command")
     for note in notes:
         s.console.print(f"  {note}")
     s.console.print("")
-    s.console.print("下一步：")
-    s.console.print("  1. 检查上面的启动命令对不对（多半要改）")
-    s.console.print("  2. devproxy setup    # 只需一次：装 Caddy、写 DNS 路由、装 CA 信任")
-    s.console.print("  3. devproxy up        # 起服务")
+    s.console.print("Next steps:")
+    s.console.print("  1. Check that the start command above is right (usually it needs editing)")
+    s.console.print("  2. devproxy setup    # once: installs Caddy, the DNS route, and CA trust")
+    s.console.print("  3. devproxy up       # start the service")
     raise typer.Exit(EXIT_OK)
 
 
 def _resolve_command(
     root: Path, command: str | None, from_route: str | None
 ) -> tuple[list[str], list[str]]:
-    """决定 command 怎么来，并给出要写进文件注释里的提示。
+    """Decide where the command comes from, plus the notes to write into the file.
 
-    优先级：显式 --command > --from（导入已有路由）> 按项目类型猜。
+    Priority: an explicit --command > --from (import an existing route) > guess from the
+    project type.
     """
     if command:
-        # --command 是给人敲的一行 —— 按 shell 的词法拆（引号、空格都认）。
+        # --command is a line a human types -- split it with shell rules (quotes and
+        # spaces are both honoured)
         import shlex
 
         try:
             argv = shlex.split(command)
         except ValueError as e:
-            s.fail(f"--command 解析失败: {e}", EXIT_USAGE)
+            s.fail(f"failed to parse --command: {e}", EXIT_USAGE)
         if not argv:
-            s.fail("--command 不能为空", EXIT_USAGE)
+            s.fail("--command must not be empty", EXIT_USAGE)
         return argv, []
 
     if from_route:
         imported, error = _import_command(from_route)
         if error:
             s.fail(error, EXIT_USAGE)
-        return imported or [], [f"启动命令是从已注册的路由 {from_route} 导入的"]
+        return imported or [], [f"start command imported from the registered route {from_route}"]
 
     suggested, reason = suggest_command(root)
     if suggested is None:
         return [], [f"{reason}"]
-    return suggested, [f"{reason} —— 请确认它就是你要的启动命令"]
+    return suggested, [f"{reason} -- confirm this is the start command you want"]
 
 
 def _import_command(route_name: str) -> tuple[list[str] | None, str]:
-    """从全局路由表里取一条路由的启动命令。
+    """Read a route's start command out of the global route table.
 
-    路由表是**全局**的（所有项目的路由都在一张表里），所以只能按名字精确取 ——
-    不做「把当前所有路由都导进来」这种事，那会把别的项目的路由也写进文件。
+    The route table is **global** (every project's routes live in one table), so this
+    can only look a route up by exact name -- importing "all current routes" would drag
+    other projects' routes into this file.
     """
     paths, _, _, _ = s.build_context()
     try:
@@ -126,8 +135,10 @@ def _import_command(route_name: str) -> tuple[list[str] | None, str]:
         return None, str(e)
     route = table.get(route_name)
     if route is None:
-        known = "、".join(sorted(r.name for r in table.routes)) or "（路由表是空的）"
-        return None, f"路由表里没有 {route_name!r}。已注册的路由：{known}"
+        known = ", ".join(sorted(r.name for r in table.routes)) or "(the route table is empty)"
+        return None, f"the route table has no {route_name!r}. Registered routes: {known}"
     if not route.command:
-        return None, (f"路由 {route_name!r} 没有启动命令（expose 模式的路由只记上游端口）")
+        return None, (
+            f"route {route_name!r} has no start command (expose-mode routes only carry an upstream port)"
+        )
     return list(route.command), ""

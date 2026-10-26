@@ -1,3 +1,3 @@
-"""devproxy — 本地开发环境一键部署与域名网关。"""
+"""devproxy -- one-command local dev environment and domain gateway."""
 
 __version__ = "0.1.0"

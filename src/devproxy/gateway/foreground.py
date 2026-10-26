@@ -1,17 +1,23 @@
-"""前台托管 Caddy：起进程、接管信号、干净收尾。
+"""Foreground supervision of Caddy: start the process, take over signals, and
+clean up.
 
-分工：
-- `setup` 装的是**后台服务**（systemd / launchd，开机自启）；
-- `selftest` 起的是**隔离实例**（临时端口、临时 storage、跑完即删）；
-- 本模块跑的是**现役配置**（主 Caddyfile），而且**在前台** —— 用户要的
-  是实时日志与「Ctrl-C 即撤、不留痕迹」。
+Division of labor:
+- `setup` installs a **background service** (systemd / launchd, starts on boot);
+- `selftest` starts an **isolated instance** (temporary ports, temporary
+  storage, removed when done);
+- this module runs the **live config** (the main Caddyfile), and does so
+  **in the foreground** -- the user wants live logs and "Ctrl-C removes it,
+  leaving no trace".
 
-前台模式的意义就在 stdio 直通终端：不重定向，Caddy 的日志实时打在终端上
-（`selftest` 那种重定向到文件的做法在这里是反效果）。
+The point of foreground mode is stdio passed straight to the terminal: no
+redirection, so Caddy's logs appear live in the terminal (the
+redirect-to-file approach used by `selftest` is counterproductive here).
 
-信号模型：子进程以 `start_new_session=True` 启动 —— 它自成一个会话与进程组，
-终端里的 Ctrl-C **不会**打到 Caddy 身上，只打到 devproxy。于是收尾的节奏
-由我们决定：SIGTERM 让 Caddy 优雅退出（写完 autosave），超时才升级 SIGKILL。
+Signal model: the child starts with `start_new_session=True` -- it forms its
+own session and process group, so Ctrl-C in the terminal does **not** reach
+Caddy, only devproxy. The shutdown pace is therefore ours to decide: SIGTERM
+lets Caddy exit gracefully (finishing its autosave), and only on timeout do
+we escalate to SIGKILL.
 """
 
 from __future__ import annotations
@@ -23,22 +29,26 @@ import sys
 import time
 from pathlib import Path
 
-# 退出码约定与 cli/_runtime.py 一致；gateway 层不反向依赖 cli 层。
+# Exit codes match cli/_runtime.py; the gateway layer must not depend on the
+# CLI layer.
 EXIT_OK = 0
 EXIT_FAIL = 1
 
-# SIGTERM 之后留给 Caddy 优雅退出的时间（秒）；超时才升级到 SIGKILL。
+# Time (seconds) given to Caddy to exit gracefully after SIGTERM; only on
+# timeout do we escalate to SIGKILL.
 GRACEFUL_TIMEOUT = 10.0
 
-# SIGKILL 之后仍不退出时的最后期限（进程卡在 D 状态等极端情况）。
+# Final deadline when it still does not exit after SIGKILL (process stuck in
+# D state and similar extremes).
 KILL_GRACE = 2.0
 
-# 轮询间隔：短轮询才能及时察觉「Caddy 退出」与「优雅退出超时」。
+# Poll interval: frequent polling is needed to notice "Caddy exited" and
+# "graceful exit timed out" promptly.
 POLL_INTERVAL = 0.2
 
 
 class _Managed:
-    """被托管的 Caddy 进程及其信号状态。"""
+    """The supervised Caddy process and its signal state."""
 
     def __init__(self) -> None:
         self.proc: subprocess.Popen | None = None
@@ -46,27 +56,31 @@ class _Managed:
         self._term_sent = False
 
     def attach(self, proc: subprocess.Popen) -> None:
-        """绑定子进程。信号可能落在「已装处理器、还没起进程」的窗口里 ——
-        那时补一次转发，别让 Caddy 漏掉这次收尾。"""
+        """Attach the child process. A signal may arrive in the window between
+        "handlers installed" and "process started" -- forward it now so Caddy
+        does not miss this shutdown."""
         self.proc = proc
         if self.signum is not None:
             self.request_stop()
 
     def request_stop(self) -> None:
-        """请 Caddy 优雅退出：向**进程组**发一次 SIGTERM（只发一次）。"""
+        """Ask Caddy to exit gracefully: send one SIGTERM to the **process
+        group** (only once)."""
         if self._term_sent or self.proc is None:
             return
         self._term_sent = True
         self._signal_group(signal.SIGTERM)
 
     def force_stop(self) -> None:
-        """优雅退出超时 → SIGKILL 整个进程组（孙进程也不留）。"""
+        """Graceful exit timed out -> SIGKILL the whole process group (leaving
+        no grandchildren either)."""
         self._signal_group(signal.SIGKILL)
 
     def _signal_group(self, sig: int) -> None:
-        # start_new_session=True → 子进程是会话与进程组的组长，pgid == pid。
-        # 只有在子进程尚未被回收时才会走到这里（回收后 pid 可能被复用），
-        # 所以按组发信号不会误伤无关进程组。
+        # start_new_session=True -> the child is the session and process group
+        # leader, so pgid == pid. We only get here while the child has not
+        # been reaped (after reaping the pid may be reused), so signaling the
+        # group cannot hit an unrelated process group.
         if self.proc is None:
             return
         try:
@@ -76,9 +90,10 @@ class _Managed:
 
 
 def _handler(managed: _Managed):
-    """信号处理函数：记录信号并请 Caddy 优雅退出。
+    """Signal handler: record the signal and ask Caddy to exit gracefully.
 
-    刻意**不抛异常** —— 抛出去会打断下面的等待循环，反而来不及收尾。
+    Deliberately does **not** raise -- raising would interrupt the wait loop
+    below and leave no time to clean up.
     """
 
     def on_signal(signum, frame):
@@ -89,17 +104,19 @@ def _handler(managed: _Managed):
 
 
 def _install_handlers(managed: _Managed) -> dict[int, object]:
-    """接管 SIGINT / SIGTERM / SIGHUP。
+    """Take over SIGINT / SIGTERM / SIGHUP.
 
-    终端的 Ctrl-C 只送到前台进程组（devproxy 自己），Caddy 在另一个会话里
-    收不到 —— 收尾的节奏因此完全由我们掌控。
+    A terminal Ctrl-C is sent only to the foreground process group (devproxy
+    itself), and Caddy in its own session does not receive it -- so the
+    shutdown pace is entirely under our control.
     """
     old: dict[int, object] = {}
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         try:
             old[sig] = signal.signal(sig, _handler(managed))
         except ValueError:
-            # 非主线程装不了信号处理器（CLI 不会走到；嵌入/测试可能）
+            # Signal handlers cannot be installed from a non-main thread (the
+            # CLI won't hit this; embedding/tests might)
             pass
     return old
 
@@ -113,12 +130,13 @@ def _restore_handlers(old: dict[int, object]) -> None:
 
 
 def _supervise(managed: _Managed, graceful_timeout: float) -> int | None:
-    """等 Caddy 退出；期间收到信号则优雅收尾，超时升级 SIGKILL。
+    """Wait for Caddy to exit; on a signal, shut down gracefully and escalate
+    to SIGKILL on timeout.
 
-    返回 Caddy 的退出码；None 表示「连 SIGKILL 都没能让它退出」。
+    Return Caddy's exit code; None means "even SIGKILL could not make it exit".
     """
     proc = managed.proc
-    if proc is None:  # pragma: no cover —— 只有 attach 之后才会调用
+    if proc is None:  # pragma: no cover -- only called after attach
         return None
     deadline: float | None = None
     killed = False
@@ -131,14 +149,16 @@ def _supervise(managed: _Managed, graceful_timeout: float) -> int | None:
             continue
         now = time.monotonic()
         if deadline is None:
-            # 刚收到信号：给 Caddy 优雅退出的时间（它要写 autosave）
+            # Signal just received: give Caddy time for a graceful exit (it
+            # needs to write autosave)
             deadline = now + graceful_timeout
             continue
         if now < deadline:
             continue
         if killed:
-            # SIGKILL 之后还不退出（卡在 D 状态等极端情况）：再等也等不到，
-            # 不能让终端永远回不来。
+            # Still not exiting after SIGKILL (stuck in D state and similar
+            # extremes): waiting longer will not help, and the terminal must
+            # not be stuck forever.
             return None
         killed = True
         managed.force_stop()
@@ -146,10 +166,12 @@ def _supervise(managed: _Managed, graceful_timeout: float) -> int | None:
 
 
 def _ensure_gone(managed: _Managed) -> None:
-    """兜底：Caddy 绝不能被留在后台。
+    """Fallback: Caddy must never be left running in the background.
 
-    正常路径上它早就退出了；这里只防异常路径（抛异常、没等到退出）——
-    前台模式的承诺是「Ctrl-C 即撤，不留痕迹」，留个野进程就破了。
+    On the normal path it has already exited; this only guards the
+    exceptional paths (an exception was raised, or we did not wait for exit)
+    -- foreground mode promises "Ctrl-C removes it, leaving no trace", and a
+    stray process would break that promise.
     """
     proc = managed.proc
     if proc is None or proc.poll() is not None:
@@ -162,10 +184,10 @@ def _ensure_gone(managed: _Managed) -> None:
 
 
 def _describe_exit(rc: int) -> str:
-    """把子进程的退出状态说成人话。"""
+    """Describe the child's exit status in plain words."""
     if rc < 0:
-        return f"被信号 {-rc} 终止"
-    return f"退出码 {rc}"
+        return f"terminated by signal {-rc}"
+    return f"exit code {rc}"
 
 
 def run_foreground(
@@ -173,24 +195,29 @@ def run_foreground(
     caddyfile: Path,
     graceful_timeout: float = GRACEFUL_TIMEOUT,
 ) -> int:
-    """前台运行 `caddy run --config <caddyfile>`，返回 devproxy 的退出码。
+    """Run `caddy run --config <caddyfile>` in the foreground and return
+    devproxy's exit code.
 
-    - 0：Caddy 被 Ctrl-C 收掉（已优雅退出，状态写完）
-    - 1：Caddy 自己退出了（已报告它的退出码），或根本起不来
+    - 0: Caddy was shut down by Ctrl-C (graceful exit, state written)
+    - 1: Caddy exited on its own (its exit code was reported), or failed to
+      start
 
-    全程不写任何系统状态：不装服务、不改配置、不动路由表。
+    Nothing on the system is written: no services installed, no config
+    changed, no route table touched.
     """
     managed = _Managed()
     old = _install_handlers(managed)
     try:
         argv = [str(caddy_bin), "run", "--config", str(caddyfile)]
         try:
-            # stdio 不重定向：继承终端 —— 前台模式的意义就在这里。
-            # start_new_session=True：Caddy 自成进程组，Ctrl-C 不会直接打到它。
+            # Do not redirect stdio: inherit the terminal -- that is the point
+            # of foreground mode. start_new_session=True: Caddy forms its own
+            # process group, so Ctrl-C does not reach it directly.
             proc = subprocess.Popen(argv, start_new_session=True)
         except OSError as e:
-            # 文件缺失 / 不可执行 / 格式不对（Exec format error）都归到这里
-            print(f"devproxy: 无法启动 caddy: {e}", file=sys.stderr)
+            # Missing file / not executable / bad format (Exec format error)
+            # all land here
+            print(f"devproxy: cannot start caddy: {e}", file=sys.stderr)
             return EXIT_FAIL
         managed.attach(proc)
         rc = _supervise(managed, graceful_timeout)
@@ -199,11 +226,13 @@ def run_foreground(
         _restore_handlers(old)
 
     if rc is None:
-        # 连 SIGKILL 都没能让它退出 —— 不能当成「正常收掉了」
-        print("devproxy: caddy 未能退出，已放弃等待", file=sys.stderr)
+        # Even SIGKILL could not make it exit -- must not be treated as
+        # "shut down normally"
+        print("devproxy: caddy did not exit, gave up waiting", file=sys.stderr)
         return EXIT_FAIL
     if managed.signum is not None:
-        # 用户主动收的：Caddy 已退出（优雅退出时 autosave 也写完了）
+        # Stopped by the user: Caddy has exited (autosave finished during
+        # graceful exit)
         return EXIT_OK
-    print(f"devproxy: caddy 已退出（{_describe_exit(rc)}）", file=sys.stderr)
+    print(f"devproxy: caddy exited ({_describe_exit(rc)})", file=sys.stderr)
     return EXIT_FAIL

@@ -1,4 +1,4 @@
-"""Typer 参数切分组：把 `--` 之后的参数原样交给子命令。"""
+"""Typer parameter-splitting group: hand everything after `--` to the subcommand."""
 
 from __future__ import annotations
 
@@ -6,11 +6,12 @@ from typer.core import TyperGroup
 
 
 class DevProxyGroup(TyperGroup):
-    """把 '--' 之后的参数原样切给子命令。
+    """Split off the arguments after '--' and pass them to the subcommand verbatim.
 
-    Typer 默认会用自己的解析器处理子命令的所有参数，导致子命令的
-    --port 之类被 devproxy 抢走。这里在解析前先切分，尾部参数以
-    "trailing" 原样放进 ctx.obj，子命令自行取用。
+    By default Typer parses every argument of the subcommand with its own parser,
+    so options like the subcommand's --port would be stolen by devproxy. Here we
+    split before parsing: the tail goes into ctx.obj as "trailing" and the
+    subcommand reads it itself.
     """
 
     def parse_args(self, ctx, args):

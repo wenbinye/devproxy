@@ -13,16 +13,16 @@ def test_valid_names_pass(name):
 @pytest.mark.parametrize(
     "name,reason",
     [
-        ("Codeup", "大写"),
-        ("a.b", "含点"),
-        ("-x", "首字符连字符"),
-        ("", "空"),
-        ("a_b", "下划线"),
-        ("a b", "空格"),
-        ("x" * 64, "超长"),
-        ("codeup\n", "尾随换行"),
-        ("foo-", "尾随连字符"),
-        ("a--", "尾随连字符"),
+        ("Codeup", "uppercase"),
+        ("a.b", "contains a dot"),
+        ("-x", "leading hyphen"),
+        ("", "empty"),
+        ("a_b", "underscore"),
+        ("a b", "space"),
+        ("x" * 64, "too long"),
+        ("codeup\n", "trailing newline"),
+        ("foo-", "trailing hyphen"),
+        ("a--", "trailing hyphen"),
     ],
 )
 def test_invalid_names_raise(name, reason):

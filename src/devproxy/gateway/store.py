@@ -1,7 +1,9 @@
-"""路由表的事务性写入口。
+"""Transactional write entry point for the route table.
 
-事务顺序固定为：加锁 → 改表 → 渲染 → 校验 → 落盘 → reload。
-校验在落盘之前，reload 失败则回滚落盘内容 —— 保证 Caddy 永远不因本工具而挂掉。
+The transaction order is fixed: lock -> mutate table -> render -> validate ->
+write to disk -> reload. Validation happens before writing to disk, and a
+failed reload rolls back what was written -- Caddy must never go down because
+of this tool.
 """
 
 from __future__ import annotations
@@ -28,12 +30,12 @@ from devproxy.gateway.routes import save_table
 
 
 class RouteStoreError(RuntimeError):
-    """事务失败。"""
+    """Transaction failed."""
 
 
 @contextmanager
 def file_lock(path: Path) -> Iterator[None]:
-    """flock 互斥。持锁范围必须覆盖整个事务。"""
+    """flock mutual exclusion. The lock scope must cover the whole transaction."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fh = open(path, "a+")
     try:
@@ -50,11 +52,13 @@ class RouteStore:
         self.caddy = caddy
 
     def list(self) -> list[Route]:
-        """所有已注册路由，按名字升序。
+        """All registered routes, sorted by name.
 
-        路由表是**集合**：routes.json 里的先后只是写入顺序，不代表任何含义
-        （先注册再注销，顺序就变了）。读出来就排好序，输出才稳定可预期 ——
-        `devproxy ls` 每次长得一样，而不是随注册历史抖动。
+        The route table is a **set**: the order in routes.json is only write
+        order and means nothing (register then unregister, and the order
+        changes). Sort on read so output is stable and predictable --
+        `devproxy ls` looks the same every time instead of wobbling with
+        registration history.
         """
         return sorted(load_table(self.paths.routes_json).routes, key=lambda r: r.name)
 
@@ -62,11 +66,14 @@ class RouteStore:
         return next((r for r in self.list() if r.name == name), None)
 
     def mutate(self, fn: Callable[[RouteTable], None]) -> None:
-        """在 flock 内完成「改表 → 渲染 → 校验 → 落盘 → reload」的整个事务。
+        """Run the whole "mutate table -> render -> validate -> write ->
+        reload" transaction under flock.
 
-        校验通过后，任何一步失败（包括第二次 atomic_write 与 reload）都必须
-        把两份文件恢复到事务开始前的状态 —— 否则 routes.json 与 routes.caddy
-        会永久不一致，Caddy 按旧文件反代到已经死掉的端口。
+        Once validation passes, a failure at any later step (including the
+        second atomic_write and reload) must restore both files to their
+        state at the start of the transaction -- otherwise routes.json and
+        routes.caddy stay permanently inconsistent and Caddy reverse-proxies
+        to a dead port using the old file.
         """
         paths = self.paths
         paths.ensure_files()
@@ -89,7 +96,9 @@ class RouteStore:
 
                 ok, msg = self._validate(rendered)
                 if not ok:
-                    raise RouteStoreError(f"Caddy 配置校验失败，未做任何修改：\n{msg}")
+                    raise RouteStoreError(
+                        f"Caddy config validation failed, no changes made:\n{msg}"
+                    )
 
                 try:
                     save_table(paths.routes_json, table)
@@ -97,25 +106,29 @@ class RouteStore:
 
                     ok, msg = self.caddy.reload()
                     if not ok:
-                        raise RouteStoreError(f"Caddy reload 失败，已回滚路由表：\n{msg}")
+                        raise RouteStoreError(
+                            f"Caddy reload failed, route table rolled back:\n{msg}"
+                        )
                 except Exception as e:
                     self._rollback(old_json, old_caddy, e)
             finally:
-                # 校验用的临时文件必须清掉 —— 留着它们只是噪音，
-                # 还会让人以为线上有两份配置。
+                # Temp files used for validation must be removed -- leaving
+                # them is just noise and makes people think two configs are
+                # live.
                 self._cleanup_temp()
 
     def _rollback(self, old_json: str | None, old_caddy: str | None, cause: Exception) -> NoReturn:
-        """落盘事务失败：恢复两份文件，并把原因统一包装成 RouteStoreError。"""
+        """Write transaction failed: restore both files and wrap the cause
+        uniformly in RouteStoreError."""
         try:
             self._restore(old_json, old_caddy)
         except Exception as restore_error:
             raise RouteStoreError(
-                f"写入路由表失败，且回滚也失败：{cause}；回滚错误：{restore_error}"
+                f"failed to write route table, and rollback failed too: {cause}; rollback error: {restore_error}"
             ) from cause
         if isinstance(cause, RouteStoreError):
             raise cause
-        raise RouteStoreError(f"写入路由表失败，已回滚：{cause}") from cause
+        raise RouteStoreError(f"failed to write route table, rolled back: {cause}") from cause
 
     def _cleanup_temp(self) -> None:
         for path in self._temp_paths():
@@ -128,7 +141,8 @@ class RouteStore:
         ]
 
     def _validate(self, rendered: str) -> tuple[bool, str]:
-        """用临时主 Caddyfile 校验新内容，不动线上文件。"""
+        """Validate new content with a temporary main Caddyfile, without
+        touching live files."""
         tmp_routes, tmp_main = self._temp_paths()
         atomic_write(tmp_routes, rendered)
         atomic_write(

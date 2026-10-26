@@ -63,7 +63,7 @@ def test_is_alive_true_and_false():
 
 
 def test_validate_uses_caddy_binary(tmp_path):
-    """用假 caddy 脚本验证参数拼装与返回码处理。"""
+    """Use a fake caddy script to verify argument assembly and return-code handling."""
     fake = tmp_path / "caddy"
     fake.write_text('#!/bin/sh\necho "ARGS: $@" >&2\nexit 0\n')
     fake.chmod(0o755)
@@ -115,7 +115,7 @@ def test_validate_timeout_returns_false(tmp_path):
     cfg = CaddyConfig(caddy_bin=fake, caddyfile=tmp_path / "Caddyfile")
     ok, msg = cfg.validate(tmp_path / "Caddyfile", timeout=0.5)
     assert ok is False
-    assert "超时" in msg
+    assert "timed out" in msg
 
 
 def test_reload_timeout_returns_false(tmp_path):
@@ -125,7 +125,7 @@ def test_reload_timeout_returns_false(tmp_path):
     cfg = CaddyConfig(caddy_bin=fake, caddyfile=tmp_path / "Caddyfile")
     ok, msg = cfg.reload(timeout=0.5)
     assert ok is False
-    assert "超时" in msg
+    assert "timed out" in msg
 
 
 def test_build_main_caddyfile_shape(tmp_path):
@@ -141,11 +141,13 @@ def test_build_main_caddyfile_shape(tmp_path):
     assert "storage file_system /data/caddy" in out
     assert "import /state/routes.caddy" in out
     assert "import /config/sites.caddy" in out
-    assert out.count("{") == 1, "全局块只能有一个（被 import 的文件不能再有全局块）"
+    assert out.count("{") == 1, (
+        "there can be only one global block (imported files cannot have another)"
+    )
 
 
 def test_build_main_caddyfile_emits_ports(tmp_path):
-    """http_port / https_port 必须真的进 Caddyfile —— 否则配置里的键形同虚设。"""
+    """http_port / https_port must really reach the Caddyfile -- otherwise the config keys are inert."""
     out = build_main_caddyfile(
         MainCaddyfileSpec(
             admin_addr="127.0.0.1:2019",
@@ -161,7 +163,7 @@ def test_build_main_caddyfile_emits_ports(tmp_path):
 
 
 def test_build_main_caddyfile_default_ports(tmp_path):
-    """默认值 80/443 —— 生成结果与旧行为一致。"""
+    """Defaults are 80/443 -- output matches the legacy behavior."""
     out = build_main_caddyfile(
         MainCaddyfileSpec(
             admin_addr="127.0.0.1:2019",
@@ -174,11 +176,11 @@ def test_build_main_caddyfile_default_ports(tmp_path):
     assert "https_port 443" in out
 
 
-# ------------------------------------------ 边界：畸形二进制 / 畸形 Admin 响应
+# ------------------------------------------ Edge cases: malformed binary / malformed Admin response
 
 
 def _nonexec_format_binary(tmp_path) -> Path:
-    """存在、有执行位、但不是可执行格式（Exec format error）的文件。"""
+    """A file that exists and has the execute bit set but is not an executable format (Exec format error)."""
     fake = tmp_path / "caddy"
     fake.write_text("this is not an executable format\n")
     fake.chmod(0o755)
@@ -186,7 +188,7 @@ def _nonexec_format_binary(tmp_path) -> Path:
 
 
 def test_validate_wrong_format_binary_returns_false_not_exception(tmp_path):
-    """二进制存在但格式不对（OSError: Exec format error）也要遵守 (False, msg) 契约。"""
+    """The binary exists but is in the wrong format (OSError: Exec format error); still follow the (False, msg) contract."""
     cfg = CaddyConfig(caddy_bin=_nonexec_format_binary(tmp_path), caddyfile=tmp_path / "C")
     ok, msg = cfg.validate(tmp_path / "C")
     assert ok is False
@@ -213,7 +215,7 @@ class _NonJsonHandler(BaseHTTPRequestHandler):
 
 
 def test_api_non_json_200_returns_code_and_none():
-    """200 但响应体不是 JSON → (200, None)，不能裸抛 JSONDecodeError。"""
+    """200 but the body is not JSON -> (200, None); must not raise JSONDecodeError."""
     srv = _Quiet(("127.0.0.1", 0), _NonJsonHandler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
@@ -227,11 +229,11 @@ def test_api_non_json_200_returns_code_and_none():
         srv.server_close()
 
 
-# ------------------------------------------------ I6: 畸形 HTTP 响应不得穿出 api()
+# ------------------------------------------------ I6: malformed HTTP responses must not leak out of api()
 
 
 def test_api_malformed_status_line_returns_zero_not_exception():
-    """Admin 端口被非 HTTP 服务占用（BadStatusLine）→ (0, None)，不抛异常。"""
+    """The Admin port is occupied by a non-HTTP service (BadStatusLine) -> (0, None); no exception."""
     import socket
 
     srv = socket.socket()
@@ -260,11 +262,11 @@ def test_api_malformed_status_line_returns_zero_not_exception():
         worker.join(timeout=5)
 
 
-# ------------------------------------- I7: Caddyfile token 引用（空格/换行路径）
+# ------------------------------------- I7: Caddyfile token quoting (paths with spaces/newlines)
 
 
 def test_build_main_caddyfile_quotes_paths_with_spaces(tmp_path):
-    """含空格的合法路径必须被引用成单个 token，否则 Caddyfile 语法错误。"""
+    """A valid path containing spaces must be quoted as a single token, or the Caddyfile is a syntax error."""
     out = build_main_caddyfile(
         MainCaddyfileSpec(
             admin_addr="127.0.0.1:2019",
@@ -275,12 +277,12 @@ def test_build_main_caddyfile_quotes_paths_with_spaces(tmp_path):
     )
     assert 'storage file_system "/Volumes/My Disk/caddy"' in out
     assert 'import "/state/my routes.caddy"' in out
-    # 不含空格的 token 保持原样，生成结果与旧行为逐字节一致
+    # Tokens without spaces stay as they are; output is byte-for-byte identical to the legacy behavior.
     assert "import /config/sites.caddy" in out
 
 
 def test_build_main_caddyfile_escapes_newline_instead_of_injecting_lines():
-    """路径里的换行不得变成额外配置行（否则等于配置注入）。"""
+    """A newline in a path must not become an extra config line (that would be config injection)."""
     out = build_main_caddyfile(
         MainCaddyfileSpec(
             admin_addr="127.0.0.1:2019",

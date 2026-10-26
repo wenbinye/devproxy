@@ -1,4 +1,4 @@
-"""devproxy.toml：文件发现、解析与校验。"""
+"""devproxy.toml: file discovery, parsing, and validation."""
 
 from pathlib import Path
 
@@ -36,7 +36,7 @@ def _has_ancestor_file(start: Path) -> bool:
     return False
 
 
-# ------------------------------- 文件发现
+# ------------------------------- File discovery
 
 
 def test_find_project_file_in_current_directory(tmp_path):
@@ -45,7 +45,7 @@ def test_find_project_file_in_current_directory(tmp_path):
 
 
 def test_find_project_file_walks_up_to_project_root(tmp_path):
-    """用户在子目录里执行 sync，也必须找到项目根目录的那一份。"""
+    """Even when the user runs sync in a subdirectory, it must find the one at the project root."""
     target = _write(tmp_path / PROJECT_FILE_NAME)
     nested = tmp_path / "src" / "deep"
     nested.mkdir(parents=True)
@@ -54,7 +54,7 @@ def test_find_project_file_walks_up_to_project_root(tmp_path):
 
 def test_find_project_file_returns_none_when_missing(tmp_path):
     if _has_ancestor_file(tmp_path):
-        pytest.skip("上层目录里存在 devproxy.toml，无法断言「找不到」")
+        pytest.skip('a devproxy.toml exists in an ancestor directory; cannot assert "not found"')
     assert find_project_file(tmp_path) is None
 
 
@@ -76,7 +76,7 @@ def test_resolve_project_file_finds_file_upwards(tmp_path, monkeypatch):
 
 
 def test_resolve_project_file_uses_explicit_file(tmp_path, monkeypatch):
-    """--file 显式指定时不做向上查找。"""
+    """With an explicit --file, do not search upwards."""
     _write(tmp_path / PROJECT_FILE_NAME)
     other = _write(tmp_path / "other.toml", VALID)
     monkeypatch.chdir(tmp_path)
@@ -92,19 +92,19 @@ def test_resolve_project_file_accepts_relative_explicit_path(tmp_path, monkeypat
 def test_resolve_project_file_reports_missing_explicit_file(tmp_path):
     with pytest.raises(ProjectFileError) as cm:
         resolve_project_file(tmp_path / "absent.toml")
-    assert "不存在" in str(cm.value)
+    assert "does not exist" in str(cm.value)
 
 
 def test_resolve_project_file_reports_not_found(tmp_path, monkeypatch):
     if _has_ancestor_file(tmp_path):
-        pytest.skip("上层目录里存在 devproxy.toml，无法断言「找不到」")
+        pytest.skip('a devproxy.toml exists in an ancestor directory; cannot assert "not found"')
     monkeypatch.chdir(tmp_path)
     with pytest.raises(ProjectFileError) as cm:
         resolve_project_file(None)
     assert PROJECT_FILE_NAME in str(cm.value)
 
 
-# --------------------------------- 解析
+# --------------------------------- Parsing
 
 
 def test_load_project_file_parses_up_and_expose(tmp_path):
@@ -141,7 +141,7 @@ def test_load_project_file_reads_ready_timeout(tmp_path):
     assert load_project_file(path).get("web").ready_timeout == 5
 
 
-# --------------------------------- 错误
+# --------------------------------- Errors
 
 
 def test_toml_syntax_error_reports_file_and_position(tmp_path):
@@ -151,7 +151,7 @@ def test_toml_syntax_error_reports_file_and_position(tmp_path):
     message = str(cm.value)
     assert str(path) in message
     assert "TOML" in message
-    assert "line" in message  # tomllib 自带行列号
+    assert "line" in message  # tomllib includes line/column numbers
 
 
 def test_unknown_top_level_key_is_rejected(tmp_path):
@@ -277,10 +277,10 @@ def test_duplicate_names_are_rejected(tmp_path):
     )
     with pytest.raises(ProjectFileError) as cm:
         load_project_file(path)
-    assert "重复" in str(cm.value)
+    assert "more than once" in str(cm.value)
 
 
 def test_missing_file_is_reported(tmp_path):
     with pytest.raises(ProjectFileError) as cm:
         load_project_file(tmp_path / "absent.toml")
-    assert "不存在" in str(cm.value)
+    assert "does not exist" in str(cm.value)

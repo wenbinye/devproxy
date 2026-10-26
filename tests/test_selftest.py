@@ -1,7 +1,8 @@
-"""selftest 的 fail-closed 路径单测 —— 不需要真的 caddy。
+"""Unit tests for selftest's fail-closed paths -- no real caddy needed.
 
-版本地板与「宿主信任库安装已禁用」的日志证据，是隔离沙箱不污染宿主
-信任库的唯一屏障，必须锁死在测试里（I-5）。
+The version floor and the log evidence that "host trust store installation is
+disabled" are the only barrier keeping the isolated sandbox from polluting the host
+trust store, so they must be pinned down in tests (I-5).
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ from devproxy.gateway.selftest import run_selftest
 
 
 class _FakeRun:
-    """按子命令名返回编排好的结果；未编排的调用直接报错。"""
+    """Return the scripted result by subcommand name; fail immediately on an unscripted call."""
 
     def __init__(self, answers: dict[str, subprocess.CompletedProcess]):
         self.answers = answers
@@ -31,7 +32,7 @@ class _FakeRun:
         for key, proc in self.answers.items():
             if key in cmd:
                 return proc
-        raise AssertionError(f"测试未编排这次调用: {cmd}")
+        raise AssertionError(f"test did not script this call: {cmd}")
 
 
 def _completed(rc=0, stdout="", stderr=""):
@@ -47,11 +48,12 @@ def caddy_bin(tmp_path) -> Path:
 
 
 def test_min_version_floor_is_2_7_and_log_string_is_pinned():
-    """install_trust 自 Caddy 2.7.0 才存在；日志证据串必须能在真机日志里命中。"""
+    """install_trust only exists since Caddy 2.7.0; the log evidence string must match in real-machine logs."""
     assert MIN_CADDY_VERSION == (2, 7, 0)
-    # 已对照本机 caddy v2.11.7 二进制逐字核实（strings 命中）：
+    # Verified verbatim against the local caddy v2.11.7 binary (strings hit):
     # "...root certificate trust store installation disabled; unconfigured
-    #  clients may show warnings"。用前缀做子串匹配，容忍后半句措辞变化。
+    #  clients may show warnings". Use a prefix substring match to tolerate wording
+    # changes in the second half.
     assert TRUST_DISABLED_LOG == "root certificate trust store installation disabled"
     assert (
         "root certificate trust store installation disabled; unconfigured clients may show warnings"
@@ -91,12 +93,12 @@ def test_caddy_version_returns_none_when_binary_fails(monkeypatch):
 
 
 def test_selftest_fails_closed_on_caddy_older_than_floor(monkeypatch, caddy_bin):
-    """低于 2.7 的 caddy 会静默忽略 install_trust —— 必须判失败且不起沙箱。"""
+    """caddy older than 2.7 silently ignores install_trust -- must fail and must not start the sandbox."""
     started = []
 
     def no_popen(*args, **kwargs):
         started.append(args)
-        raise AssertionError("版本过旧时不得启动沙箱 caddy")
+        raise AssertionError("must not start the sandbox caddy when the version is too old")
 
     monkeypatch.setattr(
         selftest.subprocess,
@@ -107,39 +109,39 @@ def test_selftest_fails_closed_on_caddy_older_than_floor(monkeypatch, caddy_bin)
 
     result = run_selftest(caddy_bin)
 
-    assert result.failed, "低于版本地板必须判失败"
-    assert any("过旧" in desc for desc, _ in result.checks)
-    assert not started, "版本过旧时不得启动沙箱 caddy"
+    assert result.failed, "must fail below the version floor"
+    assert any("is too old" in desc for desc, _ in result.checks)
+    assert not started, "must not start the sandbox caddy when the version is too old"
 
 
 def test_selftest_accepts_caddy_at_floor(monkeypatch, caddy_bin):
-    """达到 2.7.0 → 不出现版本地板失败（后续步骤失败与否与此无关）。"""
+    """Reaching 2.7.0 -> no version floor failure appears (later step failures are irrelevant)."""
     monkeypatch.setattr(
         selftest.subprocess,
         "run",
         _FakeRun(
             {
                 "version": _completed(stdout="v2.7.0 h1:xxx\n"),
-                "adapt": _completed(rc=1, stderr="adapt 失败（测试编排）"),
+                "adapt": _completed(rc=1, stderr="adapt failed (scripted by the test)"),
             }
         ),
     )
     monkeypatch.setattr(
         selftest.subprocess,
         "Popen",
-        lambda *a, **k: (_ for _ in ()).throw(AssertionError("不应启动沙箱")),
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not start the sandbox")),
     )
 
     result = run_selftest(caddy_bin)
 
-    version_checks = [ok for desc, ok in result.checks if "caddy 版本" in desc]
-    assert version_checks and all(version_checks), "≥ 2.7 不得报版本地板失败"
-    assert not any("过旧" in desc for desc, _ in result.checks)
-    # 确实走到了版本门之后（adapt 是版本检查通过后的第一步）
+    version_checks = [ok for desc, ok in result.checks if "caddy version" in desc]
+    assert version_checks and all(version_checks), ">= 2.7 must not report a version floor failure"
+    assert not any("is too old" in desc for desc, _ in result.checks)
+    # Actually got past the version gate (adapt is the first step after the version check passes)
     assert any("adapt" in desc for desc, _ in result.checks)
 
 
-# ------------------------------------------- 日志证据：install_trust 真的关了
+# ------------------------------------------- Log evidence: install_trust is really off
 
 
 def test_trust_disabled_log_line_is_detected(tmp_path):
@@ -153,7 +155,7 @@ def test_trust_disabled_log_line_is_detected(tmp_path):
 
 
 def test_trust_disabled_log_missing_fails_closed(tmp_path):
-    """日志里没有那行证据 → 判失败（宁可误报也不能假设没污染宿主）。"""
+    """No such evidence line in the log -> fail (a false positive is better than assuming the host was not polluted)."""
     log = tmp_path / "caddy.log"
     log.write_text("some unrelated caddy output\n", encoding="utf-8")
     assert _wait_trust_disabled_log(log, timeout=0.2) is False
@@ -163,7 +165,7 @@ def test_trust_disabled_log_absent_file_fails_closed(tmp_path):
     assert _wait_trust_disabled_log(tmp_path / "absent.log", timeout=0.2) is False
 
 
-# --------------------------------- I10: 动态端口 + Admin 实例身份校验
+# --------------------------------- I10: dynamic ports + Admin instance identity checks
 
 
 def _serve_config(payload: dict):
@@ -188,7 +190,7 @@ def _serve_config(payload: dict):
 
 
 def test_wait_admin_rejects_instance_with_other_storage():
-    """端口上活着别人的 Caddy → 不能认领（否则 reload 会改到别人）。"""
+    """Someone else's Caddy is alive on the port -> must not claim it (otherwise reload would modify theirs)."""
     srv, base = _serve_config({"storage": {"module": "file_system", "root": "/someone/else"}})
     try:
         assert selftest._wait_admin(base, "/our/sandbox", timeout=0.5) is False
@@ -210,7 +212,7 @@ def test_free_ports_are_distinct_and_bindable():
     import socket
 
     ports = selftest._free_ports(3)
-    assert len(set(ports)) == 3, "同时持有的端口不得重复"
+    assert len(set(ports)) == 3, "ports held at the same time must not repeat"
     for port in ports:
         s = socket.socket()
         try:
@@ -220,7 +222,7 @@ def test_free_ports_are_distinct_and_bindable():
 
 
 def test_selftest_uses_dynamic_ports_and_production_caddyfile(monkeypatch, caddy_bin):
-    """沙箱 Caddyfile 必须由 build_main_caddyfile 生成，端口全部动态分配。"""
+    """The sandbox Caddyfile must be generated by build_main_caddyfile, with all ports dynamically allocated."""
     captured: dict[str, str] = {}
     monkeypatch.setattr(selftest, "_caddy_version", lambda _: (2, 7, 0))
     monkeypatch.setattr(selftest, "_free_ports", lambda n: [21001, 21002, 21003])
@@ -228,17 +230,17 @@ def test_selftest_uses_dynamic_ports_and_production_caddyfile(monkeypatch, caddy
 
     def fake_adapt(caddy_bin_, caddyfile, config_json):
         captured["text"] = caddyfile.read_text(encoding="utf-8")
-        return False, "adapt 失败（测试编排）"
+        return False, "adapt failed (scripted by the test)"
 
     monkeypatch.setattr(selftest, "_adapt", fake_adapt)
 
     result = run_selftest(caddy_bin)
 
-    assert captured["text"] == "MARKER-CADDYFILE\n", "必须复用生产生成器"
+    assert captured["text"] == "MARKER-CADDYFILE\n", "must reuse the production generator"
     assert any("adapt" in desc for desc, _ in result.checks)
 
 
-# --------------------------------- I11: adapt / reload 必须有超时
+# --------------------------------- I11: adapt / reload must have timeouts
 
 
 def test_adapt_timeout_returns_false(monkeypatch, tmp_path):
@@ -250,7 +252,7 @@ def test_adapt_timeout_returns_false(monkeypatch, tmp_path):
         Path("/unused"), tmp_path / "Caddyfile", tmp_path / "config.json", timeout=1
     )
     assert ok is False
-    assert "超时" in msg
+    assert "timed out" in msg
 
 
 def test_adapt_oserror_returns_false(monkeypatch, tmp_path):
@@ -260,7 +262,7 @@ def test_adapt_oserror_returns_false(monkeypatch, tmp_path):
     monkeypatch.setattr(selftest.subprocess, "run", broken_run)
     ok, msg = selftest._adapt(Path("/unused"), tmp_path / "Caddyfile", tmp_path / "config.json")
     assert ok is False
-    assert "无法执行" in msg
+    assert "could not run" in msg
 
 
 def test_reload_timeout_returns_false(monkeypatch, tmp_path):
@@ -270,7 +272,7 @@ def test_reload_timeout_returns_false(monkeypatch, tmp_path):
     monkeypatch.setattr(selftest.subprocess, "run", timeout_run)
     ok, msg = selftest._reload(Path("/unused"), tmp_path / "config.json", 12345, timeout=1)
     assert ok is False
-    assert "超时" in msg
+    assert "timed out" in msg
 
 
 def test_reload_oserror_returns_false(monkeypatch, tmp_path):
@@ -280,10 +282,10 @@ def test_reload_oserror_returns_false(monkeypatch, tmp_path):
     monkeypatch.setattr(selftest.subprocess, "run", broken_run)
     ok, msg = selftest._reload(Path("/unused"), tmp_path / "config.json", 12345)
     assert ok is False
-    assert "无法执行" in msg
+    assert "could not run" in msg
 
 
-# ---------------------------- I12: mkdtemp 之后所有异常都必须走统一清理
+# ---------------------------- I12: after mkdtemp, every exception must go through unified cleanup
 
 
 def test_selftest_cleans_tmp_when_setup_raises_after_mkdtemp(monkeypatch, caddy_bin, tmp_path):
@@ -308,5 +310,5 @@ def test_selftest_cleans_tmp_when_setup_raises_after_mkdtemp(monkeypatch, caddy_
     with pytest.raises(RuntimeError):
         run_selftest(caddy_bin)
 
-    assert created, "未创建临时目录？"
-    assert not created[0].exists(), "异常路径必须回收 /tmp 沙箱目录"
+    assert created, "no temp directory created?"
+    assert not created[0].exists(), "the exception path must reclaim the /tmp sandbox directory"

@@ -10,7 +10,7 @@ from devproxy.gateway.store import RouteStoreError
 
 
 class FakeCaddy:
-    """假 Caddy：记录调用，validate/reload 可编排成功或失败。"""
+    """Fake Caddy: records calls; validate/reload success or failure is configurable."""
 
     def __init__(self, validate_ok=True, reload_ok=True):
         self.validate_ok = validate_ok
@@ -20,11 +20,11 @@ class FakeCaddy:
 
     def validate(self, caddyfile=None):
         self.validated.append(caddyfile)
-        return (self.validate_ok, "ok" if self.validate_ok else "语法错误")
+        return (self.validate_ok, "ok" if self.validate_ok else "syntax error")
 
     def reload(self, caddyfile=None):
         self.reloaded.append(caddyfile)
-        return (self.reload_ok, "ok" if self.reload_ok else "reload 失败")
+        return (self.reload_ok, "ok" if self.reload_ok else "reload failed")
 
 
 def _store(paths, caddy=None):
@@ -65,12 +65,12 @@ def test_get_returns_none_for_unknown(paths):
 
 
 def test_mutate_validates_before_writing(paths):
-    """校验失败时不得落盘。"""
+    """Nothing must be written to disk when validation fails."""
     paths.ensure_files()
     store = _store(paths, FakeCaddy(validate_ok=False))
     with pytest.raises(RouteStoreError) as cm:
         store.mutate(lambda t: t.upsert(_route()))
-    assert "校验" in str(cm.value)
+    assert "validation failed" in str(cm.value)
     assert not paths.routes_json.exists()
     assert paths.routes_caddy.read_text() == ""
 
@@ -81,7 +81,7 @@ def test_mutate_rolls_back_on_reload_failure(paths):
     with pytest.raises(RouteStoreError) as cm:
         store.mutate(lambda t: t.upsert(_route()))
     assert "reload" in str(cm.value)
-    assert not paths.routes_json.exists(), "reload 失败必须回滚路由表"
+    assert not paths.routes_json.exists(), "a reload failure must roll back the route table"
     assert paths.routes_caddy.read_text() == ""
 
 
@@ -99,14 +99,14 @@ def test_mutate_rolls_back_to_previous_state(paths):
 
 
 def test_mutate_creates_import_targets_if_missing(paths):
-    """sites.caddy 不存在时不能让 Caddy 的 import 失败。"""
+    """A missing sites.caddy must not make Caddy's import fail."""
     store = _store(paths)
     store.mutate(lambda t: t.upsert(_route()))
     assert paths.sites_caddy.exists()
 
 
 def test_validate_uses_temp_caddyfile_not_the_live_one(paths):
-    """校验必须针对新内容，不能直接用线上主 Caddyfile。"""
+    """Validation must target the new content, not the live main Caddyfile directly."""
     paths.ensure_files()
     caddy = FakeCaddy()
     store = _store(paths, caddy)
@@ -123,7 +123,7 @@ def test_lock_file_created(paths):
 
 
 def test_mutate_removes_temp_validation_files(paths):
-    """校验用的临时文件必须清掉 —— 留在 state 目录里只是噪音。"""
+    """Temporary validation files must be cleaned up -- leaving them in the state directory is just noise."""
     paths.ensure_files()
     store = _store(paths)
     store.mutate(lambda t: t.upsert(_route()))
@@ -132,7 +132,7 @@ def test_mutate_removes_temp_validation_files(paths):
 
 
 def test_mutate_removes_temp_validation_files_on_failure(paths):
-    """失败路径同样要清理。"""
+    """Failure paths must clean up too."""
     paths.ensure_files()
     store = _store(paths, FakeCaddy(validate_ok=False))
     with pytest.raises(RouteStoreError):
@@ -147,17 +147,17 @@ def test_mutate_removes_temp_validation_files_on_failure(paths):
     assert not (paths.state_dir / "Caddyfile.new").exists()
 
 
-# --------------------------------- I1: 事务回滚必须覆盖第二次落盘（routes.caddy）
+# --------------------------------- I1: transaction rollback must cover the second write (routes.caddy)
 
 
 def test_mutate_returns_none(paths):
-    """M1: mutate 是命令，不得把内部可变列表暴露给调用方。"""
+    """M1: mutate is a command and must not expose its internal mutable list to the caller."""
     paths.ensure_files()
     assert _store(paths).mutate(lambda t: t.upsert(_route())) is None
 
 
 def test_mutate_rolls_back_json_when_caddyfile_write_fails(paths, monkeypatch):
-    """routes.json 已写、routes.caddy 写入失败 → 两份文件都要回到旧状态。"""
+    """routes.json was written but routes.caddy write failed -> both files must return to the old state."""
     import devproxy.gateway.store as store_mod
 
     paths.ensure_files()
@@ -179,15 +179,15 @@ def test_mutate_rolls_back_json_when_caddyfile_write_fails(paths, monkeypatch):
     with pytest.raises(RouteStoreError) as cm:
         store.mutate(lambda t: t.upsert(_route("second", 2222)))
 
-    assert "已回滚" in str(cm.value)
+    assert "rolled back" in str(cm.value)
     assert isinstance(cm.value.__cause__, OSError)
-    assert paths.routes_json.read_text() == before_json, "JSON 必须回滚"
-    assert paths.routes_caddy.read_text() == before_caddy, "Caddyfile 必须保持旧版本"
+    assert paths.routes_json.read_text() == before_json, "JSON must be rolled back"
+    assert paths.routes_caddy.read_text() == before_caddy, "the Caddyfile must keep the old version"
     assert "second.test" not in paths.routes_json.read_text()
 
 
 def test_mutate_rolls_back_when_json_save_fails(paths, monkeypatch):
-    """save_table 失败（尚未开始写 Caddyfile）同样不得留下半截状态。"""
+    """A failing save_table (before writing the Caddyfile even starts) must likewise leave no half-written state."""
     import devproxy.gateway.store as store_mod
 
     paths.ensure_files()
@@ -202,6 +202,6 @@ def test_mutate_rolls_back_when_json_save_fails(paths, monkeypatch):
     with pytest.raises(RouteStoreError) as cm:
         store.mutate(lambda t: t.upsert(_route("second", 2222)))
 
-    assert "已回滚" in str(cm.value)
+    assert "rolled back" in str(cm.value)
     assert paths.routes_json.read_text() == before_json
     assert "second.test" not in paths.routes_caddy.read_text()

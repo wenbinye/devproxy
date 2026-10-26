@@ -1,6 +1,7 @@
-"""Dnsmasq 组件测试：配置增量合并 + 用户级服务单元。
+"""Dnsmasq component tests: incremental config merge + user-scope service unit.
 
-全程不碰真实系统：配置路径注入 tmp_path，服务操作走 FakePlatform。
+Never touches the real system: config paths are injected from tmp_path and
+service operations go through FakePlatform.
 """
 
 from pathlib import Path
@@ -18,10 +19,10 @@ from tests.support import UnreadablePath
 
 @pytest.fixture(autouse=True)
 def _isolated_dnsmasq_binary(tmp_path, monkeypatch):
-    """check 会校验可执行文件存在 —— 指向临时假文件，绝不依赖宿主机。
+    """check verifies the executable exists -- point it at a temp fake file and never depend on the host.
 
-    macOS 用例默认也能找到一个"已安装"的 dnsmasq；需要模拟未安装的用例
-    再自行把候选路径覆盖成不存在的路径。
+    macOS cases can also find an "installed" dnsmasq by default; a case that needs to
+    simulate a missing install overrides the candidate paths with nonexistent ones.
     """
     binary = tmp_path / "fake-bin" / "dnsmasq"
     binary.parent.mkdir(parents=True, exist_ok=True)
@@ -49,8 +50,8 @@ def test_merge_preserves_existing_address_entries():
 
 def test_merge_replaces_existing_port():
     out = merge_dnsmasq_config("port=53\n", port=5353, suffix="test")
-    # 注意：不能用 "port=53" not in out 判断 —— "port=5353" 本身包含该子串。
-    # 旧端口必须整行消失，且只剩一行 port=。
+    # Note: do not test with "port=53" not in out -- "port=5353" itself contains that substring.
+    # The old port must disappear as a whole line and only one port= line may remain.
     lines = out.splitlines()
     assert "port=53" not in lines
     assert "port=5353" in lines
@@ -76,17 +77,17 @@ def test_merge_handles_leading_dot_suffix():
     assert "address=/.test/::1" in out
 
 
-# -- 上游与解析环路防护（Important B） ---------------------------------
+# -- upstreams and resolution-loop protection (Important B) ----------------
 
 
 def test_merge_empty_adds_no_resolv_and_default_upstreams():
-    """空配置必须自带上游：否则 dnsmasq 拿 /etc/resolv.conf（resolved 桩）
-    当上游，而 resolved 又指向本机 dnsmasq —— 解析环路。"""
+    """An empty config must include upstreams: otherwise dnsmasq uses /etc/resolv.conf (the resolved stub)
+    as its upstream while resolved points back at the local dnsmasq -- a resolution loop."""
     out = merge_dnsmasq_config("", port=5353, suffix="test")
     assert "no-resolv" in out.splitlines()
     servers = [ln for ln in out.splitlines() if ln.startswith("server=")]
     assert len(servers) >= 1
-    # 上游不能是本机桩
+    # The upstream must not be the local stub
     assert all("127.0.0.53" not in s for s in servers)
 
 
@@ -96,11 +97,11 @@ def test_merge_keeps_user_upstream_untouched():
     assert servers == ["server=223.5.5.5"]
 
 
-# -- 全局上游 vs 域名限定上游（dnsmasq 手册：server= 不阻止读 resolv.conf） --
+# -- global upstreams vs domain-scoped upstreams (dnsmasq manual: server= does not stop reading resolv.conf) --
 
 
 def _global_servers(lines):
-    """全局上游 = server= 的值里没有域名部分。"""
+    """A global upstream = a server= value with no domain part."""
     out = []
     for line in lines:
         s = line.strip()
@@ -113,22 +114,23 @@ def _global_servers(lines):
 
 
 def test_merge_domain_scoped_server_is_not_a_global_upstream():
-    """server=/corp/10.0.0.1 只服务于该域名 —— 不能算全局上游。
+    """server=/corp/10.0.0.1 serves only that domain -- it does not count as a global upstream.
 
-    否则配置里既没有全局上游也没有 no-resolv，普通域名会走
-    /etc/resolv.conf（resolved 机器上是 127.0.0.53 桩），而 resolved 又被
-    工具的 drop-in 指回本机 dnsmasq → 全机解析失败。
+    Otherwise the config has neither a global upstream nor no-resolv, so ordinary
+    domains go to /etc/resolv.conf (on a resolved machine that is the 127.0.0.53
+    stub), while resolved is pointed back at the local dnsmasq by the tool's
+    drop-in -> machine-wide resolution fails.
     """
     out = merge_dnsmasq_config("server=/corp.example.com/10.0.0.1\n", port=5353, suffix="test")
     lines = out.splitlines()
     assert "no-resolv" in lines
     assert _global_servers(lines)
-    # 用户的域名限定上游原样保留
+    # The user's domain-scoped upstream is preserved verbatim
     assert "server=/corp.example.com/10.0.0.1" in lines
 
 
 def test_merge_global_server_keeps_it_and_adds_no_resolv():
-    """server= 从不抑制读取 /etc/resolv.conf —— 手册明说要 --no-resolv。"""
+    """server= never suppresses reading /etc/resolv.conf -- the manual explicitly says --no-resolv."""
     out = merge_dnsmasq_config("server=223.5.5.5\n", port=5353, suffix="test")
     lines = out.splitlines()
     assert "no-resolv" in lines
@@ -136,7 +138,7 @@ def test_merge_global_server_keeps_it_and_adds_no_resolv():
 
 
 def test_merge_resolv_file_prevents_no_resolv():
-    """显式 resolv-file= 是用户自选解析器文件 —— 与 no-resolv 互斥，不加。"""
+    """An explicit resolv-file= is the user's chosen resolver file -- mutually exclusive with no-resolv, so do not add it."""
     out = merge_dnsmasq_config("resolv-file=/etc/resolv.d/custom\n", port=5353, suffix="test")
     assert "no-resolv" not in out.splitlines()
 
@@ -159,7 +161,7 @@ def test_merge_idempotent_for_resolv_file():
     assert once == twice
 
 
-# -- 只监听回环，避免变成局域网上的开放递归解析器 ----------------------
+# -- listen on loopback only, avoiding becoming an open recursive resolver on the LAN --
 
 
 def test_merge_ensures_loopback_only_listener():
@@ -196,7 +198,7 @@ def test_merge_with_upstream_is_idempotent():
     )
 
 
-# -- 组件 ---------------------------------------------------------------
+# -- components ---------------------------------------------------------
 
 
 def _component(tmp_path, conf=None, platform=None):
@@ -237,7 +239,7 @@ def test_apply_writes_conf_and_installs_user_service(tmp_path):
     content = conf_path.read_text(encoding="utf-8")
     assert "port=5353" in content
     assert "address=/.test/127.0.0.1" in content
-    # systemd user 单元（不是系统级）
+    # systemd user unit (not system scope)
     unit = platform.services["dnsmasq"]
     assert "[Service]" in unit
     assert "dnsmasq" in unit
@@ -245,7 +247,7 @@ def test_apply_writes_conf_and_installs_user_service(tmp_path):
 
 
 def test_unit_keeps_dnsmasq_in_foreground(tmp_path):
-    """dnsmasq 默认 fork 退出 —— Type=simple 会立刻判定单元 inactive。"""
+    """dnsmasq forks and exits by default -- Type=simple would immediately mark the unit inactive."""
     comp, platform, _conf = _component(tmp_path)
     comp.apply(comp.plan())
     unit = platform.services["dnsmasq"]
@@ -268,7 +270,7 @@ def test_apply_preserves_existing_entries_on_disk(tmp_path):
 
 
 def test_generated_conf_has_upstream_to_avoid_resolution_loop(tmp_path):
-    """新机器上生成的配置必须自带上游 —— 否则 resolved ↔ dnsmasq 死循环。"""
+    """A config generated on a new machine must include upstreams -- otherwise resolved <-> dnsmasq loops forever."""
     comp, _platform, conf_path = _component(tmp_path)
     comp.apply(comp.plan())
     lines = conf_path.read_text(encoding="utf-8").splitlines()
@@ -277,8 +279,8 @@ def test_generated_conf_has_upstream_to_avoid_resolution_loop(tmp_path):
 
 
 def test_generated_conf_only_listens_on_loopback(tmp_path):
-    """没有 listen-address/bind-interfaces 时 dnsmasq 会绑 0.0.0.0:5353 ——
-    变成局域网上的开放递归解析器。"""
+    """Without listen-address/bind-interfaces dnsmasq binds 0.0.0.0:5353 --
+    becoming an open recursive resolver on the LAN."""
     comp, _platform, conf_path = _component(tmp_path)
     comp.apply(comp.plan())
     lines = conf_path.read_text(encoding="utf-8").splitlines()
@@ -287,7 +289,7 @@ def test_generated_conf_only_listens_on_loopback(tmp_path):
 
 
 def test_unit_conf_dir_is_absolute_for_relative_conf_path(tmp_path, monkeypatch):
-    """systemd 把相对路径按 / 解析 —— 单元里必须是绝对路径或 %h/... 。"""
+    """systemd resolves relative paths against / -- the unit must use an absolute path or %h/... ."""
     monkeypatch.chdir(tmp_path)
     platform = FakePlatform()
     paths = Paths(tmp_path / "c", tmp_path / "s", tmp_path / "d")
@@ -295,7 +297,7 @@ def test_unit_conf_dir_is_absolute_for_relative_conf_path(tmp_path, monkeypatch)
     comp.apply(comp.plan())
     unit = platform.services["dnsmasq"]
     conf_dir = unit.split("--conf-dir=")[1].split()[0]
-    # 相对路径会被 systemd 按 / 解析 —— 必须是绝对路径或 %h/...
+    # A relative path is resolved by systemd against / -- it must be absolute or %h/...
     assert conf_dir.startswith("/") or conf_dir.startswith("%h/")
     assert conf_dir != "rel" and not conf_dir.startswith("rel/")
 
@@ -312,7 +314,7 @@ def test_check_reports_missing_conf(tmp_path):
     platform.active.add("dnsmasq")
     status = comp.check()
     assert status.ok is False
-    assert "配置" in status.detail
+    assert "config" in status.detail
 
 
 def test_check_ok_after_apply(tmp_path):
@@ -323,7 +325,7 @@ def test_check_ok_after_apply(tmp_path):
 
 
 def test_plan_empty_when_already_in_place(tmp_path):
-    """已就绪时 plan 必须为空 —— setup 才能判定为 no-op。"""
+    """plan must be empty when already in place -- then setup can determine it is a no-op."""
     comp, _platform, _conf = _component(tmp_path)
     comp.apply(comp.plan())
     assert comp.plan() == []
@@ -351,7 +353,7 @@ def test_apply_unknown_action_raises(tmp_path):
         comp.apply([Action(description="?", kind="run", command=["bogus"])])
 
 
-# -- verify：真的能解析 *.test ----------------------------------------------
+# -- verify: resolution of *.test actually works ---------------------------
 
 
 def test_verify_ok_when_dns_query_returns_loopback(tmp_path):
@@ -379,7 +381,7 @@ def test_verify_fails_when_dns_query_returns_wrong_address(tmp_path):
     assert comp.verify().ok is False
 
 
-# -- 备份：改写用户既有配置前必须先备份 --------------------------------------
+# -- backups: back up the user's existing config before rewriting it ---------
 
 
 def test_apply_backs_up_changed_user_config(tmp_path):
@@ -393,7 +395,7 @@ def test_apply_backs_up_changed_user_config(tmp_path):
 
 
 def test_apply_does_not_backup_when_content_unchanged(tmp_path):
-    """内容没变时不得落备份 —— 否则每次 setup 都堆垃圾。"""
+    """Do not write a backup when the content is unchanged -- otherwise every setup piles up garbage."""
     comp, platform, conf_path = _component(tmp_path)
     merged = merge_dnsmasq_config("", port=platform.dns_port, suffix=Config().domain_suffix)
     conf_path.parent.mkdir(parents=True, exist_ok=True)
@@ -404,7 +406,7 @@ def test_apply_does_not_backup_when_content_unchanged(tmp_path):
     comp.apply(
         [
             Action(
-                description="写同样的内容",
+                description="write the same content",
                 kind="write",
                 path=conf_path,
                 content=merged,
@@ -421,11 +423,11 @@ def test_apply_creates_no_backup_for_new_config(tmp_path):
     assert list((tmp_path / "s" / "backups").glob("*.bak")) == []
 
 
-# -- macOS：launchd 没有 %h，也没有 ExecReload ----------------------------
+# -- macOS: launchd has no %h and no ExecReload ----------------------------
 
 
 class _MacPlatform(FakePlatform):
-    """macOS 平台：单元由平台渲染成 launchd plist。"""
+    """macOS platform: the platform renders the unit as a launchd plist."""
 
     name = "mac"
     dns_port = 5300
@@ -447,26 +449,26 @@ class _MacPlatform(FakePlatform):
 
 
 def test_macos_exec_start_uses_absolute_conf_dir(tmp_path):
-    """launchd 不认 systemd 的 %h —— 配置目录必须写成绝对路径。"""
+    """launchd does not understand systemd's %h -- the config directory must be an absolute path."""
     comp, platform, _conf = _component(tmp_path, platform=_MacPlatform())
     comp.apply(comp.plan())
     exec_start = platform.installed["exec_start"]
     conf_dir = [a for a in exec_start if a.startswith("--conf-dir=")]
-    assert conf_dir, "单元必须带上配置目录"
+    assert conf_dir, "the unit must include the config directory"
     path = conf_dir[0].split("=", 1)[1]
-    assert path.startswith("/"), f"launchd 需要绝对路径: {path}"
+    assert path.startswith("/"), f"launchd requires an absolute path: {path}"
     assert "%h" not in path
 
 
 def test_macos_exec_start_program_is_absolute(tmp_path):
-    """launchd 的 ProgramArguments 必须是绝对路径。"""
+    """launchd's ProgramArguments must be absolute paths."""
     comp, platform, _conf = _component(tmp_path, platform=_MacPlatform())
     comp.apply(comp.plan())
     assert Path(platform.installed["exec_start"][0]).is_absolute()
 
 
 def test_macos_has_no_exec_reload(tmp_path):
-    """launchd 的 plist 没有 ExecReload —— 重载靠 kickstart 重启。"""
+    """launchd's plist has no ExecReload -- reloading relies on a kickstart restart."""
     comp, platform, _conf = _component(tmp_path, platform=_MacPlatform())
     comp.apply(comp.plan())
     assert platform.installed["exec_reload"] is None
@@ -479,18 +481,18 @@ def test_macos_service_description_mentions_launchagent(tmp_path):
 
 
 def test_linux_exec_reload_still_uses_mainpid(tmp_path):
-    """Linux 路径不变：ExecReload 仍然是给 dnsmasq 发 HUP。"""
+    """The Linux path is unchanged: ExecReload still sends HUP to dnsmasq."""
     comp, platform, _conf = _component(tmp_path)
     comp.apply(comp.plan())
     unit = platform.services["dnsmasq"]
     assert "ExecReload=/bin/kill -HUP $MAINPID" in unit
 
 
-# ---------- 提示与二进制路径：按平台给 ----------
+# ---------- hints and binary paths: chosen per platform ----------
 
 
 def test_macos_check_hint_mentions_launchctl(tmp_path):
-    """macOS 上不能叫用户去跑 systemctl —— 给 launchctl 的命令。"""
+    """On macOS, do not tell the user to run systemctl -- give the launchctl command."""
     comp, _platform, _conf = _component(tmp_path, platform=_MacPlatform())
     status = comp.check()
     assert status.ok is False
@@ -509,14 +511,14 @@ def test_macos_verify_hint_mentions_launchctl(tmp_path):
 
 
 def test_linux_check_hint_still_mentions_systemctl(tmp_path):
-    """Linux 路径不变。"""
+    """The Linux path is unchanged."""
     comp, _platform, _conf = _component(tmp_path)
     status = comp.check()
     assert "systemctl" in status.hint
 
 
 def test_macos_dnsmasq_binary_prefers_homebrew_path(tmp_path, monkeypatch):
-    """PATH 里的 dnsmasq 可能不是 Homebrew 装的那个 —— 固定路径优先。"""
+    """The dnsmasq on PATH may not be the Homebrew one -- prefer the fixed path."""
     from devproxy.components import dnsmasq as dnsmasq_module
 
     brew = tmp_path / "opt" / "homebrew" / "sbin" / "dnsmasq"
@@ -529,7 +531,7 @@ def test_macos_dnsmasq_binary_prefers_homebrew_path(tmp_path, monkeypatch):
 
 
 def test_macos_dnsmasq_binary_falls_back_to_which(tmp_path, monkeypatch):
-    """固定路径都没有时，才用 PATH 里的那个。"""
+    """Only when none of the fixed paths exist, use the one on PATH."""
     from devproxy.components import dnsmasq as dnsmasq_module
 
     monkeypatch.setattr(dnsmasq_module, "MACOS_DNSMASQ_CANDIDATES", ("/nope/dnsmasq",))
@@ -538,11 +540,11 @@ def test_macos_dnsmasq_binary_falls_back_to_which(tmp_path, monkeypatch):
     assert comp._dnsmasq_binary() == "/usr/local/bin/dnsmasq"
 
 
-# -- I1：配置变更后，已 active 的服务必须重启 ------------------------------
+# -- I1: after a config change, an already-active service must restart ------
 
 
 class _TrackingPlatform(FakePlatform):
-    """记录 restart_service 调用 —— FakePlatform 默认只改 active 集合。"""
+    """Records restart_service calls -- FakePlatform only updates the active set by default."""
 
     def __init__(self):
         super().__init__()
@@ -554,48 +556,48 @@ class _TrackingPlatform(FakePlatform):
 
 
 def test_apply_restarts_active_service_after_config_change(tmp_path):
-    """enable --now 不会重启已 active 的单元 —— 新配置必须靠显式 restart 生效。"""
+    """enable --now does not restart an already-active unit -- the new config must take effect via an explicit restart."""
     platform = _TrackingPlatform()
     comp, _platform, conf_path = _component(tmp_path, platform=platform)
-    comp.apply(comp.plan())  # 首次安装：服务原本没在跑，无需重启
+    comp.apply(comp.plan())  # first install: the service was not running, no restart needed
     assert platform.restarts == []
 
     conf_path.write_text("port=53\n", encoding="utf-8")
-    comp.apply(comp.plan())  # 服务已 active：写配置后必须重启
+    comp.apply(comp.plan())  # service already active: must restart after writing the config
     assert platform.restarts == ["dnsmasq"]
 
 
-# -- I2：check 的内容判据必须与 plan 一致 --------------------------------
+# -- I2: check's content criterion must agree with plan -------------------
 
 
 def test_check_reports_config_drift_when_service_running(tmp_path):
-    """服务在跑但配置被改过 —— doctor 不能报绿。"""
+    """The service is running but the config was changed -- doctor must not report green."""
     comp, _platform, conf_path = _component(tmp_path)
     comp.apply(comp.plan())
     conf_path.write_text("port=53\n", encoding="utf-8")
 
     status = comp.check()
     assert status.ok is False
-    assert "缺少/偏离" in status.detail
+    assert "missing or deviates" in status.detail
     assert "setup" in status.hint
 
 
 def test_check_skips_content_validation_when_conf_unreadable(tmp_path):
-    """读不到配置时无法证伪，退回存在性判据（与 dns 组件一致）。"""
+    """When the config is unreadable it cannot be disproven, so fall back to the existence criterion (same as the dns component)."""
     comp, platform, conf_path = _component(tmp_path, conf="port=53\n")
     platform.active.add("dnsmasq")
     comp.conf_path = UnreadablePath(str(conf_path))
 
     status = comp.check()
     assert status.ok is True
-    assert "不可读" in status.detail
+    assert "unreadable" in status.detail
 
 
-# -- I7：二进制缺失要在 check/plan 阶段以正确文案暴露 --------------------
+# -- I7: a missing binary must surface with the right message in check/plan --
 
 
 def test_macos_missing_binary_raises_instead_of_fake_path(tmp_path, monkeypatch):
-    """找不到时绝不返回凭空构造的 /opt/homebrew 路径。"""
+    """Never return a fabricated /opt/homebrew path when it cannot be found."""
     monkeypatch.setattr(dnsmasq_module, "MACOS_DNSMASQ_CANDIDATES", ("/nope/dnsmasq",))
     monkeypatch.setattr(dnsmasq_module.shutil, "which", lambda name: None)
     comp, _platform, _conf = _component(tmp_path, platform=_MacPlatform())
@@ -605,7 +607,7 @@ def test_macos_missing_binary_raises_instead_of_fake_path(tmp_path, monkeypatch)
 
 
 def test_macos_check_reports_missing_binary_with_brew_hint(tmp_path, monkeypatch):
-    """没装 dnsmasq 时不能提示 launchctl —— 服务根本不存在。"""
+    """When dnsmasq is not installed, do not suggest launchctl -- the service does not exist."""
     monkeypatch.setattr(dnsmasq_module, "MACOS_DNSMASQ_CANDIDATES", ("/nope/dnsmasq",))
     monkeypatch.setattr(dnsmasq_module.shutil, "which", lambda name: None)
     comp, _platform, _conf = _component(tmp_path, platform=_MacPlatform())
@@ -622,15 +624,15 @@ def test_linux_check_reports_missing_binary_with_install_hint(tmp_path, monkeypa
 
     status = comp.check()
     assert status.ok is False
-    assert "不存在" in status.detail
-    assert "安装 dnsmasq" in status.hint
+    assert "not found" in status.detail
+    assert "install dnsmasq" in status.hint
 
 
-# -- M7：备份读失败要阻断写入；同一秒的备份不能互相覆盖 ------------------
+# -- M7: a failed backup read blocks the write; backups in the same second must not overwrite each other --
 
 
 class _UnreadableBackupSource(UnreadablePath):
-    """read_bytes 也被拒 —— 模拟 plan 之后文件权限变化（TOCTOU）。"""
+    """read_bytes is denied too -- simulating a permission change after plan (TOCTOU)."""
 
     def read_bytes(self, *args, **kwargs):
         raise PermissionError(13, "Permission denied", str(self))
@@ -642,18 +644,18 @@ def test_apply_refuses_to_overwrite_when_backup_read_fails(tmp_path):
     comp, _platform, conf_path = _component(tmp_path, conf="port=53\n")
     comp.conf_path = _UnreadableBackupSource(str(conf_path))
 
-    with pytest.raises(RuntimeError, match="拒绝覆盖"):
+    with pytest.raises(RuntimeError, match="refusing to overwrite"):
         comp.apply(
             [
                 Action(
-                    description="写新配置",
+                    description="write the new config",
                     kind="write",
                     path=comp.conf_path,
                     content="port=5353\n",
                 )
             ]
         )
-    # 原文件必须原封不动
+    # The original file must remain untouched
     assert conf_path.read_text(encoding="utf-8") == "port=53\n"
 
 
@@ -663,14 +665,14 @@ def test_backups_do_not_collide_within_same_second(tmp_path, monkeypatch):
     monkeypatch.setattr(dnsmasq_module.time, "strftime", lambda *args, **kwargs: "20260101T000000Z")
     comp, _platform, conf_path = _component(tmp_path, conf="port=53\n")
     first = merge_dnsmasq_config("port=53\n", port=5353, suffix="test")
-    comp.apply([Action(description="第一次", kind="write", path=conf_path, content=first)])
+    comp.apply([Action(description="first", kind="write", path=conf_path, content=first)])
 
     conf_path.write_text("port=5300\n", encoding="utf-8")
     second = merge_dnsmasq_config("port=5300\n", port=5353, suffix="test")
-    comp.apply([Action(description="第二次", kind="write", path=conf_path, content=second)])
+    comp.apply([Action(description="second", kind="write", path=conf_path, content=second)])
 
     backups = sorted((tmp_path / "s" / "backups").glob("dnsmasq.conf.*.bak"))
-    assert len(backups) == 2, "同一秒内的第二次备份不能覆盖第一次"
+    assert len(backups) == 2, "a second backup within the same second must not overwrite the first"
     assert {p.read_text(encoding="utf-8") for p in backups} == {
         "port=53\n",
         "port=5300\n",

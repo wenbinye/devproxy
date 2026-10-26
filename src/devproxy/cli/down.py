@@ -18,11 +18,11 @@ from devproxy.gateway.store import RouteStoreError
 def down(
     name: str = typer.Argument(
         None,
-        help="路由名。省略 = 停掉本项目（devproxy.toml）声明的所有应用",
+        help="Route name. Omit it to stop every app declared in this project's devproxy.toml",
         autocompletion=_completion.route_names,
     ),
 ) -> None:
-    """注销路由；子进程还在则一并收掉。不带名字 = 停掉本项目全部应用。"""
+    """Unregister a route, taking its child process with it. No name = stop the whole project."""
     if name is None:
         from devproxy.cli.stop import stop_project_apps
 
@@ -38,7 +38,7 @@ def down(
     except RouteTableError as e:
         s.fail(str(e))
     if route is None:
-        s.console.print(f"（{name} 未注册）")
+        s.console.print(f"({name} is not registered)")
         raise typer.Exit(EXIT_OK)
 
     def _remove(table: RouteTable) -> None:
@@ -49,6 +49,7 @@ def down(
     except (RouteStoreError, RouteTableError) as e:
         s.fail(str(e))
     if route.pid:
-        # 带上注册时记录的进程身份 —— pid 可能已被复用，身份不符不杀
+        # Pass the process identity recorded at registration time -- the pid may have
+        # been reused by now, in which case the identity will not match and nothing is killed
         s.kill_pid_group(route.pid, route.proc_start)
-    s.console.print(f"已注销 {name}")
+    s.console.print(f"Unregistered {name}")

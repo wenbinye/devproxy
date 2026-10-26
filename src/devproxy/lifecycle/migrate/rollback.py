@@ -1,4 +1,4 @@
-"""备份与回滚：迁移前的快照，以及失败/手动回滚。"""
+"""Backup and rollback: a snapshot before migration, plus failure/manual rollback."""
 
 from __future__ import annotations
 
@@ -14,14 +14,16 @@ from devproxy.platform.base import Platform
 
 
 def _make_copier(platform: Platform):
-    """备份用的复制函数：普通文件直接复制，读不到的（/etc 下的）走提权会话。"""
+    """Copy function for backups: copy regular files directly; unreadable ones (under /etc) go through an elevated session."""
 
     def copy(src: Path, dest: Path) -> None:
         try:
             shutil.copy2(src, dest)
         except PermissionError:
-            # /etc 下的 drop-in 是 root 拥有的：用提权会话读出内容，
-            # 再以用户身份写进备份目录（否则备份副本也归 root，用户删不掉）
+            # Drop-ins under /etc are owned by root: read the content via an
+            # elevated session, then write it into the backup directory as the
+            # user (otherwise the backup copy is also owned by root and the user
+            # cannot delete it)
             text = platform.privilege().read(src)
             dest.write_text(text, encoding="utf-8")
 
@@ -29,9 +31,10 @@ def _make_copier(platform: Platform):
 
 
 def _make_restorer(platform: Platform):
-    """还原用的文件操作：src 为 None 表示删除 dest。
+    """File operations for restore: src is None means delete dest.
 
-    /etc 下的文件普通用户写不了也删不了 —— 权限不够时走提权会话。
+    Files under /etc cannot be written or deleted by an ordinary user -- use an
+    elevated session when permissions are insufficient.
     """
 
     def restore(src: Path | None, dest: Path) -> None:
@@ -42,7 +45,7 @@ def _make_restorer(platform: Platform):
             except PermissionError as e:
                 code, msg = platform.privilege().run(["rm", "-f", str(dest)])
                 if code != 0:
-                    raise OSError(f"删除 {dest} 失败: {msg}") from e
+                    raise OSError(f"failed to delete {dest}: {msg}") from e
                 return
         try:
             shutil.copy2(src, dest)
@@ -53,15 +56,16 @@ def _make_restorer(platform: Platform):
 
 
 def _create_backup(platform: Platform, paths: Paths, targets: list[Path]) -> Backup:
-    """备份全部待改动的文件。失败即中止迁移。"""
+    """Back up all files that will be modified. Failure aborts migration."""
     try:
         return BackupManager(paths.backup_dir, copier=_make_copier(platform)).create(targets)
     except ValueError as e:
         raise MigrationError(
-            f"备份目标不是普通文件（可能是符号链接或目录），迁移已中止：{e}"
+            f"backup target is not a regular file (possibly a symlink or directory); "
+            f"migration aborted: {e}"
         ) from e
     except OSError as e:
-        raise MigrationError(f"备份失败，迁移已中止（未改动任何文件）：{e}") from e
+        raise MigrationError(f"backup failed; migration aborted (no files changed): {e}") from e
 
 
 def _restore_after_failure(
@@ -71,37 +75,45 @@ def _restore_after_failure(
     *,
     notes: list[str] | None = None,
 ) -> None:
-    """改写失败/被中断 → 按备份还原，绝不把机器留在半迁移状态。
+    """Rewrite failed/interrupted -> restore from backup; never leave the machine half-migrated.
 
-    `BaseException` 是刻意的：Ctrl-C（KeyboardInterrupt）不算 Exception，
-    只接 Exception 会让用户在“写了 sites.caddy、还没换单元”的半迁移状态
-    里退出，且看不到备份位置。中断同样按失败流程还原，并转成带备份
-    路径的 MigrationError（CLI 会把它打印成一行可读错误）。
+    `BaseException` is deliberate: Ctrl-C (KeyboardInterrupt) is not an
+    Exception, and catching only Exception would leave the user exiting in a
+    half-migrated state ("sites.caddy written, unit not yet swapped") with no
+    idea where the backup is. Interruptions follow the same failure path:
+    restore, then convert to a MigrationError carrying the backup path (CLI
+    prints it as one readable line).
 
-    `notes` 是失败前已收集的提示，随 MigrationError 一起交给调用方打印。
+    `notes` are the notes collected before the failure; they are handed to the
+    caller via MigrationError for printing.
     """
     if isinstance(exc, KeyboardInterrupt):
-        reason = "迁移被中断（KeyboardInterrupt）"
+        reason = "migration interrupted (KeyboardInterrupt)"
     else:
-        reason = f"迁移失败：{exc}"
+        reason = f"migration failed: {exc}"
     hint = (
-        f"备份目录：{backup.directory}（可手动还原：devproxy setup --rollback {backup.directory}）"
+        f"backup directory: {backup.directory} "
+        f"(manual restore: devproxy setup --rollback {backup.directory})"
     )
     try:
         backup.restorer = _make_restorer(platform)
         backup.restore()
     except BackupRestoreError as restore_exc:
-        raise MigrationError(f"{reason}，且还原不完整：{restore_exc}；{hint}", notes=notes) from exc
+        raise MigrationError(
+            f"{reason}, and the restore was incomplete: {restore_exc}; {hint}", notes=notes
+        ) from exc
     except OSError as restore_exc:
-        raise MigrationError(f"{reason}，且还原失败：{restore_exc}；{hint}", notes=notes) from exc
-    raise MigrationError(f"{reason}，已按备份还原；{hint}", notes=notes) from exc
+        raise MigrationError(
+            f"{reason}, and the restore failed: {restore_exc}; {hint}", notes=notes
+        ) from exc
+    raise MigrationError(f"{reason}; restored from backup; {hint}", notes=notes) from exc
 
 
 def rollback(backup: Backup, *, platform: Platform | None = None) -> list[Path]:
-    """按备份还原。返回被还原（或被删除）的原始路径。
+    """Restore from backup. Returns the original paths that were restored (or deleted).
 
-    部分条目失败时抛 BackupRestoreError —— 调用方必须捕获它，
-    否则"已还原了哪些"会随异常一起丢掉。
+    Raises BackupRestoreError when some entries fail -- the caller must catch
+    it, otherwise "what has been restored" is lost along with the exception.
     """
     if platform is not None:
         backup.restorer = _make_restorer(platform)

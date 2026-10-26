@@ -1,7 +1,8 @@
-"""平台实现集合。
+"""Platform implementations.
 
-组件层只依赖 `Platform` 协议，不直接调用系统命令；
-`get_platform()` 按当前系统挑实现。
+The component layer depends only on the `Platform` protocol and never invokes
+system commands directly; `get_platform()` picks the implementation for the
+current system.
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ from devproxy.platform.base import Platform
 
 
 def get_platform() -> Platform:
-    """按当前系统返回对应平台实现。"""
+    """Return the platform implementation for the current system."""
     if sys.platform == "darwin":
         from devproxy.platform.macos import MacOSPlatform
 

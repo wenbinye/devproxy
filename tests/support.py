@@ -1,9 +1,10 @@
-"""测试里共用的小工具：模拟"普通用户读不了 root 文件"的路径。
+"""Small helpers shared by the tests: simulate paths a regular user cannot read.
 
-macOS 的 system scope 单元在 /Library/LaunchDaemons —— 权限或归属不对时
-普通用户读不了。工具必须能自己把这类文件读出来（走提权会话），否则
-"读不到"会被误判成"没有单元"，进而让 doctor 永远报红、让迁移把用户
-手工维护的环境悄悄接管掉。
+macOS's system-scope unit lives in /Library/LaunchDaemons -- when the permissions or
+ownership are wrong, a regular user cannot read it. The tool must be able to read such
+files itself (through the elevated session); otherwise "cannot read" is misread as
+"no unit", which makes doctor report red forever and lets the migration silently take
+over an environment the user maintains by hand.
 """
 
 import time
@@ -11,12 +12,13 @@ from pathlib import Path
 
 
 def wait_until(predicate, timeout=30.0, interval=0.02) -> bool:
-    """轮询直到条件成立；超时返回 False。
+    """Poll until the predicate holds; return False on timeout.
 
-    「先 sleep N 秒、再断言」这种写法在负载高的机器上会随机翻车：睡够了
-    不代表另一端的动作真的发生了（子进程可能还没起来、守护线程可能还没跑
-    到第一轮）。这里改成**等到事情发生为止**，并给出明确的超时上限 ——
-    正常路径立刻返回，异常路径才会等到超时（测试因此变慢，但不会误报）。
+        "Sleep N seconds, then assert" flakes at random on a loaded machine: having slept
+    long enough does not mean the other side really acted (the child process may not be up
+    yet, the daemon thread may not have reached its first round). This waits **until it
+    happens**, with an explicit timeout -- the normal path returns immediately, only the
+    abnormal path waits it out (tests get slower, but never lie).
     """
     deadline = time.monotonic() + timeout
     while True:
@@ -28,22 +30,22 @@ def wait_until(predicate, timeout=30.0, interval=0.02) -> bool:
 
 
 def wait_for_file(path, timeout=30.0) -> bool:
-    """等文件出现（子进程写标记文件之类）。"""
+    """Wait for a file to appear (a child writing a marker file, and so on)."""
     return wait_until(lambda: Path(path).exists(), timeout=timeout)
 
 
 class UnreadablePath(Path):
-    """读起来像 0600 root 的文件：普通用户 read_text 直接被拒。"""
+    """Behaves like a 0600 root file: read_text is refused outright for a regular user."""
 
-    if hasattr(type(Path()), "_flavour"):  # Python 3.11 的路径子类需要它
+    if hasattr(type(Path()), "_flavour"):  # path subclasses on Python 3.11 need it
         _flavour = type(Path())._flavour
 
-    def read_text(self, *args, **kwargs):  # noqa: D102 —— 故意覆盖
+    def read_text(self, *args, **kwargs):  # noqa: D102 -- overridden on purpose
         raise PermissionError(13, "Permission denied", str(self))
 
 
 class ElevatedReader:
-    """提权会话：读得到普通用户读不了的文件（sudo cat 读得到）。"""
+    """An elevated session: it can read files a regular user cannot (like sudo cat)."""
 
     def __init__(self, platform=None):
         self.platform = platform

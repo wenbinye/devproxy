@@ -1,4 +1,4 @@
-"""日志：轮转写入与 `devproxy logs <路由名>`。"""
+"""Logs: rotating writes and `devproxy logs <route name>`."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ def _invoke(args: list[str]):
     return CliRunner().invoke(app, args)
 
 
-# -- 轮转 ----------------------------------------------------------------
+# -- rotation ------------------------------------------------------------
 
 
 def test_writer_writes_to_file(tmp_path):
@@ -30,15 +30,15 @@ def test_writer_writes_to_file(tmp_path):
 
 
 def test_writer_rotates_over_the_cap(tmp_path):
-    """超过上限就轮转：当前文件从头写，旧的变成 .1。"""
+    """Rotate past the cap: the current file starts from scratch, the old one becomes .1."""
     log = tmp_path / "svc.log"
     writer = RotatingLogWriter(log, max_bytes=100)
     writer.write(b"x" * 80)
-    writer.write(b"y" * 80)  # 这一写越过上限 → 轮转
+    writer.write(b"y" * 80)  # this write crosses the cap -> rotate
     writer.close()
 
-    assert history_path(log, 1).exists(), "上一份应被保留成 .1"
-    assert log.stat().st_size < 100, "当前文件应是轮转后的新文件"
+    assert history_path(log, 1).exists(), "the previous file must be kept as .1"
+    assert log.stat().st_size < 100, "the current file must be the new file after rotation"
 
 
 def test_rotation_keeps_only_one_history(tmp_path):
@@ -48,11 +48,11 @@ def test_rotation_keeps_only_one_history(tmp_path):
         writer.write(b"z" * 60)
     writer.close()
     assert history_path(log, 1).exists()
-    assert not history_path(log, 2).exists(), "只保留一份历史"
+    assert not history_path(log, 2).exists(), "keep only one history file"
 
 
 def test_writer_survives_disk_error(tmp_path):
-    """写失败（磁盘满）不能抛 —— 丢弃内容，但不能拖垮子进程。"""
+    """A failed write (disk full) must not raise -- drop the content, but never take down the child process."""
 
     class _Full:
         def write(self, data):  # noqa: D102
@@ -69,22 +69,25 @@ def test_writer_survives_disk_error(tmp_path):
 
     writer = RotatingLogWriter(tmp_path / "svc.log")
     writer._handle = _Full()
-    writer.write(b"still fine\n")  # 不抛
+    writer.write(b"still fine\n")  # must not raise
     writer.close()
 
 
 def test_rotate_at_start_keeps_previous_session(tmp_path):
-    """启动时轮转（超过上限才转）：上一轮挪成 .1，当前文件清空。"""
+    """Rotate at startup (only past the cap): the previous session moves to .1, the current file is emptied."""
     log = tmp_path / "svc.log"
     log.write_bytes(b"old session" * 100)
     rotate_at_start(log, max_bytes=100)
     assert history_path(log, 1).exists()
-    # 当前文件此刻还不存在（等应用第一次写才创建）或为空 —— 都不该再有旧内容
-    assert not log.exists() or log.stat().st_size == 0, "当前文件不该再有旧内容"
+    # The current file does not exist yet at this point (it is created when the app
+    # first writes) or is empty -- either way it must no longer contain old content
+    assert not log.exists() or log.stat().st_size == 0, (
+        "the current file must no longer contain old content"
+    )
 
 
 def test_rotate_at_start_keeps_small_file(tmp_path):
-    """小文件不轮转 —— 免得频繁重启把有用的尾巴弄丢。"""
+    """Do not rotate small files -- avoid losing a useful tail on frequent restarts."""
     log = tmp_path / "svc.log"
     log.write_bytes(b"tiny")
     rotate_at_start(log, max_bytes=100)
@@ -93,15 +96,15 @@ def test_rotate_at_start_keeps_small_file(tmp_path):
 
 
 def test_rotate_at_start_missing_file_is_noop(tmp_path):
-    rotate_at_start(tmp_path / "nope.log")  # 不抛
+    rotate_at_start(tmp_path / "nope.log")  # must not raise
 
 
-# -- devproxy logs <路由名> ----------------------------------------------
+# -- devproxy logs <route name> ------------------------------------------
 
 
 @pytest.fixture
 def log_dir(tmp_path, monkeypatch):
-    """一个只含日志目录的假状态目录。"""
+    """A fake state directory containing only the log directory."""
     from devproxy.core.paths import Paths
 
     paths = Paths(tmp_path / "cfg", tmp_path / "state", tmp_path / "data")
@@ -119,17 +122,17 @@ def log_dir(tmp_path, monkeypatch):
 def test_logs_rejects_unknown_name(log_dir):
     result = _invoke(["logs", "nope"])
     assert result.exit_code == 2, result.output
-    assert "myapp" in result.output, "应列出可用的路由日志"
+    assert "myapp" in result.output, "should list the available route logs"
 
 
 def test_logs_lists_available_route_logs(log_dir):
     result = _invoke(["logs", "nope"])
-    assert "可用的路由日志" in result.output
+    assert "available route logs" in result.output
     assert "myapp" in result.output
 
 
 def test_logs_follows_route_log(log_dir, monkeypatch):
-    """跟路由日志：调 follow_log 并把路径记下来。"""
+    """Following a route log: call follow_log and record the path."""
     seen: list[Path] = []
 
     def fake_follow(path: Path) -> None:
@@ -142,7 +145,7 @@ def test_logs_follows_route_log(log_dir, monkeypatch):
 
 
 def test_logs_still_supports_services(monkeypatch):
-    """caddy / dnsmasq 的老行为不变。"""
+    """The existing caddy / dnsmasq behavior is unchanged."""
     called: list[str] = []
 
     class _FakePlatform:
@@ -156,28 +159,28 @@ def test_logs_still_supports_services(monkeypatch):
 
 
 def test_logs_service_unknown_still_exits_2(monkeypatch):
-    """不是路由名、也不是服务名 → 仍按参数错误退 2。"""
+    """Neither a route name nor a service name -> still a usage error, exit 2."""
     result = _invoke(["logs", "nginx"])
     assert result.exit_code == 2, result.output
 
 
 def test_max_log_bytes_is_sane():
-    """上限必须是「有意义的大小」—— 太小会截断正常日志，太大没意义。"""
+    """The cap must be a "meaningful size" -- too small truncates normal logs, too large is pointless."""
     assert 1 * 1024 * 1024 <= MAX_LOG_BYTES <= 100 * 1024 * 1024
 
 
 def test_logs_list_shows_services_and_routes(log_dir):
-    """--list：列出所有能跟的目标，不跟随。"""
+    """--list: list every target that can be followed, without following."""
     result = _invoke(["logs", "--list"])
     assert result.exit_code == 0, result.output
     assert "caddy" in result.output
     assert "dnsmasq" in result.output
     assert "myapp" in result.output
-    assert "路由日志" in result.output
+    assert "Route logs:" in result.output
 
 
 def test_logs_list_does_not_follow(log_dir, monkeypatch):
-    """--list 不能去跟随日志。"""
+    """--list must not follow any log."""
     called: list[str] = []
 
     class _FakePlatform:
@@ -191,13 +194,13 @@ def test_logs_list_does_not_follow(log_dir, monkeypatch):
 
 
 def test_logs_list_shows_size(log_dir):
-    """每个路由日志带大小 —— 挑哪个看时有用。"""
+    """Each route log comes with its size -- useful when choosing which one to read."""
     result = _invoke(["logs", "--list"])
     assert "B" in result.output or "KB" in result.output
 
 
 def test_logs_list_without_any_route_log(tmp_path, monkeypatch):
-    """一个路由日志都没有时也给得出结论，不报错。"""
+    """With no route logs at all, still reach a conclusion without error."""
     from devproxy.core.paths import Paths
 
     paths = Paths(tmp_path / "cfg", tmp_path / "state", tmp_path / "data")
@@ -208,15 +211,15 @@ def test_logs_list_without_any_route_log(tmp_path, monkeypatch):
     )
     result = _invoke(["logs", "--list"])
     assert result.exit_code == 0, result.output
-    assert "没有" in result.output
+    assert "Route logs: (none" in result.output
 
 
-# -- --list 的项目作用域 -------------------------------------------------
+# -- --list project scope -------------------------------------------------
 
 
 @pytest.fixture
 def project_scope(tmp_path, monkeypatch):
-    """项目目录：devproxy.toml 声明 web；日志目录里有 web 和 other 的。"""
+    """Project directory: devproxy.toml declares web; the log directory has logs for web and other."""
     from devproxy.core.paths import Paths
 
     project = tmp_path / "proj"
@@ -225,12 +228,12 @@ def project_scope(tmp_path, monkeypatch):
         '[[routes]]\nname = "web"\ncommand = ["npm", "run", "dev"]\n',
         encoding="utf-8",
     )
-    (project / ".git").mkdir()  # 让项目根 = 这个目录
+    (project / ".git").mkdir()  # make the project root = this directory
     paths = Paths(tmp_path / "cfg", tmp_path / "state", tmp_path / "data")
     routes = paths.log_dir / "routes"
     routes.mkdir(parents=True, exist_ok=True)
     (routes / "web.log").write_text("w\n", encoding="utf-8")
-    (routes / "other.log").write_text("o\n", encoding="utf-8")  # 别的项目的
+    (routes / "other.log").write_text("o\n", encoding="utf-8")  # another project's
 
     monkeypatch.chdir(project)
     monkeypatch.setattr(
@@ -241,16 +244,16 @@ def project_scope(tmp_path, monkeypatch):
 
 
 def test_logs_list_in_project_shows_only_project_routes(project_scope):
-    """项目里 --list 只列本项目声明的路由，别的项目的不混进来。"""
+    """Inside a project, --list lists only this project's declared routes; other projects never mix in."""
     result = _invoke(["logs", "--list"])
     assert result.exit_code == 0, result.output
     assert "web" in result.output
-    assert "other" not in result.output, "别的项目的路由不该混进来"
-    assert "本项目" in result.output
+    assert "other" not in result.output, "another project's routes must not mix in"
+    assert "This project" in result.output
 
 
 def test_logs_list_in_project_mentions_undeclared(project_scope):
-    """声明了但还没起过（没有日志文件）的路由也要提示。"""
+    """Routes that are declared but have never run (no log file) must also be mentioned."""
     toml = project_scope[0] / "devproxy.toml"
     toml.write_text(
         '[[routes]]\nname = "web"\ncommand = ["npm", "run", "dev"]\n'
@@ -260,7 +263,7 @@ def test_logs_list_in_project_mentions_undeclared(project_scope):
     result = _invoke(["logs", "--list"])
     assert result.exit_code == 0, result.output
     assert "ghost" in result.output
-    assert "还没有日志" in result.output
+    assert "declared but no logs yet" in result.output
 
 
 def test_logs_one_target_shows_path_and_follow_hint(project_scope):
@@ -271,7 +274,7 @@ def test_logs_one_target_shows_path_and_follow_hint(project_scope):
 
 
 def test_logs_bare_in_project_follows_project_apps(project_scope, monkeypatch):
-    """裸 `devproxy logs` 在项目里 = 跟本项目所有应用（一个时就是 tail -f）。"""
+    """Bare `devproxy logs` inside a project = follow every app of this project (tail -f when there is one)."""
     followed: list[Path] = []
     monkeypatch.setattr("devproxy.cli.logs.follow_log", lambda path: followed.append(path))
     result = _invoke(["logs"])
@@ -280,12 +283,12 @@ def test_logs_bare_in_project_follows_project_apps(project_scope, monkeypatch):
 
 
 def test_logs_bare_outside_project_still_defaults_to_caddy(tmp_path, monkeypatch):
-    """项目外裸 `devproxy logs` 仍跟 caddy（老行为）。"""
+    """Bare `devproxy logs` outside a project still follows caddy (the old behavior)."""
     from devproxy.core.paths import Paths
 
     paths = Paths(tmp_path / "cfg", tmp_path / "state", tmp_path / "data")
     paths.ensure_files()
-    monkeypatch.chdir(tmp_path)  # 没有 devproxy.toml
+    monkeypatch.chdir(tmp_path)  # no devproxy.toml
     called: list[str] = []
 
     class _FakePlatform:
@@ -299,7 +302,7 @@ def test_logs_bare_outside_project_still_defaults_to_caddy(tmp_path, monkeypatch
 
 
 def test_logs_bare_multi_app_uses_colored_tags(project_scope, monkeypatch):
-    """多个应用：加标签 + 图例，走 follow_many。"""
+    """Multiple apps: add tags + legend and go through follow_many."""
     toml = project_scope[0] / "devproxy.toml"
     toml.write_text(
         '[[routes]]\nname = "web"\ncommand = ["npm", "run", "dev"]\n'
@@ -318,13 +321,13 @@ def test_logs_bare_multi_app_uses_colored_tags(project_scope, monkeypatch):
     assert result.exit_code == 0, result.output
     assert len(seen) == 1
     tags = [t for t, _ in seen[0]]
-    assert tags == ["web", "api"], "标签就是 devproxy.toml 里的应用名"
-    assert "跟随中" in result.output
+    assert tags == ["web", "api"], "the tags are the app names in devproxy.toml"
+    assert "Following (Ctrl-C to exit)" in result.output
     assert "[web]" in result.output and "[api]" in result.output
 
 
 def test_logs_list_with_broken_project_file_falls_back(tmp_path, monkeypatch):
-    """devproxy.toml 坏了：提示一声，按全部路由列出（而不是拒绝服务）。"""
+    """Broken devproxy.toml: print a note and list every route (rather than refusing service)."""
     from devproxy.core.paths import Paths
 
     project = tmp_path / "proj"
@@ -343,34 +346,34 @@ def test_logs_list_with_broken_project_file_falls_back(tmp_path, monkeypatch):
     )
     result = _invoke(["logs", "--list"])
     assert result.exit_code == 0, result.output
-    assert "按全部路由列出" in result.output
+    assert "listing every route instead" in result.output
     assert "web" in result.output
 
 
-# -- --list 的完整路径 ----------------------------------------------------
+# -- full paths in --list --------------------------------------------------
 
 
 def test_logs_list_shows_full_path(log_dir):
-    """--list 里能直接看到每个日志文件的完整路径 —— 不用自己拼。"""
+    """--list shows the full path of every log file directly -- no need to assemble it yourself."""
     result = _invoke(["logs", "--list"])
     assert result.exit_code == 0, result.output
     expected = str(log_dir.log_dir / "routes" / "myapp.log")
-    assert expected in result.output, f"应显示完整路径：\n{result.output}"
+    assert expected in result.output, f"should show the full path:\n{result.output}"
 
 
 def test_logs_list_in_project_shows_full_path(project_scope):
-    """项目模式同样给完整路径（表头给的是 devproxy.toml，不是日志目录）。"""
+    """Project mode also gives full paths (the heading names devproxy.toml, not the log directory)."""
     result = _invoke(["logs", "--list"])
     assert result.exit_code == 0, result.output
     expected = str(project_scope[1].log_dir / "routes" / "web.log")
-    assert expected in result.output, f"应显示完整路径：\n{result.output}"
+    assert expected in result.output, f"should show the full path:\n{result.output}"
 
 
 # -- --edit ---------------------------------------------------------------
 
 
 class _RecordingPlatform:
-    """只记 open_in_editor 调用的假平台。"""
+    """Fake platform that only records open_in_editor calls."""
 
     def __init__(self, code: int = 0, error: Exception | None = None) -> None:
         self.calls: list[tuple[Path, str]] = []
@@ -385,7 +388,7 @@ class _RecordingPlatform:
 
 
 def test_logs_edit_opens_route_log_with_editor(log_dir, monkeypatch):
-    """--edit 用 $EDITOR 打开路由日志文件。"""
+    """--edit opens the route log file with $EDITOR."""
     platform = _RecordingPlatform()
     monkeypatch.setattr("devproxy.cli._shared._platform", lambda: platform)
     monkeypatch.setenv("EDITOR", "vim")
@@ -397,7 +400,7 @@ def test_logs_edit_opens_route_log_with_editor(log_dir, monkeypatch):
 
 
 def test_logs_edit_falls_back_to_visual(log_dir, monkeypatch):
-    """EDITOR 没设就用 VISUAL。"""
+    """When EDITOR is unset, use VISUAL."""
     platform = _RecordingPlatform()
     monkeypatch.setattr("devproxy.cli._shared._platform", lambda: platform)
     monkeypatch.delenv("EDITOR", raising=False)
@@ -409,7 +412,7 @@ def test_logs_edit_falls_back_to_visual(log_dir, monkeypatch):
 
 
 def test_logs_edit_without_editor_exits_2(log_dir, monkeypatch):
-    """EDITOR / VISUAL 都没设、PATH 里也没有候选编辑器 → 按参数错误退 2。"""
+    """Neither EDITOR nor VISUAL is set and no candidate editor is in PATH -> usage error, exit 2."""
     monkeypatch.delenv("EDITOR", raising=False)
     monkeypatch.delenv("VISUAL", raising=False)
     monkeypatch.setattr("devproxy.cli.logs.which", lambda name: None)
@@ -417,16 +420,16 @@ def test_logs_edit_without_editor_exits_2(log_dir, monkeypatch):
     result = _invoke(["logs", "myapp", "--edit"])
     assert result.exit_code == 2, result.output
     assert "EDITOR" in result.output
-    assert "vim" in result.output, "应把候选编辑器说清楚"
+    assert "vim" in result.output, "should spell out the candidate editors"
 
 
 def test_logs_edit_falls_back_to_first_available_editor(log_dir, monkeypatch):
-    """没设 EDITOR：依次探测 vim / vi / nano，用第一个在 PATH 里的。"""
+    """EDITOR unset: probe vim / vi / nano in order and use the first one in PATH."""
     platform = _RecordingPlatform()
     monkeypatch.setattr("devproxy.cli._shared._platform", lambda: platform)
     monkeypatch.delenv("EDITOR", raising=False)
     monkeypatch.delenv("VISUAL", raising=False)
-    # vim 没装、vi 没装、nano 有 → 用 nano
+    # vim not installed, vi not installed, nano available -> use nano
     monkeypatch.setattr(
         "devproxy.cli.logs.which",
         lambda name: "/usr/bin/nano" if name == "nano" else None,
@@ -438,7 +441,7 @@ def test_logs_edit_falls_back_to_first_available_editor(log_dir, monkeypatch):
 
 
 def test_logs_edit_falls_back_to_vim_when_available(log_dir, monkeypatch):
-    """没设 EDITOR 且 vim 可用 → 用 vim（候选顺序的第一位）。"""
+    """EDITOR unset and vim available -> use vim (first in the candidate order)."""
     platform = _RecordingPlatform()
     monkeypatch.setattr("devproxy.cli._shared._platform", lambda: platform)
     monkeypatch.delenv("EDITOR", raising=False)
@@ -451,23 +454,23 @@ def test_logs_edit_falls_back_to_vim_when_available(log_dir, monkeypatch):
 
 
 def test_logs_edit_rejects_service_logs(monkeypatch):
-    """服务日志不是文件，编辑器打不开 —— 明确报错，不猜。"""
+    """A service log is not a file an editor can open -- report clearly, do not guess."""
     monkeypatch.setenv("EDITOR", "vim")
     result = _invoke(["logs", "caddy", "--edit"])
     assert result.exit_code == 2, result.output
-    assert "跟随" in result.output
+    assert "to follow it" in result.output
 
 
 def test_logs_edit_rejects_unknown_route(log_dir, monkeypatch):
-    """没有这个路由的日志 → 退 2。"""
+    """No log for this route -> exit 2."""
     monkeypatch.setenv("EDITOR", "vim")
     result = _invoke(["logs", "nope", "--edit"])
     assert result.exit_code == 2, result.output
-    assert "myapp" in result.output, "应列出可用的路由日志"
+    assert "myapp" in result.output, "should list the available route logs"
 
 
 def test_logs_edit_without_name_exits_2(log_dir, monkeypatch):
-    """--edit 必须指定打开哪个日志。"""
+    """--edit must specify which log to open."""
     monkeypatch.setenv("EDITOR", "vim")
     result = _invoke(["logs", "--edit"])
     assert result.exit_code == 2, result.output
@@ -475,14 +478,14 @@ def test_logs_edit_without_name_exits_2(log_dir, monkeypatch):
 
 
 def test_logs_edit_rejects_list_together(log_dir, monkeypatch):
-    """--list 与 --edit 互斥。"""
+    """--list and --edit are mutually exclusive."""
     monkeypatch.setenv("EDITOR", "vim")
     result = _invoke(["logs", "--list", "--edit"])
     assert result.exit_code == 2, result.output
 
 
 def test_logs_edit_reports_editor_failure(log_dir, monkeypatch):
-    """编辑器退出码非 0 → 报出来（退 1，运行失败）。"""
+    """Editor exits non-zero -> report it (exit 1, runtime failure)."""
     platform = _RecordingPlatform(code=3)
     monkeypatch.setattr("devproxy.cli._shared._platform", lambda: platform)
     monkeypatch.setenv("EDITOR", "vim")
@@ -493,7 +496,7 @@ def test_logs_edit_reports_editor_failure(log_dir, monkeypatch):
 
 
 def test_logs_edit_reports_missing_editor(log_dir, monkeypatch):
-    """编辑器不存在 → 干净报错，不抛 traceback。"""
+    """Editor does not exist -> clean error, no traceback."""
     platform = _RecordingPlatform(error=FileNotFoundError("no such file: 'vim'"))
     monkeypatch.setattr("devproxy.cli._shared._platform", lambda: platform)
     monkeypatch.setenv("EDITOR", "vim")

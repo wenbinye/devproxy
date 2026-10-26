@@ -1,27 +1,29 @@
-"""命令层的公共接缝（兼容入口）。
+"""The command layer's shared seams (compatibility façade).
 
-实现按关注点拆在四个模块里：
+The implementation is split by concern across four modules:
 
-- `_runtime`：Rich console、退出码、`fail()`
-- `_typer`：`--` 切分组
-- `_context`：配置加载、平台/组件装配
-- `_render`：表格、提示文案、执行结果汇总
+- `_runtime`: Rich consoles, exit codes, `fail()`
+- `_typer`: the `--` splitting group
+- `_context`: config loading, platform/component assembly
+- `_render`: tables, hint texts, result summaries
 
-命令模块仍然只 `from devproxy.cli import _shared as s`，并在**调用时**
-查找 `s.<名字>`（如 `s.build_context(...)`、`s._platform()`）。这里
-转出的名字因此是稳定契约：测试对 `devproxy.cli._shared.<名字>` 打桩
-必须能覆盖所有命令，不要改成命令模块里的直接 import。
+Command modules still only do `from devproxy.cli import _shared as s` and look up
+`s.<name>` at **call time** (e.g. `s.build_context(...)`, `s._platform()`). The
+names re-exported here are therefore a stable contract: patching
+`devproxy.cli._shared.<name>` in tests must cover every command, so do not turn
+these into direct imports inside command modules.
 
-名字里的下划线是历史契约的一部分（既有测试与文档都按这些名字打桩），
-不代表模块私有。
+The leading underscores are part of that historical contract (existing tests and
+docs patch these names); they do not mean the module is private.
 """
 
 from __future__ import annotations
 
-# 本模块是稳定的兼容转出口：导入的名字供命令模块与测试使用，
-# 不能按“未使用”删掉（ruff 看不到 `s.<名字>` 这种调用时查找）。
+# This module is a stable re-export surface: the imported names are used by
+# command modules and tests, so they must not be deleted as "unused" (ruff
+# cannot see the `s.<name>` lookups that happen at call time).
 # ruff: noqa: F401
-import typer  # 测试经 `_shared.typer.confirm` 打桩
+import typer  # tests patch `_shared.typer.confirm`
 
 from devproxy.cli._context import StorageArchiveError
 from devproxy.cli._context import _components
@@ -60,8 +62,9 @@ from devproxy.cli._runtime import err_console
 from devproxy.cli._runtime import fail
 from devproxy.cli._typer import DevProxyGroup
 
-# 组件 / 网关 / 生命周期接缝：命令模块经 `s.<名字>` 在调用时查找。
-# 这些导入只加载类与函数，不会构造平台或碰真实系统。
+# Component / gateway / lifecycle seams: command modules look these up as
+# `s.<name>` at call time. These imports only load classes and functions; they
+# never construct a platform or touch the real system.
 from devproxy.components.caddy import CaddyComponent  # noqa: F401
 from devproxy.components.certs import CertComponent  # noqa: F401
 from devproxy.components.dns import DnsComponent  # noqa: F401

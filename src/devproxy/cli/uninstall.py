@@ -1,4 +1,5 @@
-"""uninstall 命令：只做输出与退出码编排，计划与执行在 lifecycle.uninstall。"""
+"""The uninstall command: only output and exit codes; planning and execution live in
+lifecycle.uninstall."""
 
 from __future__ import annotations
 
@@ -14,23 +15,24 @@ from devproxy.cli._shared import EXIT_OK
 @app.command()
 def uninstall(
     dry_run: bool = typer.Option(
-        False, "--dry-run", help="只打印将要执行的步骤，不做任何变更、不需要 sudo"
+        False, "--dry-run", help="Only print the steps; change nothing and need no sudo"
     ),
-    yes: bool = typer.Option(False, "--yes", help="非交互模式，不询问"),
+    yes: bool = typer.Option(False, "--yes", help="Non-interactive mode; do not ask"),
     purge: bool = typer.Option(
         False,
         "--purge",
-        help="直接删除 Caddy 存储、备份与下载的 caddy 二进制（不给就在交互时问）",
+        help="Also delete the Caddy storage, backups, and the downloaded caddy binary "
+        "(asked interactively when omitted)",
     ),
     remove_ca: bool = typer.Option(
         False,
         "--remove-ca",
-        help="直接卸载 CA（不给就在交互时问；迁移来的 CA 默认保留）",
+        help="Also remove the CA (asked interactively when omitted; migrated CAs are kept by default)",
     ),
 ) -> None:
-    """卸载 devproxy：停止服务、移除单元、DNS 路由与（可选）CA。
+    """Uninstall devproxy: stop services, remove units, the DNS route, and (optionally) the CA.
 
-    默认保留你的配置、个人站点、Caddy 存储与备份。
+    Your config, personal sites, Caddy storage, and backups are kept by default.
     """
     paths, config, _, _ = s.build_context()
     platform = s._platform()
@@ -47,47 +49,50 @@ def uninstall(
 
     try:
         plan = _plan(purge, remove_ca)
-    except Exception as e:  # noqa: BLE001 —— 计划失败必须变成可读信息 + 退出码 1
+    except Exception as e:  # noqa: BLE001 -- a failed plan must become a readable message + exit 1
         s.fail(str(e))
 
     s.render_uninstall_plan(plan, dry_run=dry_run)
 
     if plan.is_noop:
-        s.console.print("没有可卸载的东西。")
+        s.console.print("Nothing to uninstall.")
         s.print_uninstall_kept(plan, dry_run=dry_run)
         raise typer.Exit(EXIT_OK)
 
     if dry_run:
         s.print_uninstall_kept(plan, dry_run=True)
-        s.console.print("预览结束：未执行任何变更。")
+        s.console.print("Preview finished: no changes were applied.")
         raise typer.Exit(EXIT_OK)
 
     interactive = s._interactive() and not yes
     if not interactive and not yes:
-        s.err_console.print("非交互环境且未指定 --yes，拒绝执行卸载。")
+        s.err_console.print("Non-interactive environment without --yes; refusing to uninstall.")
         raise typer.Exit(EXIT_DECLINED)
 
     if interactive:
-        # 两个"可选破坏面"逐项问：命令行给了就跳过，没给就问 ——
-        # 免得用户为了卸载先记住两个不常用的 flag。
+        # Ask about the two optional destructive parts one by one: skip when given on the
+        # command line, ask when not -- so users need not memorize two rarely used flags
+        # just to uninstall.
         chosen_purge = purge
         chosen_remove_ca = remove_ca
         if not purge:
             chosen_purge = s.typer.confirm(
-                "还要删除 Caddy 存储（CA 与证书）、迁移备份与下载的 caddy 二进制吗？（不可恢复）",
+                "Also delete the Caddy storage (CA and certificates), the migration backups, "
+                "and the downloaded caddy binary? (irreversible)",
                 default=False,
             )
         if not remove_ca and plan.ca_kept:
             chosen_remove_ca = s.typer.confirm(
-                "要把 CA 从系统信任库卸载吗？（它在本工具接管前就存在，你的站点可能仍在使用）",
+                "Remove the CA from the system trust store? "
+                "(it existed before this tool took over, so your sites may still rely on it)",
                 default=False,
             )
         if chosen_purge != purge or chosen_remove_ca != remove_ca:
             plan = _plan(chosen_purge, chosen_remove_ca)
             s.console.print("")
             s.render_uninstall_plan(plan, dry_run=False)
-        if not s.typer.confirm("即将执行以上卸载步骤，继续？", default=False):
-            s.console.print("已取消：什么都没改（未执行任何变更）。")
+        if not s.typer.confirm("About to run the uninstall steps above. Continue?", default=False):
+            s.console.print("Cancelled: nothing was changed (no changes were applied).")
             raise typer.Exit(EXIT_DECLINED)
 
     results = s.apply_uninstall_plan(plan)
@@ -95,5 +100,5 @@ def uninstall(
     s.print_uninstall_kept(plan)
     if not ok:
         raise typer.Exit(EXIT_FAIL)
-    s.console.print("卸载完成。")
+    s.console.print("Uninstall complete.")
     raise typer.Exit(EXIT_OK)

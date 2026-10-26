@@ -1,4 +1,4 @@
-"""目录约定。所有路径集中在此，其他模块不得自行拼路径。"""
+"""Directory conventions. All paths live here; other modules must not compose paths themselves."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class Paths:
-    """devproxy 使用的三棵目录树。"""
+    """The three directory trees used by devproxy."""
 
     config_dir: Path
     state_dir: Path
@@ -46,18 +46,21 @@ class Paths:
 
     @property
     def caddy_env(self) -> Path:
-        """迁移来的 caddy 单元环境变量（如 MINIKUBE_IP）。
+        """Caddy unit environment variables migrated over (such as MINIKUBE_IP).
 
-        用户站点里的 {$MINIKUBE_IP:…} 依赖它 —— 重装单元时必须带上。
+        `{$MINIKUBE_IP:…}` in user sites depends on it -- it must be carried
+        over when the unit is reinstalled.
         """
         return self.state_dir / "caddy-env.json"
 
     @property
     def caddy_storage(self) -> Path:
-        """迁移时生效的 Caddy storage 路径（CA 所在目录）。
+        """Caddy storage path in effect during migration (the directory holding the CA).
 
-        沿用遗留环境的 storage 之后必须留档：之后的 setup 若换回配置里的
-        路径，Caddy 会重新生成 CA，浏览器信任与已有证书全部失效。
+        After reusing the legacy environment's storage it must be archived: if
+        a later setup switches back to the path from the config, Caddy
+        regenerates the CA and all browser trust and existing certificates
+        become invalid.
         """
         return self.state_dir / "caddy-storage.json"
 
@@ -66,24 +69,26 @@ class Paths:
         return self.state_dir / "logs"
 
     def ensure(self) -> None:
-        """创建配置与状态目录。data_dir 交给 Caddy 自行创建。"""
+        """Create the config and state directories. data_dir is left for Caddy to create itself."""
         self.config_dir.mkdir(parents=True, exist_ok=True)
         self.state_dir.mkdir(parents=True, exist_ok=True)
 
     def ensure_files(self) -> None:
-        """创建 Caddyfile import 目标必须存在的空文件。"""
+        """Create the empty files that Caddyfile import targets must have in order to exist."""
         self.ensure()
         for f in (self.sites_caddy, self.routes_caddy):
             f.touch(exist_ok=True)
 
 
 def atomic_write_text(path: Path, text: str) -> None:
-    """同目录临时文件 + os.replace 原子落盘。
+    """Same-directory temp file + os.replace for an atomic write.
 
-    留档（caddy-env.json / caddy-storage.json）被读到一半的后果很重：
-    截断的 JSON 会被当成"没有留档"，storage 回退会让 Caddy 重建 CA。
-    直接 write_text 在进程被杀/磁盘写满时会留下截断文件，这里保证
-    目标文件要么是旧内容、要么是完整的新内容。
+    Archives (caddy-env.json / caddy-storage.json) being read half-written
+    has serious consequences: a truncated JSON file is treated as "no
+    archive", and a storage fallback makes Caddy rebuild the CA. A direct
+    write_text leaves a truncated file behind when the process is killed or
+    the disk fills up; this guarantees the target is either the old content
+    or the complete new content.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -105,12 +110,15 @@ def atomic_write_text(path: Path, text: str) -> None:
 
 
 def default_state_dir(home: Path | None = None) -> Path:
-    """状态目录（默认 ~/.local/state/devproxy）。
+    """State directory (defaults to ~/.local/state/devproxy).
 
-    状态目录只有一个来源 —— 平台层（macOS 的日志目录等）也走这里，
-    不许自己拼路径：拼两份就迟早对不上，日志写一半、状态存一半。
+    There is only one source for the state directory -- the platform layer
+    (such as the macOS log directory) uses this too and must not compose the
+    path itself: two copies will eventually diverge, with logs and state
+    written to different places.
 
-    环境变量 DEVPROXY_STATE_DIR 优先（测试与多实例场景用）。
+    The DEVPROXY_STATE_DIR environment variable takes precedence (for tests
+    and multi-instance scenarios).
     """
     env = os.environ.get("DEVPROXY_STATE_DIR")
     if env:
@@ -120,7 +128,7 @@ def default_state_dir(home: Path | None = None) -> Path:
 
 
 def default_paths() -> Paths:
-    """默认路径；环境变量可整体覆盖（测试与多实例场景用）。"""
+    """Default paths; an environment variable can override the whole set (for tests and multi-instance scenarios)."""
     home = Path.home()
     config_dir = Path(os.environ.get("DEVPROXY_CONFIG_DIR", home / ".config" / "devproxy"))
     state_dir = default_state_dir(home)

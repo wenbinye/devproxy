@@ -1,10 +1,14 @@
-"""隔离 Caddy 实例的端到端自检 —— 不碰生产 443/2019。
+"""End-to-end self-test on an isolated Caddy instance -- never touches the
+production 443/2019.
 
-沿用 devp selftest 的成熟做法：独立 admin 端口、独立 https/http 端口、
-独立 storage，用沙箱自己的 CA 做真实主机名校验的 HTTPS 请求。
+Following devp selftest's proven approach: separate admin port, separate
+https/http ports, separate storage, and HTTPS requests with real hostname
+verification using the sandbox's own CA.
 
-与 devp 的差异：沙箱用**精确站点块**（一个路由一个块 + tls internal），
-没有通配块也没有 on-demand —— 未注册域名因此拿不到任何证书，握手直接失败。
+Difference from devp: the sandbox uses **exact site blocks** (one block per
+route + tls internal), with no wildcard blocks and no on-demand -- so
+unregistered domains get no certificate at all and the handshake fails
+outright.
 """
 
 from __future__ import annotations
@@ -35,16 +39,19 @@ from devproxy.gateway.routes import render_caddyfile
 
 UPSTREAM_BODY = b"hello-from-upstream"
 
-# pki app（以及它的 install_trust 开关）自 Caddy 2.7 起才有。
-# 更老的 caddy 会静默忽略 JSON 里的 install_trust 字段 —— 那时沙箱 CA
-# 会被装进宿主的系统/NSS/Java 信任库，正是本任务要避免的事。
+# The pki app (and its install_trust switch) only exists since Caddy 2.7.
+# Older caddy silently ignores the install_trust field in JSON -- in that
+# case the sandbox CA gets installed into the host's system/NSS/Java trust
+# stores, exactly what this task is meant to avoid.
 MIN_CADDY_VERSION = (2, 7, 0)
 
-# Caddy 在 install_trust=false 时会打这行日志（modules/caddypki/pki.go）。
-# 它是「宿主信任库安装确实被关掉了」的唯一外部可见证据。
+# Caddy logs this line when install_trust=false (modules/caddypki/pki.go).
+# It is the only externally visible evidence that "host trust store
+# installation is really disabled".
 TRUST_DISABLED_LOG = "root certificate trust store installation disabled"
 
-# 外部命令一律有界：adapt/reload 挂住会把 finally 里的沙箱清理一起拖死。
+# External commands are always bounded: a hung adapt/reload would drag down
+# the sandbox cleanup in finally too.
 CADDY_COMMAND_TIMEOUT = 30.0
 
 
@@ -60,7 +67,7 @@ class SelftestResult:
 
 
 class _UpstreamHandler(http.server.BaseHTTPRequestHandler):
-    """自检用的上游：任何 GET 都回一段固定文本。"""
+    """Upstream for the self-test: every GET returns a fixed piece of text."""
 
     def do_GET(self):
         self.send_response(200)
@@ -73,7 +80,8 @@ class _UpstreamHandler(http.server.BaseHTTPRequestHandler):
 
 
 def _fetch(host: str, port: int, ctx: ssl.SSLContext, timeout: float = 5.0):
-    """用给定 CA 做真实主机名校验的 HTTPS GET，返回 (状态码, 响应体)。"""
+    """HTTPS GET with real hostname verification using the given CA; returns
+    (status code, response body)."""
     conn = http.client.HTTPSConnection(host, port, context=ctx, timeout=timeout)
     try:
         conn.request("GET", "/")
@@ -85,12 +93,15 @@ def _fetch(host: str, port: int, ctx: ssl.SSLContext, timeout: float = 5.0):
 
 
 def _probe_context() -> ssl.SSLContext:
-    """不校验证书的探针上下文 —— 只用来回答「服务器到底给不给证书」。
+    """Probe context that verifies no certificates -- used only to answer
+    "does the server hand out a certificate at all?".
 
-    用校验 CA 的上下文去试未注册域名是不行的：通配块 *.test 也会让握手
-    成功，只是主机名对不上，客户端抛的是校验错误而不是「没有证书」。
-    探针上下文不校验任何东西，于是「握手成功」= 服务器确实发了一张证书，
-    「握手失败」= 它手上没有能用的证书。
+    Trying an unregistered domain with a CA-verifying context does not work:
+    a wildcard block *.test would also make the handshake succeed, only the
+    hostname would not match, and the client raises a verification error
+    rather than "no certificate". The probe context verifies nothing, so
+    "handshake succeeds" = the server really issued a certificate, and
+    "handshake fails" = it has no usable certificate on hand.
     """
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     ctx.check_hostname = False
@@ -99,11 +110,13 @@ def _probe_context() -> ssl.SSLContext:
 
 
 def _free_ports(count: int) -> list[int]:
-    """一次取 count 个互不相同的空闲端口。
+    """Get count distinct free ports at once.
 
-    同时持有所有 socket 再一起释放 —— 逐个 bind/close 可能拿到同一个
-    端口。沙箱全部使用动态端口：固定端口会让并发自检连上别人的 Caddy，
-    reload 改到别人的配置，自检结论完全不可信。
+    Hold all sockets at the same time, then release them together -- binding
+    and closing one at a time can hand out the same port twice. The sandbox
+    uses dynamic ports throughout: fixed ports would let a concurrent
+    self-test connect to someone else's Caddy and reload their config,
+    making the self-test's conclusions completely untrustworthy.
     """
     sockets: list[socket.socket] = []
     try:
@@ -118,7 +131,7 @@ def _free_ports(count: int) -> list[int]:
 
 
 def _storage_root(config: object) -> str | None:
-    """从 /config/ 的 JSON 里取 storage.file_system 的 root。"""
+    """Read storage.file_system's root from the /config/ JSON."""
     if not isinstance(config, dict):
         return None
     storage = config.get("storage")
@@ -129,11 +142,14 @@ def _storage_root(config: object) -> str | None:
 
 
 def _wait_admin(base: str, expected_storage: str, timeout: float = 15.0) -> bool:
-    """等 Admin API 就绪，并确认它确实是**本次沙箱**的实例。
+    """Wait for the Admin API to be ready and confirm it really is **this
+    sandbox's** instance.
 
-    只检查 HTTP 200 是不够的：如果沙箱 caddy 因端口冲突没起来，
-    这个端口可能被另一份自检（或用户自己的 Caddy）占着，随后 reload
-    就会改到别人的配置。storage 是沙箱独有的，用它做身份校验。
+    Checking only for HTTP 200 is not enough: if the sandbox caddy failed to
+    start due to a port conflict, the port may be held by another self-test
+    (or the user's own Caddy), and a subsequent reload would change someone
+    else's config. storage is unique to the sandbox, so use it for identity
+    verification.
     """
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -164,7 +180,7 @@ def _wait_file(path: Path, timeout: float = 15.0) -> bool:
 
 
 def _caddy_version(caddy_bin: Path) -> tuple[int, int, int] | None:
-    """解析 `caddy version` 的输出，形如 "v2.11.7 h1:..."。"""
+    """Parse the output of `caddy version`, e.g. "v2.11.7 h1:..."."""
     try:
         proc = subprocess.run(
             [str(caddy_bin), "version"], capture_output=True, text=True, timeout=15
@@ -181,16 +197,18 @@ def _read_log_tail(path: Path, limit: int = 800) -> str:
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return "(读不到 caddy 日志)"
+        return "(cannot read caddy log)"
     return text[-limit:].strip()
 
 
 def _wait_trust_disabled_log(log_path: Path, timeout: float = 10.0) -> bool:
-    """等 caddy 打出「宿主信任库安装已禁用」那行日志。
+    """Wait for caddy to log the "host trust store installation disabled"
+    line.
 
-    这是 install_trust=false 真正生效的唯一外部可见证据（老版本 caddy
-    会静默忽略该字段）。等不到就记为失败，但不中止后续检查 —— 调用方
-    负责把这条失败汇总到最终结果里。
+    This is the only externally visible evidence that install_trust=false
+    actually took effect (older caddy silently ignores the field). If it does
+    not appear, record a failure but do not abort the remaining checks -- the
+    caller aggregates this failure into the final result.
     """
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -206,11 +224,14 @@ def _adapt(
     config_json: Path,
     timeout: float = CADDY_COMMAND_TIMEOUT,
 ) -> tuple[bool, str]:
-    """Caddyfile → JSON，并把沙箱 CA 的「装进系统信任库」关掉。
+    """Caddyfile -> JSON, with the sandbox CA's "install into the system
+    trust store" turned off.
 
-    关掉的原因有两个：沙箱是一次性的 CA，装进系统信任库会污染宿主机；
-    而安装动作要走 sudo（可能提示密码），会把启动卡住好几十秒。
-    这只影响信任库，不影响签发与路由行为 —— 被测的仍是 tls internal。
+    There are two reasons: the sandbox is a one-off CA, and installing it
+    into the system trust store pollutes the host; also, installation goes
+    through sudo (may prompt for a password), which would stall startup for
+    tens of seconds. This only affects the trust store, not issuance or
+    routing behavior -- what is under test is still tls internal.
     """
     try:
         proc = subprocess.run(
@@ -220,22 +241,22 @@ def _adapt(
             timeout=timeout,
         )
     except subprocess.TimeoutExpired:
-        return False, f"caddy adapt 超时（{timeout}s）"
+        return False, f"caddy adapt timed out ({timeout}s)"
     except OSError as e:
-        return False, f"caddy adapt 无法执行：{e}"
+        return False, f"caddy adapt could not run: {e}"
     if proc.returncode != 0:
         return False, (proc.stderr or proc.stdout).strip()
     try:
         cfg = json.loads(proc.stdout)
     except json.JSONDecodeError as e:
-        return False, f"adapt 输出不是合法 JSON: {e}"
+        return False, f"adapt output is not valid JSON: {e}"
     cfg.setdefault("apps", {})["pki"] = {
         "certificate_authorities": {"local": {"install_trust": False}}
     }
     try:
         config_json.write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
     except OSError as e:
-        return False, f"写入沙箱配置失败：{e}"
+        return False, f"failed to write sandbox config: {e}"
     return True, ""
 
 
@@ -260,9 +281,9 @@ def _reload(
             timeout=timeout,
         )
     except subprocess.TimeoutExpired:
-        return False, f"caddy reload 超时（{timeout}s）"
+        return False, f"caddy reload timed out ({timeout}s)"
     except OSError as e:
-        return False, f"caddy reload 无法执行：{e}"
+        return False, f"caddy reload could not run: {e}"
     return proc.returncode == 0, (proc.stderr or proc.stdout).strip()
 
 
@@ -273,10 +294,13 @@ def _write_sandbox_configs(
     https_port: int,
     http_port: int,
 ) -> tuple[bool, Path, Path, Path]:
-    """创建沙箱的 routes/sites/Caddyfile；失败时记录并返回 (False, ...)。
+    """Create the sandbox's routes/sites/Caddyfile; on failure record it and
+    return (False, ...).
 
-    主 Caddyfile 由生产用的 build_main_caddyfile 生成 —— 否则生产生成器
-    改了全局块，自检覆盖不到，自检通过也证明不了生产路径正确。
+    The main Caddyfile is generated by the production build_main_caddyfile --
+    otherwise a change to the production global block would not be covered by
+    the self-test, and passing the self-test would not prove the production
+    path is correct.
     """
     routes_file = tmp / "routes.caddy"
     sites_file = tmp / "sites.caddy"
@@ -298,16 +322,17 @@ def _write_sandbox_configs(
             encoding="utf-8",
         )
     except OSError as e:
-        result.record(f"创建沙箱配置失败：{e}", False)
+        result.record(f"failed to create sandbox config: {e}", False)
         return False, routes_file, sites_file, caddyfile
     return True, routes_file, sites_file, caddyfile
 
 
 def run_selftest(caddy_bin: Path) -> SelftestResult:
-    """起隔离 Caddy，跑注册→转发→跳转→注销→证书策略的完整流程。"""
+    """Start an isolated Caddy and run the full flow: register -> forward ->
+    redirect -> unregister -> certificate policy."""
     result = SelftestResult()
     if not caddy_bin.exists():
-        result.record(f"找到 caddy 二进制 {caddy_bin}", False)
+        result.record(f"found caddy binary {caddy_bin}", False)
         return result
 
     tmp = Path(tempfile.mkdtemp(prefix="devproxy-selftest-"))
@@ -319,27 +344,29 @@ def run_selftest(caddy_bin: Path) -> SelftestResult:
         threading.Thread(target=upstream.serve_forever, daemon=True).start()
         uport = upstream.server_address[1]
 
-        # 版本地板：老于 2.7 的 caddy 没有 pki app，install_trust 会被静默忽略，
-        # 沙箱 CA 就会装进宿主信任库 —— 这种情况下宁可不跑。
+        # Version floor: caddy older than 2.7 has no pki app, install_trust is
+        # silently ignored, and the sandbox CA gets installed into the host
+        # trust store -- in that case it is better not to run at all.
         version = _caddy_version(caddy_bin)
         if version is None:
-            result.record("读取 caddy 版本", False)
+            result.record("read caddy version", False)
             return result
         ver_str = ".".join(str(x) for x in version)
         if version < MIN_CADDY_VERSION:
             floor = ".".join(str(x) for x in MIN_CADDY_VERSION)
             result.record(
-                f"caddy 版本 {ver_str} 过旧（需要 ≥ {floor}：更老的 caddy 没有 pki app，"
-                "沙箱 CA 会被装进宿主信任库）",
+                f"caddy version {ver_str} is too old (requires >= {floor}: older caddy has "
+                "no pki app and the sandbox CA would be installed into the host trust store)",
                 False,
             )
             return result
         result.record(
-            f"caddy 版本 {ver_str}（≥ {'.'.join(str(x) for x in MIN_CADDY_VERSION)}）",
+            f"caddy version {ver_str} (>= {'.'.join(str(x) for x in MIN_CADDY_VERSION)})",
             True,
         )
 
-        # 动态端口：并发自检 / 用户已有服务都不会互相认领。
+        # Dynamic ports: concurrent self-tests / the user's existing services
+        # never claim each other's.
         admin_port, https_port, http_port = _free_ports(3)
         ok, routes_file, sites_file, caddyfile = _write_sandbox_configs(
             result, tmp, admin_port, https_port, http_port
@@ -353,23 +380,25 @@ def run_selftest(caddy_bin: Path) -> SelftestResult:
                     render_caddyfile(RouteTable(routes=routes)), encoding="utf-8"
                 )
             except OSError as e:
-                result.record(f"写入沙箱路由表失败：{e}", False)
+                result.record(f"failed to write sandbox route table: {e}", False)
                 return False
             return True
 
         config_json = tmp / "config.json"
         ok, detail = _adapt(caddy_bin, caddyfile, config_json)
         if not ok:
-            result.record(f"沙箱配置生成（caddy adapt）：{detail}", False)
+            result.record(f"sandbox config generation (caddy adapt): {detail}", False)
             return result
 
-        # 隔离：caddy 的配置目录/数据目录也指向 tmp，别去动生产那套 autosave.json
+        # Isolation: point caddy's config/data directories at tmp too, so the
+        # production autosave.json is not touched
         env = {
             **os.environ,
             "XDG_CONFIG_HOME": str(tmp / "xdg-config"),
             "XDG_DATA_HOME": str(tmp / "xdg-data"),
         }
-        # caddy 的输出不丢：install_trust 是否真的生效，只能从它自己的日志里看出来
+        # Do not discard caddy's output: whether install_trust really took
+        # effect can only be seen from its own log
         log_path = tmp / "caddy.log"
         try:
             log_file = open(log_path, "wb")
@@ -380,23 +409,27 @@ def run_selftest(caddy_bin: Path) -> SelftestResult:
                 env=env,
             )
         except OSError as e:
-            result.record(f"沙箱 caddy 启动（{e}）", False)
+            result.record(f"sandbox caddy start ({e})", False)
             return result
 
         base = f"http://127.0.0.1:{admin_port}"
         if not _wait_admin(base, str(tmp / "data")):
-            result.record("沙箱 caddy 启动", False)
+            result.record("sandbox caddy start", False)
             return result
-        result.record("沙箱 caddy 启动", True)
+        result.record("sandbox caddy start", True)
 
-        # 「没污染宿主」是本自检的核心承诺之一，必须有证据，不能靠假设。
-        # 老版本 caddy 会静默忽略 install_trust，那时这行日志不会出现。
+        # "Did not pollute the host" is one of this self-test's core promises
+        # and needs evidence, not assumptions. Older caddy silently ignores
+        # install_trust, and then this log line never appears.
         if _wait_trust_disabled_log(log_path):
-            result.record("已确认禁用宿主信任库安装（caddy 日志佐证）", True)
+            result.record(
+                "confirmed host trust store installation is disabled (caddy log evidence)",
+                True,
+            )
         else:
             result.record(
-                "无法确认已禁用宿主信任库安装（Caddy 版本过旧？）—— caddy 输出尾部："
-                + _read_log_tail(log_path),
+                "cannot confirm host trust store installation is disabled (Caddy too old?)"
+                " -- caddy output tail: " + _read_log_tail(log_path),
                 False,
             )
 
@@ -410,23 +443,32 @@ def run_selftest(caddy_bin: Path) -> SelftestResult:
                     break
                 except ssl.SSLError:
                     time.sleep(0.2)
-        result.record("沙箱 CA 根证书已生成并可加载", ctx is not None)
+        result.record("sandbox CA root certificate generated and loadable", ctx is not None)
         if ctx is None:
             return result
 
-        # 注册前：沙箱还不该对外服务 —— 明确断言「连接被拒绝」。
-        # 这一项断言的是隔离性（此刻没有站点块，https 端口上没人监听），
-        # 真正验证「未注册域名拿不到证书」的是注册之后那一项。
+        # Before registration the sandbox should not serve anything yet --
+        # assert "connection refused" explicitly. This item asserts isolation
+        # (there is no site block yet, so nothing listens on the https port);
+        # the item after registration is what really verifies "unregistered
+        # domains get no certificate".
         probe = _probe_context()
         try:
             _fetch("unregistered.test", https_port, probe)
-            result.record("注册前沙箱未对外服务（连接应被拒绝）", False)
+            result.record(
+                "sandbox is not serving before registration (connection should be refused)", False
+            )
         except ConnectionRefusedError:
-            result.record("注册前沙箱未对外服务（连接应被拒绝）", True)
+            result.record(
+                "sandbox is not serving before registration (connection should be refused)", True
+            )
         except (ssl.SSLError, OSError, http.client.HTTPException) as e:
-            result.record(f"注册前沙箱未对外服务（连接应被拒绝）：{e}", False)
+            result.record(
+                f"sandbox is not serving before registration (connection should be refused): {e}",
+                False,
+            )
 
-        # 已注册域名：精确块 + tls internal
+        # Registered domain: exact block + tls internal
         if not write_routes(
             [
                 Route(
@@ -442,9 +484,10 @@ def run_selftest(caddy_bin: Path) -> SelftestResult:
         ok, detail = _adapt(caddy_bin, caddyfile, config_json)
         if ok:
             ok, detail = _reload(caddy_bin, config_json, admin_port)
-        result.record(f"reload 生效：{detail}" if not ok else "reload 生效", ok)
+        result.record(f"reload took effect: {detail}" if not ok else "reload took effect", ok)
 
-        # 证书是 reload 后异步签发的，给它一点时间
+        # Certificates are issued asynchronously after reload; give it some
+        # time
         hit = False
         deadline = time.time() + 15
         last_err = ""
@@ -453,24 +496,35 @@ def run_selftest(caddy_bin: Path) -> SelftestResult:
                 status, body = _fetch("foo.test", https_port, ctx)
                 hit = status == 200 and body == UPSTREAM_BODY.decode()
                 if not hit:
-                    last_err = f"状态 {status}"
+                    last_err = f"status {status}"
             except (ssl.SSLError, OSError, http.client.HTTPException) as e:
                 last_err = str(e)
             if not hit:
                 time.sleep(0.3)
-        result.record("已注册域名命中上游" if hit else f"已注册域名命中上游（{last_err}）", hit)
+        result.record(
+            "registered domain reaches upstream"
+            if hit
+            else f"registered domain reaches upstream ({last_err})",
+            hit,
+        )
 
-        # 这次是在 TLS 服务已经起来之后测：未注册域名必须握手失败（真的没有证书）
+        # This time the TLS service is already up: an unregistered domain must
+        # fail the handshake (it really has no certificate)
         try:
             _fetch("unregistered.test", https_port, probe)
-            result.record("已注册后未注册域名仍拿不到证书", False)
+            result.record("unregistered domain still gets no certificate after registration", False)
         except ssl.SSLError:
-            result.record("已注册后未注册域名仍拿不到证书", True)
+            result.record("unregistered domain still gets no certificate after registration", True)
         except (OSError, http.client.HTTPException) as e:
-            # 连不上或响应异常：服务器要么没起来，要么真的给出了证书
-            result.record(f"已注册后未注册域名仍拿不到证书（{e}）", False)
+            # Cannot connect or the response is abnormal: the server either
+            # did not start or actually handed out a certificate
+            result.record(
+                f"unregistered domain still gets no certificate after registration ({e})",
+                False,
+            )
 
-        # 80 → 443 跳转（必须在注销之前测：注销后 Caddy 不再管理该域名的跳转）
+        # 80 -> 443 redirect (must be tested before unregistering: afterwards
+        # Caddy no longer manages the redirect for that domain)
         location = None
         deadline = time.time() + 10
         while time.time() < deadline and location is None:
@@ -484,27 +538,33 @@ def run_selftest(caddy_bin: Path) -> SelftestResult:
             except (OSError, http.client.HTTPException):
                 time.sleep(0.3)
         result.record(
-            "http 跳转 https",
+            "http redirects to https",
             location is not None and location.startswith("https://"),
         )
 
-        # 注销后拿不到证书
+        # No certificate after unregistering
         if not write_routes([]):
             return result
         ok, detail = _adapt(caddy_bin, caddyfile, config_json)
         if ok:
             ok, detail = _reload(caddy_bin, config_json, admin_port)
-        result.record(f"注销 reload 生效：{detail}" if not ok else "注销 reload 生效", ok)
+        result.record(
+            f"unregister reload took effect: {detail}"
+            if not ok
+            else "unregister reload took effect",
+            ok,
+        )
         try:
             status, body = _fetch("foo.test", https_port, ctx)
-            result.record("注销后不再有路由", body != UPSTREAM_BODY.decode())
+            result.record("no route after unregistering", body != UPSTREAM_BODY.decode())
         except (ssl.SSLError, OSError, http.client.HTTPException):
-            result.record("注销后不再有路由", True)
+            result.record("no route after unregistering", True)
         return result
     finally:
-        # 从这里往回的所有资源（tmp 目录、upstream 线程/server、日志、caddy）
-        # 必须在一个 finally 里统一回收：任何前置步骤抛异常都不能留下 /tmp
-        # 残留或 in-process 调用时泄漏线程/socket。
+        # Every resource from here back (tmp directory, upstream thread/
+        # server, log, caddy) must be reclaimed in one finally: an exception
+        # in any preceding step must not leave /tmp residue or leak threads/
+        # sockets when called in-process.
         if proc is not None:
             try:
                 proc.terminate()
@@ -514,7 +574,8 @@ def run_selftest(caddy_bin: Path) -> SelftestResult:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()
-                # 杀掉之后也要回收，否则留下僵尸进程
+                # Must reap after killing too, otherwise a zombie process is
+                # left
                 try:
                     proc.wait(timeout=5)
                 except subprocess.TimeoutExpired:

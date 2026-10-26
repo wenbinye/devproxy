@@ -1,7 +1,7 @@
-"""终端渲染：状态表格、提示文案与执行结果汇总。
+"""Terminal rendering: status tables, hint texts, and result summaries.
 
-渲染只消费结构化数据（Status / ComponentReport），不做配置解析，也不
-决定退出码。
+Rendering only consumes structured data (Status / ComponentReport). It parses no
+configuration and decides no exit codes.
 """
 
 from __future__ import annotations
@@ -16,24 +16,26 @@ from devproxy.cli._runtime import console
 from devproxy.cli._runtime import err_console
 
 TRUST_HINT_ROUTE = (
-    "提示：CA 根证书已生成，但还没被信任 —— 现在 curl/Chrome 访问会报证书错误。"
-    "请运行 devproxy trust 让它们信任它。"
+    "Hint: the CA root certificate has been generated but is not trusted yet -- curl and "
+    "Chrome will report certificate errors right now. Run devproxy trust so they accept it."
 )
 
 UP_EXAMPLE = "devproxy up demo -- sh -c 'python3 -m http.server $PORT'"
 
 
 def _print_trust_hint_if_needed(paths, config) -> None:
-    """CA 已生成但还没被信任时提示一次。
+    """Show the hint once, when the CA exists but is not trusted yet.
 
-    CA 是**第一条路由注册时**才生成的 —— 第一次 up/expose 之后 curl 与
-    Chrome 一定不信任这个证书。不说清楚，用户只会看到"浏览器报不安全"，
-    根本不知道还差一步 `devproxy trust`。
+    The CA is only created when the **first route is registered** -- right after the
+    first up/expose, curl and Chrome will not trust the certificate. Without saying so,
+    the user just sees "the browser says this is unsafe" and has no idea that
+    `devproxy trust` is still missing.
 
-    CA 还不存在（没什么可信任）或已被信任时都不提示 —— 后者否则每次
-    运行都会冒出来，变成噪音。
+    When the CA does not exist yet (nothing to trust) or is already trusted, stay
+    quiet -- otherwise the hint shows up on every run and turns into noise.
 
-    组件与平台经 `_shared` 在调用时查找，测试的替身才能生效。
+    Components and the platform are looked up through `_shared` at call time so test
+    doubles take effect.
     """
     from devproxy.cli import _shared as s
 
@@ -41,7 +43,7 @@ def _print_trust_hint_if_needed(paths, config) -> None:
     try:
         if comp.fully_trusted():
             return
-    except Exception:  # noqa: BLE001 —— 提示失败不该影响主流程
+    except Exception:  # noqa: BLE001 -- a failed hint must not disturb the main flow
         return
     if not comp.ca_path.exists():
         return
@@ -49,10 +51,11 @@ def _print_trust_hint_if_needed(paths, config) -> None:
 
 
 def _has_notice(report) -> bool:
-    """ok 但 detail 是“还没到那一步”的提示时返回 True。
+    """True when the component is ok but its detail is a "not there yet" notice.
 
-    判据来自组件自身的结构化状态（CA 根证书是否存在），不看 detail
-    文案 —— 文案随时可能改，改一个字就悄悄改变控制流。
+    The criterion comes from the component's own structured state (whether the CA root
+    certificate exists), never from the detail text -- prose changes, and one reworded
+    sentence would silently change control flow.
     """
     status = report.status
     if not status.detail:
@@ -68,25 +71,26 @@ def _has_notice(report) -> bool:
 
 
 def _status_cell(report) -> str:
-    """表格里的“现状”列。
+    """The "current state" column of the table.
 
-    ok 但 detail 是一条提示（如“尚无 CA 根证书…”）时必须如实展示 ——
-    只写“✔ 就绪”会把“还需要 devproxy trust”这一关键信息藏起来。
+    When the component is ok but the detail is a notice (such as "no CA root certificate
+    yet") it must be shown verbatim -- printing only "✔ ready" would hide the crucial
+    "you still need devproxy trust" part.
     """
     status = report.status
     if not status.ok:
         return "✗ " + escape(status.detail)
     if _has_notice(report):
         return "✔ " + escape(status.detail)
-    return "✔ 就绪"
+    return "✔ ready"
 
 
 def render_plan(plan) -> None:
-    """打印变更清单表格。"""
+    """Print the change-plan table."""
     table = Table(show_header=True, header_style="bold")
-    table.add_column("组件")
-    table.add_column("现状")
-    table.add_column("将要执行")
+    table.add_column("Component")
+    table.add_column("Current")
+    table.add_column("Will do")
     for r in plan.reports:
         table.add_row(
             r.name,
@@ -97,24 +101,27 @@ def render_plan(plan) -> None:
 
 
 def print_scope_notes(plan) -> None:
-    """打印整机作用域披露（表格放不下，单独一遍）。"""
+    """Print the machine-wide scope disclosure (it does not fit in the table)."""
     for note in _global_scope_notes(plan):
         console.print(f"[yellow]{escape(note)}[/yellow]")
 
 
 def _global_scope_notes(plan) -> list[str]:
-    """整机作用域的披露文案。
+    """Disclosure texts for machine-wide scope.
 
-    变更清单的表格放不下这类话（Rich 会截断），而它恰恰是最该让用户看到的：
-    `DNS=` 改的是**整台机器**的解析路径。组件通过可选的 `global_scope_note()`
-    提供文案 —— 没有就说明这个组件不涉及整机。
+    The change-plan table cannot hold sentences like these (Rich truncates them), yet
+    they are exactly what the user most needs to see: `DNS=` changes the resolution
+    path of the **whole machine**. Components supply the text through the optional
+    `global_scope_note()` -- no method means the component has no machine-wide effect.
 
-    只要整机作用域真的成立就披露 —— 那台机器此刻就处在"整机解析指向用户级
-    dnsmasq"的状态里，用户有权知道。两种情况算数：这次要写它（r.actions 非空），
-    或者它早就写好了（组件状态正常）。
+    Disclose whenever the machine-wide effect really holds -- at that moment the machine
+    is in a state where all resolution goes through the user-scope dnsmasq, and the user
+    is entitled to know. Two situations count: this run writes it (r.actions is
+    non-empty), or it was already written (the component's status is fine).
 
-    单个组件的探测异常不能带崩 setup（build_plan 已承诺同样的隔离）：
-    记一行警告后继续，宁可少一条披露，也不能让用户在确认之前看到 traceback。
+    A probe failure in one component must not take setup down (build_plan promises the
+    same isolation): log one warning and continue. Better a missing disclosure than a
+    traceback before the user has confirmed anything.
     """
     notes = []
     for r in plan.reports:
@@ -122,13 +129,14 @@ def _global_scope_notes(plan) -> list[str]:
         if not callable(fn):
             continue
         if not r.actions and not r.status.ok:
-            # 既没在改、也没装好 —— 谈不上"整机解析已经指向 dnsmasq"。
+            # Neither changing it nor installed -- cannot claim resolution goes through dnsmasq.
             continue
         try:
             note = fn()
-        except Exception as e:  # noqa: BLE001 —— 披露失败不阻断 setup
+        except Exception as e:  # noqa: BLE001 -- a failed disclosure does not block setup
             err_console.print(
-                f"devproxy: 无法获取 {escape(r.name)} 的整机作用域说明：{escape(str(e))}"
+                f"devproxy: cannot get the machine-wide scope note for "
+                f"{escape(r.name)}: {escape(str(e))}"
             )
             continue
         if note:
@@ -137,25 +145,27 @@ def _global_scope_notes(plan) -> list[str]:
 
 
 def component_note(component, method: str) -> str | None:
-    """组件通过可选方法提供的说明；方法不存在或抛异常都当作没有。
+    """A note a component provides through an optional method; absent or raising means none.
 
-    能力靠 getattr 探测，不进平台协议 —— 与 `global_scope_note` 同一套路。
-    说明只是提示，探测失败绝不能带崩 doctor 或 trust。
+    Capabilities are probed with getattr and stay out of the platform protocol -- the
+    same pattern as `global_scope_note`. A note is only a hint, so a failed probe must
+    never take down doctor or trust.
     """
     fn = getattr(component, method, None)
     if not callable(fn):
         return None
     try:
         note = fn()
-    except Exception:  # noqa: BLE001 —— 提示失败不该影响主流程
+    except Exception:  # noqa: BLE001 -- a failed hint must not disturb the main flow
         return None
     return note or None
 
 
 def firefox_notes(reports) -> list[str]:
-    """各组件提供的浏览器信任提示（如 Firefox 有自己的证书库）。
+    """Browser-trust notes supplied by components (Firefox keeps its own certificate store).
 
-    只有证书组件会提供 —— 别的组件没有这个方法，就是没有提示。
+    Only the certificate component provides one -- other components simply lack the
+    method, which means they have no note.
     """
     notes = []
     for r in reports:
@@ -166,15 +176,15 @@ def firefox_notes(reports) -> list[str]:
 
 
 def print_noop_unhealthy(reports) -> None:
-    """没有可执行动作、但组件不健康时，逐条报出原因与修复提示。"""
+    """No actions to take, but components are unhealthy: report each reason and its fix."""
     for r in reports:
         err_console.print(f"devproxy: {r.name}: {escape(r.status.detail)}")
         if r.status.hint:
-            err_console.print(f"    修复: {escape(r.status.hint)}")
+            err_console.print(f"    Fix: {escape(r.status.hint)}")
 
 
 def print_apply_results(results) -> bool:
-    """打印逐组件执行结果；返回是否全部成功。"""
+    """Print the per-component results; return whether everything succeeded."""
     ok = True
     for name, status in results:
         mark = "✔" if status.ok else "✗"
@@ -182,59 +192,62 @@ def print_apply_results(results) -> bool:
         if not status.ok:
             ok = False
             if status.hint:
-                console.print(f"    修复: {escape(status.hint)}")
+                console.print(f"    Fix: {escape(status.hint)}")
     return ok
 
 
 def fail_for_apply_errors(errors: list[tuple[str, PermissionError]]) -> None:
-    """执行阶段失败时选择退出码。
+    """Pick the exit code when the apply phase failed.
 
-    `apply_plan` 把异常类型压成了 Status（单组件失败不阻断），提权失败
-    只能由调用方在 apply 外层记录。有 PermissionError 就是“需要提权”
-    （退出码 4），否则是普通运行失败（退出码 1）。
+    `apply_plan` collapses exception types into Status (one component may fail without
+    blocking the rest), so an elevation failure can only be recorded by the caller
+    around apply. A PermissionError means "elevation needed" (exit 4); anything else is
+    an ordinary runtime failure (exit 1).
     """
     if not errors:
         raise typer.Exit(EXIT_FAIL)
-    err_console.print("devproxy: 提权失败，变更未完成：")
+    err_console.print("devproxy: elevation failed, the changes did not complete:")
     for name, exc in errors:
         err_console.print(f"  · {name}: {escape(str(exc))}")
     err_console.print(
-        "修复: 确认当前用户可执行 sudo（且不要用 sudo/root 运行 devproxy），"
-        "然后重新运行 devproxy setup。"
+        "Fix: make sure the current user can run sudo (and do not run devproxy with "
+        "sudo/root), then run devproxy setup again."
     )
     raise typer.Exit(EXIT_SUDO)
 
 
 def _print_notes(notes: list[str]) -> None:
-    """把迁移过程中的提示逐条打出来。"""
+    """Print each note collected during the migration."""
     for note in notes:
         console.print(f"  · {note}")
 
 
 def render_uninstall_plan(plan, *, dry_run: bool) -> None:
-    """打印卸载清单。dry-run 时明确标注"只是预览"。"""
+    """Print the uninstall plan. In dry-run mode say plainly that it is a preview."""
     if dry_run:
-        console.print("[bold]将要执行以下卸载步骤（预览，不会执行任何变更）：[/bold]")
+        console.print(
+            "[bold]The following uninstall steps would run (preview; nothing is changed):[/bold]"
+        )
     else:
-        console.print("[bold]将要执行以下卸载步骤：[/bold]")
+        console.print("[bold]The following uninstall steps will run:[/bold]")
     if plan.actions:
         for index, action in enumerate(plan.actions, 1):
-            sudo = "（需要 sudo）" if action.privileged else ""
+            sudo = " (needs sudo)" if action.privileged else ""
             console.print(f"  {index}. {escape(action.description)}{sudo}")
     else:
-        console.print("  （没有可执行的步骤）")
+        console.print("  (no steps to run)")
     for note in plan.notes:
         console.print(f"  [yellow]⚠ {escape(note)}[/yellow]")
 
 
 def print_uninstall_results(results) -> bool:
-    """逐条打印 ✔/✗；返回是否全部成功。"""
+    """Print ✔/✗ per step; return whether everything succeeded."""
     ok = True
     for result in results:
         mark = "✔" if result.ok else "✗"
         line = f"{mark} {escape(result.description)}"
         if result.detail:
-            line += f"：{escape(result.detail)}"
+            line += f": {escape(result.detail)}"
         console.print(line)
         if not result.ok:
             ok = False
@@ -242,14 +255,19 @@ def print_uninstall_results(results) -> bool:
 
 
 def print_uninstall_kept(plan, *, dry_run: bool = False) -> None:
-    """打印"默认不动"的清单与迁移回滚提示。"""
+    """Print the "left untouched by default" list and the migration rollback hint."""
     if plan.kept:
-        heading = "以下内容将保留（不会删除）：" if dry_run else "以下内容已保留（未删除）："
+        heading = (
+            "The following is kept (nothing is deleted):"
+            if dry_run
+            else "The following was kept (not deleted):"
+        )
         console.print(heading)
         for item in plan.kept:
             console.print(f"  · {escape(item)}")
     if plan.migration_backup is not None:
         path = escape(str(plan.migration_backup))
         console.print(
-            f"原始 caddy.service 与 Caddyfile 在 {path}，可用 devproxy setup --rollback {path} 还原"
+            f"The original caddy.service and Caddyfile are in {path}; "
+            f"restore them with devproxy setup --rollback {path}"
         )

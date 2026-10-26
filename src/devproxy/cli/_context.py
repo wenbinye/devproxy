@@ -1,7 +1,8 @@
-"""依赖装配：配置加载、storage 留档解析、平台与组件构造。
+"""Dependency assembly: config loading, storage-archive resolution, platform and components.
 
-这里只回答“命令要用的对象从哪来”，不做渲染，也不写用户可见的表格。
-命令模块经 `_shared` 在调用时查找这些函数（测试在 `_shared` 上打桩）。
+This module only answers "where do the objects a command needs come from". It does no
+rendering and prints no user-facing tables. Command modules look these functions up at
+call time through `_shared` (tests patch `_shared`).
 """
 
 from __future__ import annotations
@@ -24,21 +25,23 @@ from devproxy.lifecycle.migrate import load_legacy_storage
 
 
 class StorageArchiveError(RuntimeError):
-    """迁移 storage 留档存在但读不懂 —— 不能静默回退。"""
+    """The migrated storage archive exists but cannot be read -- never fall back silently."""
 
 
 def _resolve_storage(config: Config, paths: Paths) -> tuple[Config, list[str]]:
-    """沿用迁移留档的 storage，并返回需要告诉用户的警告。
+    """Keep the storage path from the migration archive and return the warnings to show.
 
-    留档（state/caddy-storage.json）是迁移时的决定：换了 storage 位置，
-    Caddy 会重新生成 CA，浏览器信任与已有证书全部失效。所以它优先于
-    config.toml —— 但**绝不能静默**：用户改了 config.toml 却被无声忽略，
-    是最难查的一类问题。
+    The archive (state/caddy-storage.json) records a decision made during migration:
+    changing the storage location makes Caddy regenerate its CA, and every browser
+    trust entry and existing certificate becomes void. So it wins over config.toml --
+    but it must **never** win silently: a user who edits config.toml and is ignored
+    without a word is the hardest kind of problem to diagnose.
 
-    留档“存在但读不懂”与“不存在”是两回事：前者说明磁盘满/进程中断
-    留下了截断文件，此时回退到 config.toml 可能让 Caddy 换 storage、
-    重新生成 CA，必须中止并让用户确认。查询与输出分离 —— 警告由调用方
-    打印（CQS）。
+    "Exists but unreadable" is not the same as "does not exist": the former means a
+    full disk or an interrupted process left a truncated file, and falling back to
+    config.toml could make Caddy switch storage and regenerate the CA. That must abort
+    and be resolved by the user. Query and output are kept separate -- the caller
+    prints the warnings (CQS).
     """
     archive = paths.caddy_storage
     if not archive.exists():
@@ -46,17 +49,19 @@ def _resolve_storage(config: Config, paths: Paths) -> tuple[Config, list[str]]:
     storage = load_legacy_storage(paths)
     if storage is None:
         raise StorageArchiveError(
-            f"迁移留档损坏，无法确认 Caddy 的 storage 路径：{archive}。"
-            "为避免 Caddy 重建 CA（已有证书与浏览器信任会失效），已中止。"
-            "请确认不再需要该留档后删除此文件，再重新运行。"
+            f"the migration archive is corrupt, so Caddy's storage path cannot be "
+            f"confirmed: {archive}. "
+            "Aborted to keep Caddy from rebuilding its CA (existing certificates and "
+            "browser trust would become void). "
+            "Delete this file once you are sure the archive is no longer needed, then run again."
         )
     if storage == config.storage_path:
         return config, []
     warning = (
-        f"devproxy: 沿用迁移留档的 storage 路径 {storage}"
-        f"（config.toml 里是 {config.storage_path}）：留档优先，"
-        f"config.toml 的 storage 当前不生效。"
-        f"删除 {archive} 即可恢复 config.toml 的设置。"
+        f"devproxy: keeping the storage path {storage} from the migration archive "
+        f"(config.toml says {config.storage_path}): the archive wins, "
+        f"so the storage setting in config.toml is not in effect. "
+        f"Delete {archive} to restore the config.toml setting."
     )
     return replace(config, storage=str(storage)), [warning]
 
@@ -64,24 +69,27 @@ def _resolve_storage(config: Config, paths: Paths) -> tuple[Config, list[str]]:
 def build_context(
     paths: Paths | None = None, config: Config | None = None
 ) -> tuple[Paths, Config, RouteStore, CaddyAdmin]:
-    """组装依赖。测试可传入自定义 paths/config。
+    """Assemble the dependencies. Tests may pass their own paths/config.
 
-    **不建目录、不 touch 文件**：ls / config / doctor 这类只读命令也会
-    调用这里，查询不该有写副作用（只读挂载或 HOME 不可写时更不该炸）。
-    写路径自己保证目录存在（RouteStore.mutate、migrate），setup 在
-    部署分支显式调用 `paths.ensure_files()`。
+    **Creates no directories and touches no files**: read-only commands such as ls /
+    config / doctor call this too, and a query must not have write side effects (even
+    less so to blow up on a read-only mount or an unwritable HOME). Write paths ensure
+    their own directories (RouteStore.mutate, migrate); setup calls
+    `paths.ensure_files()` explicitly on the deploy branch.
     """
     paths = paths or default_paths()
     config = config or load_config(paths.config_toml)
     try:
         config, warnings = _resolve_storage(config, paths)
     except StorageArchiveError as e:
-        # 前置条件不满足：留档与配置的冲突必须由用户确认后解决
+        # Unmet precondition: the conflict between archive and config must be resolved
+        # by the user
         fail(str(e), EXIT_PRECONDITION)
     for warning in warnings:
         err_console.print(warning)
-    # 迁移时沿用了遗留 Caddyfile 的 storage（CA 还在那儿）—— 别换回去，
-    # 换了 Caddy 会重新生成 CA，浏览器信任与已有证书全部失效。
+    # The migration kept the legacy Caddyfile's storage (the CA still lives there) --
+    # do not switch back: Caddy would regenerate its CA and every browser trust entry
+    # and certificate would become void.
     caddy = CaddyConfig(
         caddy_bin=config.caddy_bin_path,
         caddyfile=paths.caddyfile,
@@ -93,24 +101,26 @@ def build_context(
 
 
 def _require_caddyfile(paths: Paths) -> None:
-    """up/expose 的前置条件：主 Caddyfile 必须已由 setup 生成。
+    """The precondition for up/expose: setup must already have generated the main Caddyfile.
 
-    否则 RouteStore.mutate → CaddyConfig.reload() 会以“reload 失败”退出 1，
-    把“还没 setup”误导成运行故障。按 §9.1 属于前置条件不满足（退出码 3）。
+    Without it, RouteStore.mutate -> CaddyConfig.reload() fails with exit 1, which
+    misreports "not set up yet" as a runtime fault. Per the exit-code table this is an
+    unmet precondition (exit 3).
     """
     if not paths.caddyfile.exists():
         fail(
-            f"主 Caddyfile 不存在: {paths.caddyfile}；请先运行 devproxy setup",
+            f"main Caddyfile not found: {paths.caddyfile}; run devproxy setup first",
             EXIT_PRECONDITION,
         )
 
 
 def _platform():
-    """按当前系统选平台实现（Linux / macOS）。
+    """Pick the platform implementation for the current system (Linux / macOS).
 
-    平台构造会拒绝不合适的运行身份（例如 `sudo devproxy ...` 以 root
-    运行）—— 那是前置条件不满足，翻译成可读信息 + 退出码 3，而不是
-    让 RuntimeError 以 traceback 形态漏出去。
+    Constructing the platform rejects unsuitable identities (for example
+    `sudo devproxy ...` running as root) -- that is an unmet precondition, translated
+    into a readable message plus exit 3 rather than letting a RuntimeError escape as
+    a traceback.
     """
     from devproxy.platform import get_platform
 
@@ -128,13 +138,13 @@ def _components(
     *,
     include_cert: bool = True,
 ):
-    """按配置（或显式覆盖）组装组件。
+    """Assemble the components per the config (or an explicit override).
 
-    dns_backend 缺省取 config.dns_backend —— setup 与 doctor 必须用同一个
-    后端，否则 setup 装完、doctor 仍报"路由缺失"。
+    dns_backend defaults to config.dns_backend -- setup and doctor must use the same
+    backend, otherwise setup installs one and doctor keeps reporting "route missing".
 
-    组件类与平台都在调用时经 `_shared` 查找：测试替换
-    `_shared.CertComponent` / `_shared._platform` 必须对这里生效。
+    Component classes and the platform are looked up through `_shared` at call time:
+    replacing `_shared.CertComponent` / `_shared._platform` in tests must affect this.
     """
     from devproxy.cli import _shared as s
 
@@ -151,27 +161,28 @@ def _components(
 
 
 def _dns_backend(value: str | None, config: Config) -> str:
-    """解析并校验 DNS 后端。非法值直接拒绝，别悄悄当成 auto。
+    """Resolve and validate the DNS backend. Reject invalid values outright, never treat
+    them as auto.
 
-    显式传空字符串（--dns-backend ""）是参数错误，不能因为
-    `"" or ...` 的 falsy 语义悄悄退回配置值。
+    Passing an explicit empty string (--dns-backend "") is a usage error and must not
+    quietly fall back to the configured value through the falsy semantics of `"" or ...`.
     """
     backend = config.dns_backend if value is None else value
     if backend not in DNS_BACKENDS:
         fail(
-            f"dns_backend 必须是 {' / '.join(DNS_BACKENDS)}，当前值 {backend!r}",
+            f"dns_backend must be one of {', '.join(DNS_BACKENDS)}, got {backend!r}",
             EXIT_USAGE,
         )
     return backend
 
 
 class _ElevationAware:
-    """记录组件 apply 抛出的 PermissionError，其余行为原样透传。
+    """Record PermissionError raised by a component's apply; pass everything else through.
 
-    `lifecycle.setup.apply_plan` 为了“单组件失败不阻断”会把所有异常压成
-    Status，异常类型随之丢失；CLI 需要据此区分“提权失败（退出码 4）”与
-    普通运行失败（退出码 1）。这里只记录并**照旧抛出**，apply_plan 的
-    既有语义不变。
+    `lifecycle.setup.apply_plan` collapses every exception into a Status so that one
+    failing component does not block the rest, which loses the exception type; the CLI
+    needs it to tell "elevation failed (exit 4)" from an ordinary failure (exit 1).
+    This records and **re-raises**, so apply_plan's existing semantics are unchanged.
     """
 
     def __init__(self, component, sink: list[tuple[str, PermissionError]]):
@@ -192,20 +203,21 @@ class _ElevationAware:
 def track_elevation_errors(
     components: list,
 ) -> tuple[list, list[tuple[str, PermissionError]]]:
-    """给组件套一层提权失败记录器，返回 (组件列表, 记录表)。"""
+    """Wrap the components in an elevation-failure recorder; return (components, sink)."""
     errors: list[tuple[str, PermissionError]] = []
     return [_ElevationAware(c, errors) for c in components], errors
 
 
 def ensure_backend_supported(backend: str, platform) -> None:
-    """后端与平台不匹配时按**参数错误**拒绝。
+    """Reject a backend/platform mismatch as a **usage error**.
 
-    macOS 没有 systemd-resolved：DnsComponent.plan() 会抛 RuntimeError。
-    提前在 CLI 层拦下，用户看到的是明确的参数错误（退出码 2），而不是
-    “组件计算变更失败”或 traceback。
+    macOS has no systemd-resolved: DnsComponent.plan() would raise RuntimeError. Catching
+    it here in the CLI means the user sees a clear usage error (exit 2) instead of
+    "the component failed to compute changes" or a traceback.
     """
     if backend == "resolved" and getattr(platform, "name", "") == "mac":
         fail(
-            "macOS 不支持 resolved 后端（没有 systemd-resolved），请使用 auto 或 system",
+            "macOS does not support the resolved backend (there is no systemd-resolved); "
+            "use auto or system",
             EXIT_USAGE,
         )

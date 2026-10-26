@@ -1,1 +1,1 @@
-"""devproxy 的地基模块：配置、路径、备份。"""
+"""Foundation modules for devproxy: config, paths, backup."""

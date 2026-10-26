@@ -1,7 +1,7 @@
-"""sync 命令：按项目根目录的 devproxy.toml 同步路由声明。
+"""The sync command: reconcile routes against the devproxy.toml at the project root.
 
-只做展示与退出码 —— 计划与执行在 `gateway.sync`，文件解析在
-`gateway.project`。
+Only presentation and exit codes live here -- planning and execution are in
+`gateway.sync`, file parsing is in `gateway.project`.
 """
 
 from __future__ import annotations
@@ -24,20 +24,20 @@ from devproxy.gateway.routes import RouteTableError
 from devproxy.gateway.store import RouteStoreError
 
 _STATUS_MARKS = {
-    "created": "✅ 创建",
-    "skipped": "➖ 跳过",
-    "conflict": "⚠️  冲突",
-    "failed": "✗ 失败",
-    "pruned": "🧹 移除",
+    "created": "✅ created",
+    "skipped": "➖ skipped",
+    "conflict": "⚠️  conflict",
+    "failed": "✗ failed",
+    "pruned": "🧹 pruned",
 }
 
 
 def run_project_sync(*, file: Path | None = None, prune: bool = False, yes: bool = False) -> None:
-    """按项目根目录的 devproxy.toml 应用路由声明（`devproxy up` 的实现）。
+    """Apply the route declarations from the project's devproxy.toml (the body of `devproxy up`).
 
-    由 cli/up.py 在「没给路由名」时调用 —— compose 的 `up -d` 语义。
+    Called by cli/up.py when no route name is given -- compose's `up -d` semantics.
     """
-    # 1) 定位并解析项目文件 —— 找不到 / 写错了都是「用法错误」（退出码 2）
+    # 1) Locate and parse the project file -- missing or malformed is a usage error (exit 2)
     try:
         path = resolve_project_file(file)
         project = load_project_file(path)
@@ -46,10 +46,10 @@ def run_project_sync(*, file: Path | None = None, prune: bool = False, yes: bool
 
     paths, config, store, admin = s.build_context()
     s._require_caddyfile(paths)
-    # sync 要往 Caddy 里注册活路由 —— Caddy 没跑属于前置条件不满足（3）
+    # sync registers live routes with Caddy -- Caddy not running is an unmet precondition (3)
     if not admin.is_alive():
         s.fail(
-            "Caddy 未运行（Admin API 不可达），请先执行 devproxy setup 或启动 Caddy",
+            "Caddy is not running (Admin API unreachable); run devproxy setup or start Caddy first",
             EXIT_PRECONDITION,
         )
     try:
@@ -59,24 +59,28 @@ def run_project_sync(*, file: Path | None = None, prune: bool = False, yes: bool
 
     plan = s.build_sync_plan(project, existing, prune)
 
-    # 2) --prune 会删路由 —— 先确认，再动手（确认前什么都没改）
+    # 2) --prune deletes routes -- confirm first, act second (nothing has changed yet)
     if plan.prune:
-        names = "、".join(r.name for r in plan.prune)
+        names = ", ".join(r.name for r in plan.prune)
         interactive = s._interactive() and not yes
         if not interactive and not yes:
-            s.err_console.print(f"非交互环境且未指定 --yes，拒绝执行 --prune（将移除：{names}）。")
+            s.err_console.print(
+                f"Non-interactive environment without --yes; refusing to run --prune "
+                f"(would remove: {names})."
+            )
             raise typer.Exit(EXIT_DECLINED)
         if interactive and not s.typer.confirm(
-            f"即将移除本文件里已删掉的路由：{names}（子进程也会一并收掉），继续？",
+            f"About to remove routes deleted from this file: {names} "
+            "(their child processes are stopped too). Continue?",
             default=False,
         ):
-            s.console.print("已取消：什么都没改。")
+            s.console.print("Cancelled: nothing was changed.")
             raise typer.Exit(EXIT_DECLINED)
 
-    s.console.print(f"配置文件：{escape(str(project.path))}")
+    s.console.print(f"Config file: {escape(str(project.path))}")
     s.console.print("")
 
-    # 3) 执行
+    # 3) Execute
     try:
         outcomes = s.execute_sync_plan(project, plan, store=store, config=config, paths=paths)
     except (RouteStoreError, RouteTableError) as e:
@@ -93,12 +97,12 @@ def run_project_sync(*, file: Path | None = None, prune: bool = False, yes: bool
         if outcome.domain:
             line += f" → https://{escape(outcome.domain)}"
         if outcome.detail:
-            line += f" —— {escape(outcome.detail)}"
+            line += f" -- {escape(outcome.detail)}"
         s.console.print(line)
         if outcome.log_path is not None and outcome.status == "created":
-            s.console.print(f"   日志：{escape(str(outcome.log_path))}")
+            s.console.print(f"   Log: {escape(str(outcome.log_path))}")
         if outcome.hint:
-            s.console.print(f"   修复：{escape(outcome.hint)}")
+            s.console.print(f"   Fix: {escape(outcome.hint)}")
         if outcome.status == "created":
             created += 1
         elif outcome.status == "skipped":
@@ -112,25 +116,25 @@ def run_project_sync(*, file: Path | None = None, prune: bool = False, yes: bool
 
     s.console.print("")
     if created:
-        # CA 是在第一条路由注册时才生成的 —— 和 up/expose 一样提示一次
+        # The CA only exists once the first route is registered -- hint once, like up/expose
         s._print_trust_hint_if_needed(paths, config)
     if not outcomes:
-        s.console.print("文件里没有声明任何路由。")
+        s.console.print("The file does not declare any routes.")
         raise typer.Exit(EXIT_OK)
     if created == 0 and skipped and not conflicts and not failed and not pruned:
-        s.console.print(f"全部已是最新（{skipped} 条声明）。")
+        s.console.print(f"Everything is up to date ({skipped} declarations).")
         raise typer.Exit(EXIT_OK)
     s.console.print(
-        f"同步完成：创建 {created}，跳过 {skipped}，冲突 {conflicts}，"
-        f"失败 {failed}，移除 {pruned}。"
+        f"Sync complete: created {created}, skipped {skipped}, conflicts {conflicts}, "
+        f"failed {failed}, pruned {pruned}."
     )
     if conflicts:
         s.err_console.print(
-            f"{conflicts} 条路由与文件声明不一致 —— 已报告冲突，未做任何改动"
-            "（工具绝不自动杀进程重启）。"
+            f"{conflicts} route(s) disagree with the file -- conflicts were reported and "
+            "nothing was changed (this tool never kills and restarts processes on its own)."
         )
     if failed:
-        s.err_console.print(f"{failed} 条路由启动失败 —— 详见上面的错误信息。")
+        s.err_console.print(f"{failed} route(s) failed to start -- see the errors above.")
         raise typer.Exit(EXIT_FAIL)
     if conflicts:
         raise typer.Exit(EXIT_FAIL)

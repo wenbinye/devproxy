@@ -1,4 +1,4 @@
-"""Linux 平台实现：systemd(user) / setcap / update-ca-certificates / NSS / resolved。"""
+"""Linux platform implementation: systemd(user) / setcap / update-ca-certificates / NSS / resolved."""
 
 from __future__ import annotations
 
@@ -21,68 +21,83 @@ from devproxy.platform.base import file_fingerprints as _fingerprints_of_file
 from devproxy.platform.base import nss_db_dir
 from devproxy.platform.base import pem_fingerprints as _pem_fingerprints
 
-# 系统信任库（活库）里可能存放 CA 的位置。
+# Possible locations of the CA in the system trust store (the live store).
 #
-# - 汇总包：Debian/Ubuntu 的 /etc/ssl/certs/ca-certificates.crt、
-#   RHEL 的 /etc/pki/tls/certs/ca-bundle.crt
-# - 散列索引目录：/etc/ssl/certs 下的 *.0（主题散列软链）与 *.pem
+# - Bundles: Debian/Ubuntu's /etc/ssl/certs/ca-certificates.crt,
+#   RHEL's /etc/pki/tls/certs/ca-bundle.crt
+# - Hashed index directory: *.0 (subject-hash symlinks) and *.pem under
+#   /etc/ssl/certs
 #
-# 刻意**不含**暂存目录 /usr/local/share/ca-certificates —— 那个文件存在
-# 只说明有人放了它进去，不代表 update-ca-certificates 跑成功过。
+# Deliberately **excludes** the staging directory
+# /usr/local/share/ca-certificates — a file being there only means someone
+# put it there; it does not mean update-ca-certificates ever succeeded.
 TRUST_BUNDLE_FILES = (
     Path("/etc/ssl/certs/ca-certificates.crt"),
     Path("/etc/pki/tls/certs/ca-bundle.crt"),
 )
 
-# 子进程的默认超时（秒）：跨进程调用必须有界，漏传超时等于允许永久挂起。
+# Default timeout for child processes (seconds): cross-process calls must be
+# bounded; omitting the timeout means allowing an indefinite hang.
 DEFAULT_TIMEOUT = 30.0
-# DNS 解析探测的上限（与 macOS 的 DNS_QUERY_TIMEOUT 对齐）：解析器挂起
-# 不能把 setup 的自检拖死。
+# Upper bound for DNS resolution probes (aligned with macOS's
+# DNS_QUERY_TIMEOUT): a hung resolver must not drag setup's self-check down.
 DNS_QUERY_TIMEOUT = 3.0
-# systemd 是否作为 init 运行的判据（容器 / WSL 里没有）。
+# Criterion for whether systemd is running as init (absent in containers / WSL).
 SYSTEMD_RUN_DIR = Path("/run/systemd/system")
 
-# NSS 信任标志（`certutil -L` 的 Trust Attributes 列）—— **只认 SSL 列的 "C"**。
+# NSS trust flags (the Trust Attributes column of `certutil -L`) — **only the
+# "C" in the SSL column counts**.
 #
-# 标志是三列三条目：`SSL,S/MIME,JAR/XPI`，本工具关心第一列（SSL）。
-# 第一列（以及第二列）的字母语义：
-#   "C" = 受信任的 CA，可签发 **服务端** 证书（SSL 列）/ 邮件证书（S/MIME 列）
-#   "T" = 受信任的 CA，可签发 **客户端** 证书（SSL 列；Chromium 不拿它当锚点）
-#   "P" = 受信任的对端（叶子），**不是** CA 锚点
-#   "G" / "U" = 有效但不受信任，"," / "." / 空 = 完全没有信任
+# The flags are three comma-separated columns: `SSL,S/MIME,JAR/XPI`; this tool
+# cares about the first column (SSL). Letter semantics for the first (and
+# second) column:
+#   "C" = trusted CA that may issue **server** certificates (SSL column) /
+#         email certificates (S/MIME column)
+#   "T" = trusted CA that may issue **client** certificates (SSL column;
+#         Chromium does not use it as an anchor)
+#   "P" = trusted peer (leaf), **not** a CA anchor
+#   "G" / "U" = valid but untrusted; "," / "." / empty = no trust at all
 #
-# 为什么只认第一列的 "C"：本工具的 CA 是给站点证书当 issuer 的根 CA，
-# Chrome 要的正是这个锚点。实测（NSS 3.120，用 `certutil -V -u V` 验一条
-# 由该 CA 签发的叶子链）：
+# Why only "C" in the first column counts: this tool's CA is the root CA that
+# issues site certificates, and that is exactly the anchor Chrome wants.
+# Measured (NSS 3.120, using `certutil -V -u V` to verify a leaf chain issued
+# by that CA):
 #   C,, / C,C, / C,C,C → valid
 #   T,, / P,, / ,,      → "issuer has been marked as not trusted by the user"
-# 而 Chromium 的 TrustStoreNSS 只引用 CERTDB_TRUSTED_CA（即 "C"），
-# CERTDB_TRUSTED_CLIENT_CA（"T"）根本没被引用，CERTDB_TRUSTED（"P"）只算
-# "受信任叶子"。把 T / P 当已信任是**假阳性**。
+# Meanwhile Chromium's TrustStoreNSS only references CERTDB_TRUSTED_CA (i.e.
+# "C"); CERTDB_TRUSTED_CLIENT_CA ("T") is not referenced at all, and
+# CERTDB_TRUSTED ("P") only counts as a "trusted leaf". Treating T / P as
+# trusted is a **false positive**.
 NSS_TRUSTED_FLAGS = ("C",)
 NSS_TRUSTED_COLUMN = 0
 
-# `certutil -L` 的表格行：昵称列宽 55（超长会溢出，昵称与标志之间只剩一个空格），
-# 昵称**可以含空格** —— 所以只能从行尾切标志，绝不能按"第一个空格"切昵称。
+# A table row of `certutil -L`: the nickname column is 55 wide (longer values
+# overflow, leaving only one space between nickname and flags), and nicknames
+# **may contain spaces** — so flags can only be split off from the end of the
+# line, never by splitting the nickname at the "first space".
 #
-# 标志有**三列**（`SSL,S/MIME,JAR/XPI`）：`C,,`、`C,C,`、`C,C,C`、`,C,`、`,,`
-# 都是合法形态。正则必须表达"两列逗号、三列内容"：
-# `C,C,C` 用 `,{2,}` 那种写法根本匹配不上（没有连续两个逗号），
-# 而真机上 `Caddy Local Authority` 恰恰就是 `C,C,C` —— 解析不出来就会把
-# "已信任"判成"未信任"，再被 `-A -t C,,` 把另外两列静默抹掉。
+# Flags have **three columns** (`SSL,S/MIME,JAR/XPI`): `C,,`, `C,C,`, `C,C,C`,
+# `,C,`, `,,` are all valid shapes. The regex must express "two commas, three
+# columns of content": `C,C,C` cannot be matched by a `,{2,}` style pattern
+# (there are no two consecutive commas), yet on the real machine
+# `Caddy Local Authority` is exactly `C,C,C` — failing to parse it would turn
+# "trusted" into "untrusted", and the following `-A -t C,,` would silently
+# wipe the other two columns.
 #
-# 注意 `C,C,C` 行尾**没有**补空格（`C,,` 行尾有两个空格），先 rstrip 再匹配。
+# Note that a `C,C,C` line has **no** trailing space (a `C,,` line has two
+# trailing spaces); rstrip before matching.
 #
-# 正则只是**候选**：每个候选昵称都要再用 `certutil -L -n <昵称> -a` 实际取一次，
-# 取不到就跳过 —— 解析有偏差时宁可漏判也不能误判。
+# The regex only produces **candidates**: every candidate nickname must then
+# actually be fetched with `certutil -L -n <nickname> -a`, and skipped if that
+# fails — when parsing is off, under-reporting is better than misreporting.
 _NSS_ROW_RE = re.compile(r"^(?P<name>.*?)[ ]+(?P<flags>[A-Za-z]*(?:,[A-Za-z]*){2})$")
 
 
 def _store_candidates() -> list[Path]:
-    """系统信任库里可能放着 CA 的文件（汇总包 + 散列索引目录）。
+    """Files in the system trust store that may contain the CA (bundles + hashed index directory).
 
-    只读、只列名字；任何列目录的错误都吞掉 —— 判据失败必须退化成
-    "未信任"，绝不能让 doctor 抛异常。
+    Read-only, names only; any directory-listing error is swallowed — a failed
+    criterion must degrade to "untrusted", and must never make doctor raise.
     """
     files: list[Path] = list(TRUST_BUNDLE_FILES)
     try:
@@ -95,13 +110,15 @@ def _store_candidates() -> list[Path]:
 
 
 def ca_in_trust_store(ca: Path) -> bool:
-    """CA 是否**按指纹**存在于系统信任库。永不抛异常。
+    """Whether the CA exists in the system trust store **by fingerprint**. Never raises.
 
-    判据是"活库里有没有这份字节完全相同的证书"，而不是"openssl 能不能
-    验通这条链"：openssl 按 **SUBJECT** 选锚点，信任库里存在多个同主题
-    根时它会挑到另一个，报 error 18（self-signed certificate）——
-    而 curl 其实完全正常。拿它当判据会让 setup 永远认为"没信任"，
-    而重装同一个 CA 只会增加更多同主题根，永远修不好。
+    The criterion is "does the live store contain a certificate with exactly
+    these bytes", not "can openssl verify this chain": openssl selects an
+    anchor by **SUBJECT**, so when multiple roots with the same subject exist
+    it may pick another one and report error 18 (self-signed certificate) —
+    even though curl works fine. Using that as the criterion would make setup
+    forever believe "untrusted", while reinstalling the same CA only adds more
+    same-subject roots and never fixes it.
     """
     try:
         ca_text = ca.read_text(encoding="utf-8")
@@ -109,7 +126,7 @@ def ca_in_trust_store(ca: Path) -> bool:
         return False
     target = _pem_fingerprints(ca_text)
     if not target:
-        # 不是可解析的 PEM 证书 —— 无法按指纹比对，判为未信任
+        # not a parseable PEM certificate — cannot compare by fingerprint, treat as untrusted
         return False
     for path in _store_candidates():
         try:
@@ -122,12 +139,13 @@ def ca_in_trust_store(ca: Path) -> bool:
 
 
 def _nss_rows(listing: str) -> list[tuple[str, str]]:
-    """解析 `certutil -L` 的表格 → [(昵称, 信任标志)]。
+    """Parse the `certutil -L` table → [(nickname, trust flags)].
 
-    表头两行与空行会被自然过滤掉：标志的形状是"三列、两列逗号"，
-    表头里的 `Certificate Nickname … Trust Attributes` 没有逗号，
-    `SSL,S/MIME,JAR/XPI` 虽然有两列逗号、但列内容含 `/`，都不满足
-    `[A-Za-z]*(?:,[A-Za-z]*){2}`，匹配不上。
+    The two header lines and blank lines are filtered out naturally: the flag
+    shape is "three columns, two commas", while the header's
+    `Certificate Nickname … Trust Attributes` has no commas, and
+    `SSL,S/MIME,JAR/XPI` has two commas but its column contents contain `/`, so
+    neither matches `[A-Za-z]*(?:,[A-Za-z]*){2}`.
     """
     rows: list[tuple[str, str]] = []
     for raw in listing.splitlines():
@@ -145,19 +163,21 @@ def _nss_rows(listing: str) -> list[tuple[str, str]]:
 
 
 def _nss_missing_cert(text: str) -> bool:
-    """`certutil` 的输出是否在**明确**说"这个条目不存在"。
+    """Whether `certutil`'s output **explicitly** says "this entry does not exist".
 
-    只有这几种文案才算"不存在"：
-    - `could not find certificate named "…"`（`-D` / `-L` 找不到昵称）
+    Only these messages count as "does not exist":
+    - `could not find certificate named "…"` (`-D` / `-L` cannot find the nickname)
     - `could not find cert: …`
     - `PR_FILE_NOT_FOUND_ERROR`
 
-    库被锁 / 不可读 / 损坏时的 `SEC_ERROR_BAD_DATABASE` 之类**不算** ——
-    那种情况是"判不了"，必须往上报，绝不能当成"没有"。
+    `SEC_ERROR_BAD_DATABASE` and the like when the database is locked /
+    unreadable / corrupt do **not** count — that is "cannot determine" and must
+    be reported upward, never treated as "absent".
 
-    只匹配上面这三种**完整文案**：泛化的 `"not found"` 会把
-    "could not find the module …" 这类加载失败也判成"条目不存在"，
-    而本函数的返回值正是删除失败能否被当成幂等成功的关键。
+    Match only the three **complete messages** above: a generic `"not found"`
+    would also classify loading failures such as "could not find the module …"
+    as "entry does not exist", and this function's return value is exactly what
+    decides whether a delete failure can be treated as idempotent success.
     """
     lowered = text.lower()
     return any(
@@ -171,39 +191,44 @@ def _nss_missing_cert(text: str) -> bool:
 
 
 def _nss_flags_trusted(flags: str) -> bool:
-    """这条目的 **SSL 列** 是否表示"受信任的 CA"。
+    """Whether the **SSL column** of this entry means "trusted CA".
 
-    只看第一列：第二列（S/MIME）的 "C" 只对邮件证书生效，
-    对 HTTPS 没用；首字符是 "," 时整列无信任。
+    Only the first column is checked: "C" in the second column (S/MIME) only
+    applies to email certificates and is useless for HTTPS; when the first
+    character is ",", the whole column has no trust.
     """
     return bool(flags) and flags[NSS_TRUSTED_COLUMN] in NSS_TRUSTED_FLAGS
 
 
 def _nss_repair_flags(flags: str) -> str:
-    """把 SSL 列补成 "C"，**保留另外两列**原有的信任。
+    """Repair the SSL column to "C" while **preserving trust in the other two columns**.
 
-    `certutil -M -t "C,,"` 会把 S/MIME / JAR 两列一起清掉 —— 用户库里
-    若有 `,C,` 这种"只信任邮件用途"的条目，那样补标志就是**改写**了
-    用户不打算让我们碰的信任。`C,C,` 只动该动的那一列。
+    `certutil -M -t "C,,"` also clears the S/MIME / JAR columns — if the user's
+    database has an entry like `,C,` ("trust email only"), repairing the flags
+    that way would **rewrite** trust the user did not intend us to touch.
+    `C,C,` changes only the column that should change.
     """
     parts = flags.split(",")
     if len(parts) != 3:
-        # 形态不认识时**原样返回**，让 `certutil -M` 把同一串写回去：
-        # 重置成 "C,," 会抹掉未知形态里可能存在的 S/MIME / JAR 信任，
-        # 那正是本函数要避免的"改写用户不打算让我们碰的信任"。
-        # （组件层把返回值直接喂给 `-M`；这里不能返回 None —— 那会变成
-        # 字符串 "None"，反而写坏标志。）
+        # When the shape is unrecognized, **return it unchanged** so that
+        # `certutil -M` writes the same string back: resetting to "C,," would
+        # wipe S/MIME / JAR trust that may exist in an unknown shape, which is
+        # exactly the "rewriting trust the user did not intend us to touch"
+        # this function avoids. (The component layer feeds the return value
+        # straight to `-M`; returning None here is not an option — it would
+        # become the string "None" and corrupt the flags.)
         return flags
     return ",".join(["C", parts[1], parts[2]])
 
 
 def _nss_db_state(nss: Path) -> bool | None:
-    """NSS 库是否存在：True / False（确定没有）/ None（判不了）。
+    """Whether the NSS database exists: True / False (definitely absent) / None (cannot determine).
 
-    `Path.exists()` 会把 `stat()` 的 PermissionError 吞成 False ——
-    "库存在但目录进不去"于是变成"库不存在、条目一定不存在"。删除失败
-    就会被当成幂等成功吞掉（旧根还留在库里，工具却报已就绪），所以这里
-    必须保留三态。
+    `Path.exists()` swallows a PermissionError from `stat()` into False —
+    "database exists but the directory is inaccessible" then becomes "database
+    absent, so the entry definitely does not exist". A failed delete would be
+    swallowed as idempotent success (the old root stays in the database while
+    the tool reports ready), so the three-state result must be preserved here.
     """
     try:
         (nss / "cert9.db").stat()
@@ -220,10 +245,11 @@ def _nss_entry_matches(
     nss: Path,
     cache: dict[str, str | None],
 ) -> bool:
-    """该昵称下的证书内容是否与 `expected` 相同。
+    """Whether the certificate content under this nickname matches `expected`.
 
-    表格解析只是候选 —— 解析有偏差时宁可漏判也不能误判。每个昵称的
-    `certutil -L -n … -a` 结果在 `cache` 里只取一次。
+    Table parsing only produces candidates — when parsing is off,
+    under-reporting is better than misreporting. The `certutil -L -n … -a`
+    result for each nickname is fetched only once and kept in `cache`.
     """
     if nickname not in cache:
         code, pem = _run(["certutil", "-L", "-d", f"sql:{nss}", "-n", nickname, "-a"])
@@ -235,19 +261,21 @@ def _nss_entry_matches(
 
 
 def _run(argv: list[str], timeout: float | None = DEFAULT_TIMEOUT) -> tuple[int, str]:
-    """跑一个 argv。timeout 是**防挂死**，不是性能优化。
+    """Run one argv. timeout is **hang prevention**, not performance tuning.
 
-    没有超时的子进程调用会被卡在交互提示上的命令永久拖住，并**无限往
-    stdout 里写** —— 实测 `certutil -N` 在密码提示上死循环，把 200GB
-    写进了重定向文件、把 /home 撑到 100%。返回码 124 沿用 coreutils timeout
-    的约定，调用方按"命令失败"处理即可。
+    A child-process call without a timeout can be dragged forever by a command
+    stuck on an interactive prompt, and will **write to stdout without bound** —
+    measured: `certutil -N` loops forever on the password prompt and wrote
+    200GB into the redirect file, filling /home to 100%. Return code 124
+    follows the coreutils timeout convention; callers can treat it as
+    "command failed".
 
-    默认值因此是 `DEFAULT_TIMEOUT` 而不是 `None`：漏传超时是有界等待，
-    不是无限等待。只有确实需要等用户输入的调用（sudo 密码路径）才显式
-    传 `timeout=None`。
+    The default is therefore `DEFAULT_TIMEOUT` rather than `None`: an omitted
+    timeout is a bounded wait, not an indefinite one. Only calls that genuinely
+    need user input (the sudo password path) explicitly pass `timeout=None`.
 
-    `stdin=DEVNULL` 防止交互式探针抢占终端输入（`sudo` 从 `/dev/tty`
-    读密码，不受影响）。
+    `stdin=DEVNULL` prevents interactive probes from stealing terminal input
+    (`sudo` reads the password from `/dev/tty`, so it is unaffected).
     """
     try:
         proc = subprocess.run(
@@ -258,16 +286,17 @@ def _run(argv: list[str], timeout: float | None = DEFAULT_TIMEOUT) -> tuple[int,
             stdin=subprocess.DEVNULL,
         )
     except subprocess.TimeoutExpired:
-        return 124, f"命令超时（{timeout}s）: {argv[0]}"
+        return 124, f"command timed out ({timeout}s): {argv[0]}"
     except OSError as e:
-        # 命令不存在（FileNotFoundError）、可执行位缺失（PermissionError）等
-        # 都归一为“命令不可用”，让调用方按返回码处理而不是 traceback。
-        return 127, f"命令不可用: {argv[0]}（{e}）"
+        # Missing command (FileNotFoundError), missing execute bit
+        # (PermissionError), etc. are all normalized to "command unavailable",
+        # so callers handle a return code instead of a traceback.
+        return 127, f"command unavailable: {argv[0]} ({e})"
     return proc.returncode, (proc.stdout or proc.stderr).strip()
 
 
 def _first_ip(text: str) -> str | None:
-    """从 resolvectl / dig 输出里取第一个 A/AAAA 答案。"""
+    """Take the first A/AAAA answer from resolvectl / dig output."""
     for line in text.splitlines():
         for token in line.replace(",", " ").split():
             candidate = token.strip("[];()")
@@ -278,25 +307,28 @@ def _first_ip(text: str) -> str | None:
     return None
 
 
-# 平台自身单元测试的显式豁免：那些用例要把 _run 换成假的、路径指向
-# tmp_path，覆盖的正是写操作的失败处理 —— 不需要护栏拦着。
+# Explicit exemption for the platform's own unit tests: those cases replace
+# _run with a fake and point paths at tmp_path, and they cover exactly the
+# failure handling of write operations — no guard is needed there.
 _ALLOW_MUTATION = False
 
 
 def _assert_may_mutate() -> None:
-    """测试里禁止改动真实系统。
+    """Forbid mutating the real system in tests.
 
-    平台对象一旦拿到真实 HOME，就能改写 ~/.config/systemd/user/ 下的单元、
-    启停真实服务、甚至 sudo 写 /etc。隔离一旦漏掉一处，就会静默改掉用户机器
-    （曾经真的覆盖过用户自己的 caddy.service）。
+    Once a platform object gets the real HOME, it can rewrite units under
+    ~/.config/systemd/user/, start/stop real services, and even sudo-write
+    /etc. A single gap in isolation silently changes the user's machine (it
+    once really overwrote the user's own caddy.service).
 
-    护栏放在平台层而不是测试夹具里：只有平台知道哪些调用会动系统。
-    只读探测（service_active / dns_query / http_ok …）不受影响。
+    The guard lives in the platform layer rather than test fixtures: only the
+    platform knows which calls mutate the system. Read-only probes
+    (service_active / dns_query / http_ok …) are unaffected.
     """
     if _ALLOW_MUTATION:
         return
     if "PYTEST_CURRENT_TEST" in os.environ or os.environ.get("DEVPROXY_NO_MUTATION"):
-        raise RuntimeError("测试中禁止调用真实平台的写操作")
+        raise RuntimeError("write operations on the real platform are forbidden in tests")
 
 
 def render_systemd_unit(
@@ -308,13 +340,15 @@ def render_systemd_unit(
     description: str = "",
     service_type: str | None = None,
 ) -> str:
-    """生成 systemd user 单元。形态与现有的 caddy.service 保持一致。
+    """Generate a systemd user unit. The shape matches the existing caddy.service.
 
-    systemd 单元不做 shell 引号解析：参数里的空白会截断命令行。
-    路径来自配置（用户可改），必须在这里拦住。
+    systemd units do not do shell quote parsing: whitespace inside an argument
+    truncates the command line. The paths come from config (user-modifiable),
+    so they must be blocked here.
 
-    service_type 默认按被拉起的程序判断：只有 caddy 会发 sd_notify，
-    dnsmasq 这类程序硬套 Type=notify 会永远卡在 "start timed out"。
+    service_type is inferred by default from the program being launched: only
+    caddy sends sd_notify; forcing Type=notify on programs like dnsmasq would
+    hang forever at "start timed out".
     """
     for label, args in (
         ("ExecStart", exec_start),
@@ -323,18 +357,19 @@ def render_systemd_unit(
     ):
         for value in args or []:
             if any(c.isspace() for c in value):
-                raise RuntimeError(f"{label} 参数不能包含空白字符: {value}")
+                raise RuntimeError(f"{label} arguments must not contain whitespace: {value}")
 
-    # Environment= 的值来自用户可改的配置（paths.caddy_env 的 JSON），
-    # 与 argv 同属"外部输入"。换行会在 unit 里插入任意新行（例如伪造
-    # ExecStartPre=），至少也会把 unit 写坏，因此和 argv 一样必须拦住。
+    # Environment= values come from user-modifiable config (paths.caddy_env's
+    # JSON) and, like argv, are "external input". A newline would inject
+    # arbitrary new lines into the unit (for example a forged ExecStartPre=),
+    # or at the very least corrupt the unit, so it must be blocked like argv.
     def _reject_newline(label: str, value: str) -> None:
         if "\n" in value or "\r" in value:
-            raise RuntimeError(f"{label} 不能包含换行符: {value!r}")
+            raise RuntimeError(f"{label} must not contain newlines: {value!r}")
 
     _reject_newline("Description", description)
     for key, value in env.items():
-        _reject_newline("Environment 变量名", key)
+        _reject_newline("Environment variable name", key)
         _reject_newline(f"Environment={key}", value)
 
     if service_type is None:
@@ -370,70 +405,85 @@ def render_systemd_unit(
 
 
 class LinuxElevated:
-    """提权会话。构造时执行一次 `sudo -v` 完成预认证。
+    """Elevated session. The constructor runs `sudo -v` once to pre-authenticate.
 
-    `sudo -v` 是"无命令"调用：不匹配 sudoers 里的命令规范，
-    于是落到默认的 `(ALL : ALL) ALL` —— 需要认证。而
-    `(ALL) NOPASSWD: ALL` 只对**具体命令**免密，管不到 `sudo -v`。
-    于是免密机器上 `sudo -v` 必然失败（无 TTY 时报
-    "A terminal is required to authenticate"），而那台机器根本不需要密码。
+    `sudo -v` is a "command-less" invocation: it does not match a command
+    specification in sudoers, so it falls through to the default
+    `(ALL : ALL) ALL` — which requires authentication. Meanwhile
+    `(ALL) NOPASSWD: ALL` only grants passwordless access to **specific
+    commands** and does not cover `sudo -v`. Hence on a passwordless machine
+    `sudo -v` necessarily fails (without a TTY it reports
+    "A terminal is required to authenticate"), even though that machine needs
+    no password at all.
 
-    所以 `sudo -v` 失败**不能**直接判定"提权失败"：改用 `sudo -n true`
-    探测免密能力 —— 它成功就说明这台机器不需要密码，
-    后续特权命令一律自带 `-n`（绝不退化成会弹密码框的 `sudo <cmd>`）。
+    So a failed `sudo -v` **must not** immediately mean "elevation failed":
+    instead probe passwordless capability with `sudo -n true` — if that
+    succeeds, the machine needs no password, and all subsequent privileged
+    commands carry `-n` (never degrading to `sudo <cmd>`, which would pop a
+    password prompt).
     """
 
-    # 免密路径的标记。做成类属性：测试里用 __new__ 造出的会话
-    # 没有实例属性，也必须能正常跑。
+    # Marker for the passwordless path. Stored as a class attribute: sessions
+    # created in tests via __new__ have no instance attributes and must still
+    # run.
     _noninteractive = False
 
     def __init__(self) -> None:
-        # 护栏也必须拦构造函数：直接 new 一个提权会话会真的跑 sudo -v。
+        # The guard must also cover the constructor: directly creating an
+        # elevated session really runs sudo -v.
         _assert_may_mutate()
         self._authenticate()
 
     def _authenticate(self) -> None:
-        # `sudo -v` 可能要等用户输密码 —— 只有这条路径允许无超时。
+        # `sudo -v` may wait for the user to type a password — only this path
+        # is allowed to have no timeout.
         code, msg = _run(["sudo", "-v"], timeout=None)
         if code == 0:
-            # 时间戳已预热，后续 `sudo <cmd>` 直接复用。
+            # The timestamp is warmed up; subsequent `sudo <cmd>` reuses it.
             return
-        # 免密探测：`-n` 保证绝不等待输入（非交互环境会直接失败而不是挂住）。
+        # Passwordless probe: `-n` guarantees it never waits for input (in a
+        # non-interactive environment it fails immediately instead of hanging).
         code_nopasswd, msg_nopasswd = _run(["sudo", "-n", "true"])
         if code_nopasswd == 0:
-            # 免密可用。`sudo -v` 的预热在这台机器上不可用，
-            # 后续命令必须自带 `-n` 才不会弹密码框。
+            # Passwordless access works. `sudo -v` warm-up is unavailable on
+            # this machine, so subsequent commands must carry `-n` to avoid a
+            # password prompt.
             self._noninteractive = True
             return
-        # 两条路都走不通 —— 错误信息要同时带上两条命令的输出，
-        # 用户才能分辨"这台机器没免密"和"sudo 本身坏了"。
-        raise PermissionError(f"提权失败：sudo -v: {msg}；sudo -n true: {msg_nopasswd}")
+        # Both paths failed — the error must include both commands' output so
+        # the user can distinguish "this machine has no passwordless access"
+        # from "sudo itself is broken".
+        raise PermissionError(f"elevation failed: sudo -v: {msg}; sudo -n true: {msg_nopasswd}")
 
     def run(self, argv: list[str]) -> tuple[int, str]:
         if self._noninteractive:
             return _run(["sudo", "-n", *argv])
-        # 交互路径可能要等用户输入密码 —— 不设超时（其余调用一律有界）。
+        # The interactive path may wait for the user to type a password — no
+        # timeout (every other call is bounded).
         return _run(["sudo", *argv], timeout=None)
 
     def write(self, path: Path, content: str) -> None:
-        """通过系统临时目录中的文件 + 特权安装写入，避免 shell 引号问题。
+        """Write via a file in the system temp directory plus a privileged install, avoiding shell quoting problems.
 
-        父目录不一定存在：`/etc/systemd/resolved.conf.d` 与 `/etc/dnsmasq.d`
-        在干净机器上可能尚未创建（不归任何 dpkg 包所有）。先 `install -d`
-        建目录，否则写入必然失败，setup 永远无法收敛。
-        临时文件必须放在用户可写的系统临时目录（目标目录本身可能不可写），
-        且无论成功失败都要清理。
+        The parent directory does not necessarily exist:
+        `/etc/systemd/resolved.conf.d` and `/etc/dnsmasq.d` may not have been
+        created yet on a clean machine (they are not owned by any dpkg
+        package). Run `install -d` to create the directory first, otherwise
+        the write necessarily fails and setup can never converge. The temp file
+        must live in a user-writable system temp directory (the target
+        directory itself may not be writable), and must be cleaned up on both
+        success and failure.
 
-        用 `install -m 644 -o root -g root` 而不是 `cp`：mkstemp 建出来的
-        临时文件是 0600，`cp` 会把权限一并带过去，于是写进
-        /usr/local/share/ca-certificates/ 与 /etc/systemd/resolved.conf.d/
-        的文件变成 root:root 0600 —— 调用的普通用户自己都读不了，
-        doctor 会永远报"文件读不到"。macOS 那条路径已经改成 0644，
-        Linux 必须对齐。
+        Use `install -m 644 -o root -g root` instead of `cp`: the temp file
+        created by mkstemp is 0600, and `cp` carries that permission over, so
+        files written into /usr/local/share/ca-certificates/ and
+        /etc/systemd/resolved.conf.d/ end up as root:root 0600 — the invoking
+        regular user cannot even read them, and doctor would forever report
+        "file unreadable". The macOS path already uses 0644; Linux must align.
         """
         code, msg = self.run(["install", "-d", str(path.parent)])
         if code != 0:
-            raise PermissionError(f"创建目录 {path.parent} 失败: {msg}")
+            raise PermissionError(f"failed to create directory {path.parent}: {msg}")
         fd, tmp_name = tempfile.mkstemp(prefix="devproxy-elev-")
         tmp = Path(tmp_name)
         try:
@@ -453,31 +503,33 @@ class LinuxElevated:
                 ]
             )
             if code != 0:
-                raise PermissionError(f"写入 {path} 失败: {msg}")
+                raise PermissionError(f"failed to write {path}: {msg}")
         finally:
             tmp.unlink(missing_ok=True)
 
     def read(self, path: Path) -> str:
-        """读取特权文件。文件不存在抛 FileNotFoundError，其余失败抛 PermissionError。
+        """Read a privileged file. Raise FileNotFoundError if the file is absent, PermissionError for other failures.
 
-        存在性用 `test -e` 的**返回码**判断，不解析 `cat` 的错误文案：
-        GNU coreutils 的报错经 gettext 本地化，`LANG=zh_CN.UTF-8` 时
-        输出是"没有那个文件或目录"，按 `"No such file"` 匹配会把缺失
-        文件误抛成 PermissionError。
+        Existence is decided by the **return code** of `test -e`, not by
+        parsing `cat`'s error text: GNU coreutils localizes its messages via
+        gettext, so with `LANG=zh_CN.UTF-8` the output is a translated string
+        and matching on `"No such file"` would wrongly raise PermissionError
+        for a missing file.
         """
         exists, _ = self.run(["test", "-e", str(path)])
         if exists != 0:
             raise FileNotFoundError(path)
         code, out = self.run(["cat", str(path)])
         if code != 0:
-            raise PermissionError(f"读取 {path} 失败: {out}")
+            raise PermissionError(f"failed to read {path}: {out}")
         return out
 
     def copy(self, src: Path, dest: Path) -> None:
-        """复制文件（CA 装进系统信任库走这条路）。
+        """Copy a file (the path used to install the CA into the system trust store).
 
-        同样用 `install -m 644 -o root -g root`：`cp` 会把源文件的权限
-        带过去，源文件若是 0600，目标就成了 root:root 0600。
+        Also use `install -m 644 -o root -g root`: `cp` carries over the source
+        file's permissions, so if the source is 0600, the destination becomes
+        root:root 0600.
         """
         code, msg = self.run(
             [
@@ -493,7 +545,7 @@ class LinuxElevated:
             ]
         )
         if code != 0:
-            raise PermissionError(f"复制 {src} → {dest} 失败：{msg}")
+            raise PermissionError(f"failed to copy {src} → {dest}: {msg}")
 
 
 class LinuxPlatform:
@@ -501,15 +553,16 @@ class LinuxPlatform:
     dns_port = 5353
 
     def __init__(self, user_home: Path | None = None) -> None:
-        # 设计前提是"以普通用户运行，内部按需 sudo"。以 root 运行时
-        # Path.home() 是 /root，unit 会装进 root 的家目录、systemctl --user
-        # 操作 root 的 user manager —— 最坏会覆盖 root 家目录下同名的
-        # caddy.service。必须在构造时就显式失败，而不是留到一堆
-        # 令人困惑的 systemd 错误。
+        # The design assumes "run as a regular user, sudo on demand
+        # internally". When run as root, Path.home() is /root, units get
+        # installed into root's home, and systemctl --user operates root's user
+        # manager — at worst overwriting a caddy.service of the same name in
+        # root's home. This must fail explicitly at construction time, rather
+        # than surfacing later as a pile of confusing systemd errors.
         if os.geteuid() == 0:
             raise RuntimeError(
-                "请以普通用户运行 devproxy：需要特权的步骤由工具内部调用 sudo，"
-                "以 root 运行会把服务装进 root 的家目录"
+                "run devproxy as a regular user: privileged steps are performed by the tool via sudo internally; "
+                "running as root installs services into root's home directory"
             )
         self.user_home = user_home or Path.home()
         self._elevated: LinuxElevated | None = None
@@ -521,15 +574,18 @@ class LinuxPlatform:
         return self._elevated
 
     def run(self, argv: list[str]) -> tuple[int, str]:
-        # 普通命令一律带超时；sudo 那条路径不加 —— 它可能要等用户输密码。
+        # Regular commands always have a timeout; the sudo path does not — it
+        # may wait for the user to type a password.
         return _run(argv, timeout=60.0)
 
     def privilege_read(self, path: Path) -> str | None:
-        """非交互地读特权文件（`sudo -n`）。读不到返回 None。
+        """Read a privileged file non-interactively (`sudo -n`). Return None if unreadable.
 
-        doctor 是只读命令，绝不能因为权限问题弹出密码框 —— 那既违反
-        "只读体检"的承诺，也会让脚本里跑的 doctor 卡在密码提示上。
-        `sudo -n` 在没有缓存凭据时立刻失败，绝不等待输入。
+        doctor is a read-only command and must never pop a password prompt
+        because of permissions — that would both break the "read-only health
+        check" promise and make doctor hang on a password prompt in scripts.
+        `sudo -n` fails immediately when there are no cached credentials and
+        never waits for input.
         """
         try:
             proc = subprocess.run(
@@ -579,52 +635,56 @@ class LinuxPlatform:
         )
         code, msg = _run(["systemctl", "--user", "daemon-reload"])
         if code != 0:
-            raise RuntimeError(f"安装 {name} 后 systemctl daemon-reload 失败: {msg}")
+            raise RuntimeError(f"systemctl daemon-reload failed after installing {name}: {msg}")
 
     def enable_service(self, name: str) -> None:
         _assert_may_mutate()
         code, msg = _run(["systemctl", "--user", "enable", "--now", name])
         if code != 0:
-            raise RuntimeError(f"systemctl enable --now {name} 失败: {msg}")
+            raise RuntimeError(f"systemctl enable --now {name} failed: {msg}")
 
     def restart_service(self, name: str) -> None:
         _assert_may_mutate()
         code, msg = _run(["systemctl", "--user", "restart", name])
         if code != 0:
-            raise RuntimeError(f"systemctl restart {name} 失败: {msg}")
+            raise RuntimeError(f"systemctl restart {name} failed: {msg}")
 
     def remove_service(self, name: str) -> None:
-        """停止并删除 user unit；单元不存在是正常情况（幂等）。
+        """Stop and delete the user unit; a missing unit is normal (idempotent).
 
-        `disable --now` 对不存在的单元返回非零，不能一律当失败 —— 但也
-        不能一律吞掉：命令失败后服务仍 active 才说明是真失败；单元文件
-        只是残留（服务并未运行）时仍应删掉。
+        `disable --now` returns non-zero for a nonexistent unit, which cannot
+        be treated as failure across the board — but it must not be swallowed
+        across the board either: only if the service is still active after the
+        command failed is it a real failure; when the unit file is merely left
+        over (the service is not running), it should still be deleted.
         """
         _assert_may_mutate()
         path = self.service_unit_path(name)
         code, msg = _run(["systemctl", "--user", "disable", "--now", name])
         if code != 0 and self.service_active(name):
-            raise RuntimeError(f"停止服务 {name} 失败: {msg}")
+            raise RuntimeError(f"failed to stop service {name}: {msg}")
         path.unlink(missing_ok=True)
         code, msg = _run(["systemctl", "--user", "daemon-reload"])
         if code != 0:
-            raise RuntimeError(f"移除 {name} 后 systemctl daemon-reload 失败: {msg}")
+            raise RuntimeError(f"systemctl daemon-reload failed after removing {name}: {msg}")
 
     def tail_service_log(self, name: str) -> None:
-        """流式跟随服务日志：继承终端 stdio（不捕获），Ctrl-C 自然传播。"""
+        """Stream-follow service logs: inherit the terminal's stdio (no capture); Ctrl-C propagates naturally."""
         subprocess.run(["journalctl", "--user", "-u", name, "-f"])
 
     def open_in_editor(self, path: Path, editor: str) -> int:
-        """用编辑器打开文件：继承 stdio（编辑器要接管终端），返回退出码。"""
+        """Open a file in the editor: inherit stdio (the editor takes over the terminal); return the exit code."""
         argv = shlex.split(editor) + [str(path)]
         return subprocess.run(argv).returncode
 
     def enable_linger(self) -> tuple[int, str]:
-        """启用 linger。
+        """Enable linger.
 
-        与平台其他特权操作一致：先走 `sudo -n`（绝不弹密码框）。只有
-        确实有控制终端时才回退到可能提示密码的 `sudo`；非交互环境
-        直接返回可解释的错误码，绝不挂在密码提示上。
+        Consistent with the platform's other privileged operations: try
+        `sudo -n` first (never pop a password prompt). Fall back to `sudo`,
+        which may prompt for a password, only when a controlling terminal
+        really exists; in a non-interactive environment return an explainable
+        error code instead of hanging on a password prompt.
         """
         _assert_may_mutate()
         user = getpass.getuser()
@@ -632,35 +692,39 @@ class LinuxPlatform:
         if code == 0:
             return code, msg
         if not sys.stdin.isatty():
-            return code, f"{msg}（非交互环境，未尝试输入密码）"
+            return code, f"{msg} (non-interactive environment; did not attempt to enter a password)"
         return _run(["sudo", "loginctl", "enable-linger", user], timeout=None)
 
     def linger_status(self) -> bool | None:
-        """linger 的三态（**非协议方法**，组件用 getattr 探测）。
+        """Three-state linger (**not a protocol method**; components probe it via getattr).
 
-        - `True`：已启用，或本机根本不适用（没有 systemd / 没有 loginctl）；
-        - `False`：确定未启用；
-        - `None`：systemd 在，但探测失败 —— 判不了，调用方应显式处理，
-          不能静默当成"已启用"。
+        - `True`: enabled, or not applicable on this machine at all (no systemd / no loginctl);
+        - `False`: definitely not enabled;
+        - `None`: systemd is present but the probe failed — cannot determine;
+          callers must handle this explicitly and must not silently treat it as
+          "enabled".
         """
         if not SYSTEMD_RUN_DIR.is_dir():
-            # 容器 / WSL / 非 systemd 宿主：linger 不适用。
+            # Container / WSL / non-systemd host: linger is not applicable.
             return True
         code, out = _run(["loginctl", "show-user", getpass.getuser(), "-p", "Linger", "--value"])
         if code == 127:
-            # loginctl 不在 PATH（精简 systemd 环境）：linger 无从启用。
+            # loginctl is not in PATH (minimal systemd environment): linger
+            # cannot be enabled.
             return True
         if code != 0:
-            # systemd 在、探测却失败（D-Bus 瞬时故障 / 权限）：判不了。
+            # systemd is present but the probe failed (transient D-Bus
+            # failure / permission): cannot determine.
             return None
         return out.strip() == "yes"
 
     def linger_enabled(self) -> bool:
-        """当前用户是否已启用 linger（只读探测）。
+        """Whether the current user has linger enabled (read-only probe).
 
-        `linger_status()` 返回"判不了"时按**未启用**处理（fail closed）：
-        宁可让 plan 多出一条 `enable-linger` 动作（失败会显式报错），
-        也不能静默跳过导致用户级服务在登出/重启后不再启动。
+        When `linger_status()` returns "cannot determine", treat it as **not
+        enabled** (fail closed): better to add an extra `enable-linger` action
+        to the plan (which fails loudly) than to silently skip it and leave
+        user-scope services not starting after logout/reboot.
         """
         status = self.linger_status()
         return False if status is None else status
@@ -669,17 +733,19 @@ class LinuxPlatform:
         code, out = _run(["systemctl", "is-active", "systemd-resolved"])
         if code == 0 and out.strip() == "active":
             return True
-        # 部分环境没有 systemd-resolved 的 systemd 单元名，但 resolvectl
-        # 能工作（例如容器）；以能否查询状态作为兜底判据。
+        # Some environments lack the systemd unit name for systemd-resolved
+        # but resolvectl still works (e.g. containers); fall back to whether a
+        # status query succeeds.
         code, _ = _run(["resolvectl", "status"])
         return code == 0
 
     def dns_query(self, name: str) -> str | None:
-        """优先走系统解析器（resolved），失败再直接问本机 dnsmasq。
+        """Prefer the system resolver (resolved); on failure, ask the local dnsmasq directly.
 
-        两条路径都必须有超时上限：`resolvectl query` 走 D-Bus，
-        systemd-resolved 挂起时子进程不会自己返回，`verify()` 会被永久
-        拖死。上限与 macOS 的 `DNS_QUERY_TIMEOUT` 保持一致。
+        Both paths must have an upper timeout bound: `resolvectl query` goes
+        through D-Bus, and when systemd-resolved hangs the child process does
+        not return on its own, so `verify()` would be dragged forever. The
+        bound matches macOS's `DNS_QUERY_TIMEOUT`.
         """
         code, out = _run(["resolvectl", "query", name], timeout=DNS_QUERY_TIMEOUT)
         if code == 0:
@@ -695,63 +761,78 @@ class LinuxPlatform:
         return None
 
     def http_ok(self, url: str) -> bool:
-        # 本地回环探测必须绕过用户代理：curl 默认读 http_proxy/ALL_PROXY，
-        # 公司代理配置会让发往 <dnsmasq 解析的 .test 域名> 的请求跑去公网，
-        # verify() 于是假阴性。
+        # Local loopback probes must bypass the user's proxy: curl reads
+        # http_proxy/ALL_PROXY by default, and a corporate proxy config would
+        # send requests for <.test domains resolved by dnsmasq> to the public
+        # internet, making verify() report a false negative.
         code, _ = _run(["curl", "--noproxy", "*", "-fsS", "--max-time", "3", url])
         return code == 0
 
     def ca_trusted(self, ca: Path) -> bool:
-        """CA 是否**真的在系统信任库里**。
+        """Whether the CA is **really in the system trust store**.
 
-        权威判据是**指纹命中**（见 ca_in_trust_store）：活库里存在与该 CA
-        字节完全相同的证书才算信任。
+        The authoritative criterion is a **fingerprint match** (see
+        ca_in_trust_store): trust only counts when the live store contains a
+        certificate with exactly the same bytes as this CA.
 
-        只比对暂存目录（/usr/local/share/ca-certificates）里的文件是不够的：
-        那个文件在 update-ca-certificates 没跑成功时也在那儿，系统却不认它。
+        Comparing only the file in the staging directory
+        (/usr/local/share/ca-certificates) is not enough: that file is also
+        there when update-ca-certificates never succeeded, yet the system does
+        not recognize it.
 
-        openssl 只作为**补充的肯定信号**：验通了说明信任链确实成立；
-        它验不通可能只是上面的同主题歧义，绝不用来否定指纹命中。
+        openssl is used only as a **supplementary positive signal**: a
+        successful verification shows the chain really holds; a failed one may
+        just be the same-subject ambiguity above, and must never be used to
+        negate a fingerprint match.
         """
-        # 指纹判定自己承诺"永不抛异常"（内部已把读取/解码失败转成
-        # False）；这里不再包一层宽泛的 except —— 真出 bug 时应当暴露，
-        # 而不是被吞掉后继续跑 openssl。
+        # The fingerprint check itself promises "never raises" (it already
+        # turns read/decode failures into False internally); do not wrap
+        # another broad except here — a real bug should surface rather than be
+        # swallowed and then continue into openssl.
         if ca_in_trust_store(ca):
             return True
         code, _ = _run(["openssl", "verify", "-CApath", str(SYSTEM_TRUST_DIR), str(ca)])
         return code == 0
 
     def nss_db_path(self) -> Path:
-        """本平台认定的 NSS 库路径（**非协议方法**）。
+        """NSS database path as this platform sees it (**not a protocol method**).
 
-        组件层要拿它跟自己的 `nss_dir` 对一下：写入的库与复查的库必须是
-        同一个 —— 否则"复查"这张安全网查的是另一个库，等于失效。
+        The component layer needs to compare it with its own `nss_dir`: the
+        database written to and the database rechecked must be the same —
+        otherwise the "recheck" safety net is checking another database, i.e.
+        it is useless.
         """
         return nss_db_dir(self.user_home)
 
     def nss_entries(self, ca: Path, nss_dir: Path | None = None) -> list[tuple[str, str]] | None:
-        """NSS 库里与这张 CA **内容相同**的条目：[(昵称, 信任标志), ...]。
+        """Entries in the NSS database with **the same content** as this CA: [(nickname, trust flags), ...].
 
-        按**内容**找，不按昵称找 —— NSS 按 (issuer, serial) 去重：
-        同一张证书换个昵称再 `certutil -A`，会**静默无操作**（返回 0，
-        但条目并不新增）。所以"这张 CA 装了没有"只能靠指纹比对。
+        Find by **content**, not by nickname — NSS deduplicates by (issuer,
+        serial): installing the same certificate again with a different
+        nickname via `certutil -A` is a **silent no-op** (returns 0 but no
+        entry is added). So "is this CA installed" can only be answered by
+        fingerprint comparison.
 
-        返回三态：
-        - 列表：库读得到，已按内容筛过（可能为空）；
-        - `[]`：库**确定**不存在，条目自然没有；
-        - `None`：**判不了**（库被锁 / 目录不可读 / DB 损坏 / certutil 失败）
-          —— 调用方不能把它当成"没有条目"。
+        Three-state return:
+        - a list: the database was readable and has been filtered by content (may be empty);
+        - `[]`: the database **definitely** does not exist, so entries naturally do not exist;
+        - `None`: **cannot determine** (database locked / directory unreadable / DB corrupt / certutil failed)
+          — callers must not treat it as "no entries".
 
-        注意快路径：自有昵称那条命中且可信时**直接返回它一条**，
-        不保证列出库里全部匹配项 —— 调用方只应把它当作"有没有被信任"的
-        判据；要枚举全部匹配条目（例如为了补信任标志）时，前提本来就是
-        "自有昵称不命中"，那时返回的是全量。
+        Note the fast path: when the tool's own nickname matches and is
+        trusted, it **returns just that one entry** and does not guarantee
+        listing all matches — callers should use it only as the criterion for
+        "is it trusted"; enumerating all matching entries (e.g. to repair trust
+        flags) presupposes that the tool's own nickname does not match, and in
+        that case the full list is returned.
 
-        `nss_dir` 允许显式指定库路径（默认本平台的 nss_db_path）：
-        组件注入的库与平台默认库不一致时，复查必须查**写进去的那个**。
+        `nss_dir` may explicitly specify the database path (defaults to this
+        platform's nss_db_path): when the database injected by the component
+        differs from the platform default, the recheck must query **the one
+        that was written**.
 
-        这是**非协议方法**（组件层用 getattr 探测）：macOS 没有 NSS 库，
-        不实现也不影响。
+        This is a **non-protocol method** (the component layer probes it via
+        getattr): macOS has no NSS database, so not implementing it is fine.
         """
         nss = self._resolve_nss_dir(nss_dir)
         state = _nss_db_state(nss)
@@ -764,12 +845,14 @@ class LinuxPlatform:
             return []
         code, listing = _run(["certutil", "-L", "-d", f"sql:{nss}"])
         if code != 0:
-            # `-L` 失败时无法区分"空库"与"读不了" —— 判不了，不能返回 []。
+            # When `-L` fails, "empty database" and "unreadable" cannot be
+            # distinguished — cannot determine, must not return [].
             return None
         rows = _nss_rows(listing)
         cache: dict[str, str | None] = {}
 
-        # 快路径：自有昵称命中且已带信任标志 → 一次额外调用就够，不必全量枚举。
+        # Fast path: own nickname matches and already carries trust flags — one
+        # extra call is enough, no need to enumerate everything.
         for nickname, flags in rows:
             if nickname != CA_NICKNAME or not _nss_flags_trusted(flags):
                 continue
@@ -784,16 +867,21 @@ class LinuxPlatform:
     def nss_stale_nickname(
         self, ca: Path, nickname: str, nss_dir: Path | None = None
     ) -> bool | None:
-        """`nickname` 下有条目，且它的内容**不是**这张 CA（陈旧条目）。
+        """An entry exists under `nickname` and its content is **not** this CA (a stale entry).
 
-        用途：工具自有昵称（`devproxy Local CA`）下若残留着**旧 CA**，
-        浏览器会永久信任那个旧根 —— 若旧私钥还能拿到（备份、旧 storage），
-        就等于给 HTTPS 中间人留了门。那个昵称归工具所有，可以安全删除。
+        Purpose: if the tool's own nickname (`devproxy Local CA`) is left over
+        with an **old CA**, browsers will trust that old root forever — and if
+        the old private key is still obtainable (backups, old storage), that is
+        a door left open for HTTPS man-in-the-middle. That nickname belongs to
+        the tool and can be safely deleted.
 
-        返回三态：True = 确定陈旧；False = 确定不陈旧（同名同内容，或
-        条目确定不存在）；None = 判不了（库不可读、certutil 输出不是
-        "找不到"、不是 PEM）。删除对象固定是工具自有昵称，不存在"误删
-        用户条目"的风险；把"判不了"压成 False 会让陈旧根永久留在库里。
+        Three-state return: True = definitely stale; False = definitely not
+        stale (same name and same content, or the entry definitely does not
+        exist); None = cannot determine (database unreadable, certutil output
+        is not "not found", not PEM). The deletion target is always the tool's
+        own nickname, so there is no risk of "deleting a user entry by
+        mistake"; collapsing "cannot determine" into False would leave the
+        stale root in the database forever.
         """
         nss = self._resolve_nss_dir(nss_dir)
         state = _nss_db_state(nss)
@@ -804,67 +892,76 @@ class LinuxPlatform:
         code, pem = _run(["certutil", "-L", "-d", f"sql:{nss}", "-n", nickname, "-a"])
         if code != 0:
             if _nss_missing_cert(pem):
-                return False  # 这个昵称下确定没有条目
-            return None  # 库被锁 / 损坏 —— 判不了
+                return False  # definitely no entry under this nickname
+            return None  # database locked / corrupt — cannot determine
         stored = _pem_fingerprints(pem)
         expected = _fingerprints_of_file(ca)
         if not stored or not expected:
-            return None  # 内容不是 PEM，无法比对
+            return None  # content is not PEM, cannot compare
         return not (stored & expected)
 
     def nss_has_nickname(self, nickname: str, nss_dir: Path | None = None) -> bool | None:
-        """`nickname` 下是否有条目（不看内容）。**非协议方法**，三态。
+        """Whether an entry exists under `nickname` (content not checked). **Non-protocol method**, three-state.
 
-        - `True` / `False`：确定有 / 确定没有；
-        - `None`：**判不了**（库被锁、不可读、DB 损坏…）。
+        - `True` / `False`: definitely present / definitely absent;
+        - `None`: **cannot determine** (database locked, unreadable, DB corrupt…).
 
-        为什么必须三态：`certutil -L -n` 在"条目不存在"和"库读不了"两种
-        情况下**都**返回非零。把后者当"不存在"，删除失败就会被当成幂等成功
-        吞掉（旧根还留在库里，工具却报已就绪）。实测库不可读时输出是
-        `SEC_ERROR_BAD_DATABASE: security library: bad database.` ——
-        与"找不到"完全是两种文案。
+        Why three states are required: `certutil -L -n` returns non-zero
+        **both** when "the entry does not exist" and when "the database cannot
+        be read". Treating the latter as "does not exist" would swallow a
+        delete failure as idempotent success (the old root stays in the
+        database while the tool reports ready). Measured: when the database is
+        unreadable the output is
+        `SEC_ERROR_BAD_DATABASE: security library: bad database.` — a
+        completely different message from "not found".
         """
         nss = self._resolve_nss_dir(nss_dir)
         state = _nss_db_state(nss)
         if state is False:
-            return False  # 库确定不存在，条目自然没有
+            return False  # database definitely absent, so the entry naturally does not exist
         if state is None:
-            return None  # 目录/库访问不了 —— 判不了
+            return None  # directory/database inaccessible — cannot determine
         code, msg = _run(["certutil", "-L", "-d", f"sql:{nss}", "-n", nickname])
         if code == 0:
             return True
         if _nss_missing_cert(msg):
             return False
-        return None  # 锁 / 权限 / DB 损坏 —— 判不了
+        return None  # lock / permission / DB corrupt — cannot determine
 
     def nss_trust_flags(self, flags: str) -> str:
-        """补 SSL 信任标志时用的完整三列标志字符串（**非协议方法**）。
+        """Full three-column flag string used when repairing SSL trust (**non-protocol method**).
 
-        平台才知道标志串的列语义；组件只负责把结果喂给 `certutil -M`。
+        Only the platform knows the column semantics of the flag string; the
+        component only feeds the result to `certutil -M`.
         """
         return _nss_repair_flags(flags)
 
     def nss_trusted(self, ca: Path) -> bool:
-        """这张 CA 是否在 NSS 库里**且带 SSL 信任标志**。只读、非特权。
+        """Whether this CA is in the NSS database **and carries the SSL trust flag**. Read-only, unprivileged.
 
-        两个要点：
-        - 判据是**证书内容**，不是昵称。Caddy 重新生成内部 CA 后旧条目仍在，
-          只按 nickname 判定会误报"已信任"；反过来，老工具（devp）装的
-          "Caddy Local Authority"与本工具的昵称不同，只按自己的昵称查
-          又会永远查不到 —— 工具因此永远认为 CA 没装上。
-        - 光有证书**不算**信任：标志是 ",,"（无信任）时 Chrome 照样不认。
+        Two key points:
+        - The criterion is **certificate content**, not the nickname. After
+          Caddy regenerates its internal CA the old entry is still there, and
+          deciding by nickname alone would falsely report "trusted";
+          conversely, an old tool (devp) installed "Caddy Local Authority",
+          whose nickname differs from this tool's, so looking only under our
+          own nickname would never find it — and the tool would forever believe
+          the CA is not installed.
+        - A certificate alone **does not count** as trust: when the flags are
+          ",," (no trust), Chrome still does not recognize it.
         """
-        # `nss_entries` 已把读取/解析失败转成返回值（None/[]），这里不再
-        # 包宽泛的 except —— 真出 bug 时应当暴露，而不是被吞成"未信任"。
+        # `nss_entries` already turns read/parse failures into return values
+        # (None/[]); do not wrap a broad except here — a real bug should
+        # surface rather than be swallowed into "untrusted".
         entries = self.nss_entries(ca) or []
         return any(_nss_flags_trusted(flags) for _nickname, flags in entries)
 
     def _resolve_nss_dir(self, nss_dir: Path | None) -> Path:
-        """显式库路径优先；否则用本平台的默认库。"""
+        """Explicit database path wins; otherwise use this platform's default database."""
         return Path(nss_dir).expanduser() if nss_dir is not None else self.nss_db_path()
 
     def dns_route_installed(self, backend: str, suffix: str) -> bool:
-        """Linux 的两个后端都是固定路径，不看域名后缀（macOS 才按后缀分文件）。"""
+        """Both Linux backends use fixed paths and ignore the domain suffix (only macOS splits files by suffix)."""
         if backend == "resolved":
             return RESOLVED_CONF.exists()
         if backend == "system":

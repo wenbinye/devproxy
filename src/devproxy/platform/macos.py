@@ -1,12 +1,13 @@
-"""macOS 平台实现：launchd、/etc/resolver、security 钥匙串。
+"""macOS platform implementation: launchd, /etc/resolver, security keychain.
 
-与 Linux 的三处关键差异：
-- 无 setcap → 80/443 只能靠 root 的 LaunchDaemon（caddy 是 system scope）
-- 53 被 mDNSResponder 占用 → 用户级 dnsmasq 走 5300
-- DNS 路由写 /etc/resolver/<后缀>，不动 /etc/resolv.conf
+Three key differences from Linux:
+- No setcap → ports 80/443 can only be bound via a root LaunchDaemon (caddy runs in system scope)
+- Port 53 is occupied by mDNSResponder → the user-scope dnsmasq uses 5300
+- DNS routing is written to /etc/resolver/<suffix>, leaving /etc/resolv.conf untouched
 
-所有会动系统的调用都过 `_assert_may_mutate()` 护栏：测试进程里不许改真实
-机器（Linux 平台同款护栏，见 platform/linux.py）。
+All system-mutating calls go through the `_assert_may_mutate()` guard: the test
+process must not modify the real machine (the same guard as the Linux platform,
+see platform/linux.py).
 """
 
 from __future__ import annotations
@@ -29,25 +30,28 @@ from devproxy.platform.base import render_resolver_file as _render_resolver_file
 LAUNCH_AGENTS = "Library/LaunchAgents"
 LAUNCH_DAEMONS = "/Library/LaunchDaemons"
 
-# DNS 解析的超时上限（秒）：解析器挂住不能把 setup 的自检拖死。
-# dns_query 只在 verify() 里被调用（doctor 不做 DNS 解析）。
-# 与 Linux 的 DNS_QUERY_TIMEOUT 保持一致。
+# Upper bound for DNS resolution (seconds): a hung resolver must not drag
+# setup's self-check down. dns_query is only called from verify() (doctor does
+# not do DNS resolution). Matches Linux's DNS_QUERY_TIMEOUT.
 DNS_QUERY_TIMEOUT = 3.0
 
-# 子进程的默认超时（秒）：跨进程调用必须有界，漏传超时等于允许永久挂起。
+# Default timeout for child processes (seconds): cross-process calls must be
+# bounded; omitting the timeout means allowing an indefinite hang.
 DEFAULT_TIMEOUT = 30.0
 
-# launchctl print 里的服务状态行（"state = running" / "state = not running"）。
+# Service state line in launchctl print ("state = running" / "state = not running").
 _LAUNCHD_STATE = re.compile(r"^\s*state\s*=\s*(\S+)", re.MULTILINE)
 
 
 def _run(argv: list[str], timeout: float | None = DEFAULT_TIMEOUT) -> tuple[int, str]:
-    """执行一个 argv 列表（不走 shell）。返回 (返回码, 输出)。
+    """Execute one argv list (no shell). Return (return code, output).
 
-    默认超时是 `DEFAULT_TIMEOUT` 而不是 `None`：漏传超时是有界等待，
-    不是无限等待。只有确实要等用户输入密码的调用（sudo 密码路径）才
-    显式传 `timeout=None`。`stdin=DEVNULL` 防止交互式探针抢占终端输入
-    （`sudo` 从 `/dev/tty` 读密码，不受影响）。
+    The default timeout is `DEFAULT_TIMEOUT` rather than `None`: an omitted
+    timeout is a bounded wait, not an indefinite one. Only calls that genuinely
+    wait for a user password (the sudo password path) explicitly pass
+    `timeout=None`. `stdin=DEVNULL` prevents interactive probes from stealing
+    terminal input (`sudo` reads the password from `/dev/tty`, so it is
+    unaffected).
     """
     try:
         proc = subprocess.run(
@@ -58,18 +62,18 @@ def _run(argv: list[str], timeout: float | None = DEFAULT_TIMEOUT) -> tuple[int,
             stdin=subprocess.DEVNULL,
         )
     except FileNotFoundError:
-        # 命令不存在 —— 调用方按返回码处理，而不是拿到 traceback
-        return 127, f"命令不存在: {argv[0]}"
+        # Command missing — callers handle the return code instead of getting a traceback
+        return 127, f"command not found: {argv[0]}"
     except subprocess.TimeoutExpired:
-        return 124, f"命令超时: {argv[0]}"
+        return 124, f"command timed out: {argv[0]}"
     except OSError as e:
-        # 可执行位缺失等
-        return 127, f"命令不可用: {argv[0]}（{e}）"
+        # Missing execute bit, etc.
+        return 127, f"command unavailable: {argv[0]} ({e})"
     return proc.returncode, (proc.stdout or proc.stderr).strip()
 
 
 def _first_ip(text: str) -> str | None:
-    """从解析器输出里取第一个 A/AAAA 答案。"""
+    """Take the first A/AAAA answer from the resolver output."""
     for line in text.splitlines():
         for token in line.replace(",", " ").split():
             candidate = token.strip("[];()")
@@ -81,40 +85,43 @@ def _first_ip(text: str) -> str | None:
 
 
 def _launchd_running(text: str) -> bool:
-    """launchctl print 的输出里，服务是否**真的在跑**。
+    """Whether the service is **really running**, according to launchctl print output.
 
-    输出形如::
+    The output looks like::
 
         com.devproxy.caddy = {
             active count = 1
             path = /Library/LaunchDaemons/com.devproxy.caddy.plist
             state = running
 
-    launchctl print 对"已注册但进程已退出"的服务也返回 0 —— 只有 state
-    才是"进程在跑"的证据。看不到 running 就按没跑处理（fail closed）：
-    宁可让用户去查，也不能把崩溃的服务报成在运行。
+    launchctl print also returns 0 for a service that is "registered but whose
+    process has exited" — only state is evidence that "the process is running".
+    When running is not visible, treat it as not running (fail closed): better
+    to make the user investigate than to report a crashed service as running.
     """
     match = _LAUNCHD_STATE.search(text)
     return match is not None and match.group(1) == "running"
 
 
-# 平台自身单元测试的显式豁免：那些用例要把 _run 换成假的、路径指向
-# tmp_path，覆盖的正是写操作的失败处理 —— 不需要护栏拦着。
+# Explicit exemption for the platform's own unit tests: those cases replace
+# _run with a fake and point paths at tmp_path, and they cover exactly the
+# failure handling of write operations — no guard is needed there.
 _ALLOW_MUTATION = False
 
 
 def _assert_may_mutate() -> None:
-    """测试里禁止改动真实系统。
+    """Forbid mutating the real system in tests.
 
-    macOS 上的写操作会碰 /Library/LaunchDaemons、/etc/resolver 与系统钥匙串
-    —— 隔离一旦漏掉一处，就会静默改掉用户机器。护栏放在平台层：只有平台
-    知道哪些调用会动系统。只读探测（service_active / dns_query / http_ok …）
-    不受影响。
+    Write operations on macOS touch /Library/LaunchDaemons, /etc/resolver, and
+    the system keychain — a single gap in isolation silently changes the user's
+    machine. The guard lives in the platform layer: only the platform knows
+    which calls mutate the system. Read-only probes (service_active /
+    dns_query / http_ok …) are unaffected.
     """
     if _ALLOW_MUTATION:
         return
     if "PYTEST_CURRENT_TEST" in os.environ or os.environ.get("DEVPROXY_NO_MUTATION"):
-        raise RuntimeError("测试中禁止调用真实平台的写操作")
+        raise RuntimeError("write operations on the real platform are forbidden in tests")
 
 
 def render_plist(
@@ -124,16 +131,17 @@ def render_plist(
     log_path: Path,
     description: str = "",
 ) -> str:
-    """生成 launchd plist。
+    """Generate a launchd plist.
 
-    路径必须是绝对路径 —— LaunchDaemon 以 root 运行，`~` 是 root 的家目录，
-    相对路径则会按 launchd 的工作目录解释，两种都不是用户想要的位置。
+    Paths must be absolute — a LaunchDaemon runs as root, so `~` means root's
+    home directory, and a relative path is interpreted relative to launchd's
+    working directory; neither is the location the user wants.
     """
     if not exec_start:
-        raise RuntimeError(f"launchd 单元 {name} 缺少 ProgramArguments")
+        raise RuntimeError(f"launchd unit {name} is missing ProgramArguments")
     program = exec_start[0]
     if not Path(program).is_absolute():
-        raise RuntimeError(f"launchd 单元 {name} 的程序路径必须是绝对路径: {program}")
+        raise RuntimeError(f"launchd unit {name} program path must be absolute: {program}")
     data = {
         "Label": f"com.devproxy.{name}",
         "ProgramArguments": list(exec_start),
@@ -149,77 +157,91 @@ def render_plist(
 
 
 def render_resolver_file(port: int) -> str:
-    """/etc/resolver/<后缀> 的内容。
+    """/etc/resolver/<suffix> contents.
 
-    macOS 原生支持每域解析器，不必改 /etc/resolv.conf。
-    实现放在 platform/base.py —— DNS 组件也要用同一份格式。
+    macOS natively supports per-domain resolvers; there is no need to touch
+    /etc/resolv.conf. The implementation lives in platform/base.py — the DNS
+    component needs the same format too.
     """
     return _render_resolver_file(port)
 
 
 class MacOSElevated:
-    """提权会话。构造时执行一次 `sudo -v` 完成预认证。
+    """Elevated session. The constructor runs `sudo -v` once to pre-authenticate.
 
-    `sudo -v` 是"无命令"调用，不匹配 sudoers 里的命令规范 —— 免密
-    （`NOPASSWD: ALL`）只对具体命令生效，管不到它。于是免密机器上
-    `sudo -v` 必然失败，而那台机器根本不需要密码。
+    `sudo -v` is a "command-less" invocation and does not match a command
+    specification in sudoers — passwordless access (`NOPASSWD: ALL`) applies
+    only to specific commands and does not cover it. Hence on a passwordless
+    machine `sudo -v` necessarily fails, even though that machine needs no
+    password at all.
 
-    所以 `sudo -v` 失败**不能**直接判定"提权失败"：改用 `sudo -n true`
-    探测免密能力 —— 它成功就说明这台机器不需要密码，后续特权命令一律
-    自带 `-n`（绝不退化成会弹密码框的 `sudo <cmd>`）。
-    与 Linux 平台保持同一套语义。
+    So a failed `sudo -v` **must not** immediately mean "elevation failed":
+    instead probe passwordless capability with `sudo -n true` — if that
+    succeeds, the machine needs no password, and all subsequent privileged
+    commands carry `-n` (never degrading to `sudo <cmd>`, which would pop a
+    password prompt). Keep the same semantics as the Linux platform.
     """
 
-    # 免密路径的标记。做成类属性：测试里用 __new__ 造出的会话
-    # 没有实例属性，也必须能正常跑。
+    # Marker for the passwordless path. Stored as a class attribute: sessions
+    # created in tests via __new__ have no instance attributes and must still
+    # run.
     _noninteractive = False
 
     def __init__(self) -> None:
-        # 护栏也必须拦构造函数：直接 new 一个提权会话会真的跑 sudo -v，
-        # 后面还可能往系统钥匙串里写东西。
+        # The guard must also cover the constructor: directly creating an
+        # elevated session really runs sudo -v, and may later write into the
+        # system keychain as well.
         _assert_may_mutate()
         self._authenticate()
 
     def _authenticate(self) -> None:
-        # `sudo -v` 可能要等用户输密码 —— 只有这条路径允许无超时。
+        # `sudo -v` may wait for the user to type a password — only this path
+        # is allowed to have no timeout.
         code, msg = _run(["sudo", "-v"], timeout=None)
         if code == 0:
-            # 时间戳已预热，后续 `sudo <cmd>` 直接复用。
+            # The timestamp is warmed up; subsequent `sudo <cmd>` reuses it.
             return
-        # 免密探测：`-n` 保证绝不等待输入（非交互环境会直接失败而不是挂住）。
+        # Passwordless probe: `-n` guarantees it never waits for input (in a
+        # non-interactive environment it fails immediately instead of hanging).
         code_nopasswd, msg_nopasswd = _run(["sudo", "-n", "true"])
         if code_nopasswd == 0:
-            # 免密可用。`sudo -v` 的预热在这台机器上不可用，
-            # 后续命令必须自带 `-n` 才不会弹密码框。
+            # Passwordless access works. `sudo -v` warm-up is unavailable on
+            # this machine, so subsequent commands must carry `-n` to avoid a
+            # password prompt.
             self._noninteractive = True
             return
-        # 两条路都走不通 —— 错误信息要同时带上两条命令的输出，
-        # 用户才能分辨"这台机器没免密"和"sudo 本身坏了"。
-        raise PermissionError(f"提权失败：sudo -v: {msg}；sudo -n true: {msg_nopasswd}")
+        # Both paths failed — the error must include both commands' output so
+        # the user can distinguish "this machine has no passwordless access"
+        # from "sudo itself is broken".
+        raise PermissionError(f"elevation failed: sudo -v: {msg}; sudo -n true: {msg_nopasswd}")
 
     def run(self, argv: list[str]) -> tuple[int, str]:
         if self._noninteractive:
             return _run(["sudo", "-n", *argv])
-        # 交互路径可能要等用户输入密码 —— 不设超时（其余调用一律有界）。
+        # The interactive path may wait for the user to type a password — no
+        # timeout (every other call is bounded).
         return _run(["sudo", *argv], timeout=None)
 
     def write(self, path: Path, content: str) -> None:
-        """通过系统临时目录中的文件 + `install -m 644` 写入，避免 shell 引号问题。
+        """Write via a file in the system temp directory plus `install -m 644`, avoiding shell quoting problems.
 
-        父目录不一定存在：`/etc/resolver` 在干净的 macOS 上可能尚未创建。
-        先 `install -d` 建目录，否则写入必然失败，setup 永远无法收敛。
-        临时文件必须放在用户可写的系统临时目录（目标目录本身可能不可写），
-        且无论成功失败都要清理。
+        The parent directory does not necessarily exist: `/etc/resolver` may
+        not have been created yet on a clean macOS install. Run `install -d` to
+        create the directory first, otherwise the write necessarily fails and
+        setup can never converge. The temp file must live in a user-writable
+        system temp directory (the target directory itself may not be
+        writable), and must be cleaned up on both success and failure.
 
-        必须用 `install -m 644 -o root -g wheel` 而不是 `cp`：mkstemp 建出来
-        的临时文件是 0600，`cp` 会把权限一并带过去，于是 /etc/resolver/<后缀>
-        与 /Library/LaunchDaemons 下的文件变成 root:wheel 0600 —— 普通用户
-        自己都读不了，doctor 的内容判据（`read_text`）会永远失效。
-        `resolver(5)` 的常规形态也是 root:wheel 0644。与 Linux 对齐。
+        Must use `install -m 644 -o root -g wheel` instead of `cp`: the temp
+        file created by mkstemp is 0600, and `cp` carries that permission over,
+        so files under /etc/resolver/<suffix> and /Library/LaunchDaemons end up
+        as root:wheel 0600 — a regular user cannot even read them, and doctor's
+        content criterion (`read_text`) would forever fail. The conventional
+        form for `resolver(5)` is also root:wheel 0644. Aligns with Linux.
         """
         code, msg = self.run(["install", "-d", str(path.parent)])
         if code != 0:
-            raise PermissionError(f"创建目录 {path.parent} 失败: {msg}")
+            raise PermissionError(f"failed to create directory {path.parent}: {msg}")
         fd, tmp_name = tempfile.mkstemp(prefix="devproxy-elev-")
         tmp = Path(tmp_name)
         try:
@@ -239,27 +261,28 @@ class MacOSElevated:
                 ]
             )
             if code != 0:
-                raise PermissionError(f"写入 {path} 失败: {msg}")
+                raise PermissionError(f"failed to write {path}: {msg}")
         finally:
             tmp.unlink(missing_ok=True)
 
     def read(self, path: Path) -> str:
-        """读取特权文件。文件不存在抛 FileNotFoundError，其余失败抛 PermissionError。
+        """Read a privileged file. Raise FileNotFoundError if the file is absent, PermissionError for other failures.
 
-        存在性用 `test -e` 的**返回码**判断，不解析 `cat` 的错误文案：
-        BSD/GNU coreutils 的报错都会本地化，语言一换就把缺失文件误判成
-        权限错误。
+        Existence is decided by the **return code** of `test -e`, not by
+        parsing `cat`'s error text: BSD/GNU coreutils localize their messages,
+        so switching the language would misclassify a missing file as a
+        permission error.
         """
         exists, _ = self.run(["test", "-e", str(path)])
         if exists != 0:
             raise FileNotFoundError(path)
         code, out = self.run(["cat", str(path)])
         if code != 0:
-            raise PermissionError(f"读取 {path} 失败: {out}")
+            raise PermissionError(f"failed to read {path}: {out}")
         return out
 
     def copy(self, src: Path, dest: Path) -> None:
-        """复制文件并落成 root:wheel 0644（理由同 `write`）。"""
+        """Copy a file and write it as root:wheel 0644 (same reasoning as `write`)."""
         code, msg = self.run(
             [
                 "install",
@@ -274,40 +297,42 @@ class MacOSElevated:
             ]
         )
         if code != 0:
-            raise PermissionError(f"复制 {src} → {dest} 失败：{msg}")
+            raise PermissionError(f"failed to copy {src} → {dest}: {msg}")
 
 
 class MacOSPlatform:
-    """macOS 平台实现。"""
+    """macOS platform implementation."""
 
     name = "mac"
     dns_port = 5300
 
     def __init__(self, user_home: Path | None = None) -> None:
-        # 设计前提是"以普通用户运行，内部按需 sudo"。以 root 运行时
-        # Path.home() 是 /var/root，`gui/0` 域通常不存在，服务与单元
-        # 会装进 root 的家目录 —— 必须在构造时就显式失败。
+        # The design assumes "run as a regular user, sudo on demand
+        # internally". When run as root, Path.home() is /var/root, the `gui/0`
+        # domain usually does not exist, and services and units get installed
+        # into root's home — this must fail explicitly at construction time.
         if os.geteuid() == 0:
             raise RuntimeError(
-                "请以普通用户运行 devproxy：需要特权的步骤由工具内部调用 sudo，"
-                "以 root 运行会把服务装进 root 的家目录"
+                "run devproxy as a regular user: privileged steps are performed by the tool via sudo internally; "
+                "running as root installs services into root's home directory"
             )
         self.user_home = Path(user_home) if user_home else Path.home()
         self._elevated: MacOSElevated | None = None
 
-    # -- 提权 ----------------------------------------------------------
+    # -- Elevation -----------------------------------------------------
 
     def privilege(self) -> ElevatedSession:
-        """一次 sudo -v 认证，整个会话复用 —— 否则每次操作都要重输密码。"""
+        """One sudo -v authentication, reused for the whole session — otherwise every operation would prompt for the password again."""
         _assert_may_mutate()
         if self._elevated is None:
             self._elevated = MacOSElevated()
         return self._elevated
 
-    # -- 只读探测 ------------------------------------------------------
+    # -- Read-only probes ----------------------------------------------
 
     def run(self, argv: list[str]) -> tuple[int, str]:
-        # 与 Linux 对齐：普通命令带超时，sudo 那条等用户输密码、不设。
+        # Aligned with Linux: regular commands have a timeout; the sudo path
+        # waits for the user to type a password and has none.
         return _run(argv, timeout=60.0)
 
     def binary_version(self, binary: Path) -> str:
@@ -319,10 +344,11 @@ class MacOSPlatform:
         return out.split()[0] if out else ""
 
     def service_active(self, name: str) -> bool:
-        """服务是否**真的在跑**（不只是"已加载"）。
+        """Whether the service is **really running** (not just "loaded").
 
-        launchctl print 对已注册但已退出的服务同样返回 0 —— 直接拿退出码
-        当"在运行"，doctor 会把崩溃的 caddy 报成好的。
+        launchctl print also returns 0 for a registered service that has
+        exited — using the exit code directly as "running" would make doctor
+        report a crashed caddy as healthy.
         """
         code, out = _run(["launchctl", "print", f"{self._domain(name)}/com.devproxy.{name}"])
         if code != 0:
@@ -330,11 +356,11 @@ class MacOSPlatform:
         return _launchd_running(out)
 
     def resolved_active(self) -> bool:
-        """macOS 没有 systemd-resolved —— auto 后端绝不能选它。"""
+        """macOS has no systemd-resolved — the auto backend must never choose it."""
         return False
 
     def dns_query(self, name: str) -> str | None:
-        """走系统解析器查询。必须有超时上限：解析器挂住会拖死 setup 的自检。"""
+        """Query via the system resolver. Must have an upper timeout bound: a hung resolver would drag setup's self-check down."""
         code, out = _run(
             ["dscacheutil", "-q", "host", "-a", "name", name], timeout=DNS_QUERY_TIMEOUT
         )
@@ -342,33 +368,37 @@ class MacOSPlatform:
             answer = _first_ip(out)
             if answer is not None:
                 return answer
-        # dscacheutil 不可用/无答案时，退回 dig（装了 bind 工具就有）
+        # When dscacheutil is unavailable or has no answer, fall back to dig
+        # (available when the bind tools are installed)
         code, out = _run(["dig", "+short", name], timeout=DNS_QUERY_TIMEOUT)
         if code == 0:
             return _first_ip(out)
         return None
 
     def http_ok(self, url: str) -> bool:
-        # 本地回环探测必须绕过用户代理：curl 默认读 http_proxy/ALL_PROXY，
-        # 公司代理配置会让发往 <dnsmasq 解析的 .test 域名> 的请求跑去公网，
-        # verify() 于是假阴性。
+        # Local loopback probes must bypass the user's proxy: curl reads
+        # http_proxy/ALL_PROXY by default, and a corporate proxy config would
+        # send requests for <.test domains resolved by dnsmasq> to the public
+        # internet, making verify() report a false negative.
         code, _ = _run(["curl", "--noproxy", "*", "-fsS", "--max-time", "3", url])
         return code == 0
 
     def ca_trusted(self, ca: Path) -> bool:
-        """CA 是否**真的在系统信任链里**。
+        """Whether the CA is **really in the system trust chain**.
 
-        只看暂存文件是不够的：那个文件在 add-trusted-cert 没跑成功时也在，
-        系统却不认它。所以让 security 对着系统信任设置验一遍。
+        Checking only the staged file is not enough: that file is also there
+        when add-trusted-cert never succeeded, yet the system does not
+        recognize it. So let security verify against the system trust settings.
         """
         code, _ = _run(["security", "verify-cert", "-c", str(ca), "-p", "ssl"])
         return code == 0
 
     def privilege_read(self, path: Path) -> str | None:
-        """非交互地读特权文件；读不到返回 None（绝不弹密码框）。
+        """Read a privileged file non-interactively; return None if unreadable (never prompt for a password).
 
-        macOS 的 /Library/LaunchDaemons 通常全局可读；真读不到就当
-        "读不到"，让调用方按"宁放过也不误报"处理。
+        /Library/LaunchDaemons on macOS is usually world-readable; if it really
+        cannot be read, treat it as "cannot read" and let callers apply "rather
+        miss than misreport".
         """
         try:
             return Path(path).read_text(encoding="utf-8")
@@ -376,31 +406,32 @@ class MacOSPlatform:
             return None
 
     def nss_trusted(self, ca: Path) -> bool:
-        """macOS 没有 NSS 库 —— 恒为真，证书组件才不会去装 NSS 证书。"""
+        """macOS has no NSS database — always true, so the certificate component does not try to install an NSS certificate."""
         return True
 
     def dns_route_installed(self, backend: str, suffix: str) -> bool:
-        """macOS 只有 resolver 后端：每域解析器文件存在即已配置。"""
+        """macOS only has the resolver backend: the per-domain resolver file is configured when it exists."""
         if backend == "resolver":
             return (RESOLVER_DIR / suffix.lstrip(".")).exists()
         return False
 
-    # -- linger（macOS 不适用） -----------------------------------------
+    # -- linger (not applicable on macOS) ------------------------------
 
     def enable_linger(self) -> tuple[int, str]:
-        """macOS 没有 systemd-linger —— 不适用，且不得失败。"""
-        return 0, "macOS 无 systemd-linger，不适用"
+        """macOS has no systemd-linger — not applicable, and must not fail."""
+        return 0, "macOS has no systemd-linger; not applicable"
 
     def linger_enabled(self) -> bool:
-        """macOS 无 linger 可启用 —— 恒为真，setup 不会计划任何 linger 动作。"""
+        """macOS has no linger to enable — always true, so setup never plans any linger action."""
         return True
 
-    # -- 服务 ----------------------------------------------------------
+    # -- Services ------------------------------------------------------
 
     def service_unit_path(self, name: str) -> Path:
-        """caddy 是 system scope，其余是 user scope。
+        """caddy uses system scope; everything else uses user scope.
 
-        macOS 没有 setcap：绑 80/443 必须以 root 运行，只能放 LaunchDaemons。
+        macOS has no setcap: binding ports 80/443 requires running as root, so
+        it can only live in LaunchDaemons.
         """
         if self._is_system_scope(name):
             return Path(LAUNCH_DAEMONS) / f"com.devproxy.{name}.plist"
@@ -419,14 +450,18 @@ class MacOSPlatform:
         env: dict[str, str],
         description: str = "",
     ) -> None:
-        """渲染 launchd plist 并 bootstrap 到对应域。
+        """Render the launchd plist and bootstrap it into the corresponding domain.
 
-        单元格式由平台自己决定 —— 组件只给"跑什么、带什么环境变量"。
+        The unit format is up to the platform — components only say "what to
+        run and which environment variables to carry".
 
-        `exec_reload` / `exec_stop` 在 launchd 下**不适用**（launchd 用
-        kickstart / KeepAlive 管理生命周期，没有对应的 plist 字段），
-        这里刻意忽略；协议允许平台忽略这两个可选项。若将来需要
-        reload 语义，应作为非协议能力单独加，而不是往 plist 里塞伪字段。
+        `exec_reload` / `exec_stop` are **not applicable** under launchd
+        (launchd manages the lifecycle via kickstart / KeepAlive and has no
+        corresponding plist fields), so they are deliberately ignored here; the
+        protocol allows a platform to ignore these two optional items. If
+        reload semantics are needed in the future, add them as a separate
+        non-protocol capability rather than stuffing pseudo-fields into the
+        plist.
         """
         _assert_may_mutate()
         path = self.service_unit_path(name)
@@ -434,32 +469,37 @@ class MacOSPlatform:
         content = render_plist(name, args, env, self.log_path(name), description)
         domain = self._domain(name)
         target = f"{domain}/com.devproxy.{name}"
-        # 日志目录必须在 bootstrap 之前就存在：launchd 打开 StandardOutPath
-        # 时父目录不存在就直接起不来。组件顺序是 caddy → dnsmasq → …，
-        # caddy 最先装 —— 那时日志目录还没人建。目录在用户家目录下，
-        # 用用户身份建即可（root 进程照样写得进去）。
+        # The log directory must exist before bootstrap: when launchd opens
+        # StandardOutPath, a missing parent directory prevents it from starting
+        # at all. The component order is caddy → dnsmasq → …; caddy is
+        # installed first, and at that point nobody has created the log
+        # directory yet. The directory is under the user's home, so it can be
+        # created as the user (a root process can write there too).
         self.log_path(name).parent.mkdir(parents=True, exist_ok=True)
         if self._is_system_scope(name):
-            # /Library/LaunchDaemons 归 root —— 必须走特权写入。
-            # `MacOSElevated.write` 用 `install -m 644 -o root -g wheel`
-            # 落盘，单元天然是 root:wheel 0644（工具自己也读得到），
-            # 不再需要额外的 chown/chmod。
+            # /Library/LaunchDaemons belongs to root — privileged writes are
+            # required. `MacOSElevated.write` writes to disk with
+            # `install -m 644 -o root -g wheel`, so the unit is naturally
+            # root:wheel 0644 (the tool can read it too) and no extra
+            # chown/chmod is needed.
             self.privilege().write(path, content)
             self.privilege().run(["launchctl", "bootout", target])
             code, msg = self.privilege().run(["launchctl", "bootstrap", "system", str(path)])
         else:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content, encoding="utf-8")
-            # bootout 只是"卸掉可能存在的旧实例"，没装过时失败是正常的
+            # bootout just "unloads any old instance that may exist"; failure
+            # when it was never installed is normal.
             _run(["launchctl", "bootout", target])
             code, msg = _run(["launchctl", "bootstrap", domain, str(path)])
         if code != 0:
-            raise RuntimeError(f"launchctl bootstrap {name} 失败: {msg}")
+            raise RuntimeError(f"launchctl bootstrap {name} failed: {msg}")
 
     def enable_service(self, name: str) -> None:
-        """launchd 靠 RunAtLoad=True 自动拉起，无需额外 enable。
+        """launchd starts the service automatically via RunAtLoad=True; no extra enable is needed.
 
-        刻意不做任何写操作 —— 重写 plist 会把 ProgramArguments 清空。
+        Deliberately performs no write operations — rewriting the plist would
+        clear ProgramArguments.
         """
         _assert_may_mutate()
         return
@@ -473,56 +513,59 @@ class MacOSPlatform:
         else:
             code, msg = _run(argv)
         if code != 0:
-            raise RuntimeError(f"launchctl kickstart {name} 失败: {msg}")
+            raise RuntimeError(f"launchctl kickstart {name} failed: {msg}")
 
     def remove_service(self, name: str) -> None:
-        """bootout 并删除 plist；服务没装过时静默成功（幂等）。
+        """Bootout and delete the plist; succeed silently when the service was never installed (idempotent).
 
-        system scope（caddy）的 plist 在 /Library/LaunchDaemons，删除必须
-        走提权会话；user scope 在用户自己家目录，直接删。
+        The system-scope (caddy) plist lives in /Library/LaunchDaemons, so
+        deletion must go through the elevated session; user scope lives in the
+        user's own home directory, so delete directly.
         """
         _assert_may_mutate()
         target = f"{self._domain(name)}/com.devproxy.{name}"
         path = self.service_unit_path(name)
         if self._is_system_scope(name):
-            # bootout 对不存在的服务返回非零 —— 幂等，不看返回码
+            # bootout returns non-zero for a nonexistent service — idempotent,
+            # ignore the return code.
             self.privilege().run(["launchctl", "bootout", target])
             code, msg = self.privilege().run(["rm", "-f", str(path)])
             if code != 0:
-                raise RuntimeError(f"删除 {name} 的 LaunchDaemon 失败: {msg}")
+                raise RuntimeError(f"failed to delete the LaunchDaemon for {name}: {msg}")
             return
         _run(["launchctl", "bootout", target])
         path.unlink(missing_ok=True)
 
     def tail_service_log(self, name: str) -> None:
-        """流式跟随服务日志：继承终端 stdio（不捕获），Ctrl-C 自然传播。"""
+        """Stream-follow service logs: inherit the terminal's stdio (no capture); Ctrl-C propagates naturally."""
         subprocess.run(["tail", "-f", str(self.log_path(name))])
 
     def open_in_editor(self, path: Path, editor: str) -> int:
-        """用编辑器打开文件：继承 stdio（编辑器要接管终端），返回退出码。"""
+        """Open a file in the editor: inherit stdio (the editor takes over the terminal); return the exit code."""
         argv = shlex.split(editor) + [str(path)]
         return subprocess.run(argv).returncode
 
-    # -- 内部 ----------------------------------------------------------
+    # -- Internals -----------------------------------------------------
 
     def _is_system_scope(self, name: str) -> bool:
         return name == "caddy"
 
     def _domain(self, name: str) -> str:
-        """launchd 域：system（root 的守护进程）或 gui/<uid>（用户级代理）。"""
+        """launchd domain: system (root's daemons) or gui/<uid> (user-scope agents)."""
         if self._is_system_scope(name):
             return "system"
         return f"gui/{os.getuid()}"
 
     def _state_dir(self) -> Path:
-        """状态目录 —— 唯一来源是 paths.default_state_dir，平台不自己拼路径。"""
+        """State directory — the single source is paths.default_state_dir; the platform does not assemble paths itself."""
         return default_state_dir(self.user_home)
 
     def _expand(self, arg: str) -> str:
-        """展开参数里的 ~ —— launchd 认不出它。
+        """Expand `~` in arguments — launchd does not recognize it.
 
-        不只是开头：`--conf-dir=~/.config/dnsmasq` 这种也要展开，
-        否则以 root 运行时指到 root 的家目录。
+        Not just at the start: `--conf-dir=~/.config/dnsmasq` must be expanded
+        too, otherwise when running as root it points into root's home
+        directory.
         """
         if arg == "~":
             return str(self.user_home)
@@ -536,7 +579,7 @@ class MacOSPlatform:
 
 
 def get_platform() -> Platform:
-    """跨平台分派工厂（按 brief 放在这里；实现在 platform/__init__.py）。"""
+    """Cross-platform dispatch factory (placed here per the brief; the implementation is in platform/__init__.py)."""
     from devproxy.platform import get_platform as _dispatch
 
     return _dispatch()

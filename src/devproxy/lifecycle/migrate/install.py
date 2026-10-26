@@ -1,4 +1,4 @@
-"""把工具自己的配置与单元落到盘上：主 Caddyfile、sites.caddy、systemd/launchd 单元。"""
+"""Write the tool's own config and units to disk: main Caddyfile, sites.caddy, systemd/launchd units."""
 
 from __future__ import annotations
 
@@ -19,30 +19,33 @@ from devproxy.platform.base import Platform
 
 
 def _write_sites_caddy(paths: Paths, state: LegacyState, config: Config) -> list[str]:
-    """把个人站点写进 sites.caddy，返回要告诉用户的提示。
+    """Write personal sites into sites.caddy and return notes for the user.
 
-    工具只 import sites.caddy，绝不覆盖已有内容 —— 用户自己写的站点不能被
-    迁移冲掉（重复的站点块还会让 Caddy 直接起不来）。
+    The tool only imports sites.caddy and never overwrites existing content --
+    sites the user wrote must not be wiped by migration (duplicate site blocks
+    would also prevent Caddy from starting at all).
 
-    但"不覆盖"不等于"没影响"：迁移会把单元改指向工具的 Caddyfile，而它
-    只 import sites.caddy。旧 Caddyfile 从此不再被读取 —— 留在那里的个人
-    站点**就此不再被服务**。这件事必须明说（点名文件与地址），否则用户
-    只会看到"站点突然 404 了"。
+    But "not overwriting" is not the same as "no impact": migration repoints the
+    unit at the tool's Caddyfile, which only imports sites.caddy. The old
+    Caddyfile is no longer read from then on -- personal sites left there are
+    **no longer served**. This must be stated explicitly (naming the file and
+    addresses), otherwise the user just sees "my site suddenly 404s".
     """
     config_path = state.config_path
     if config_path is None:
-        raise MigrationError("遗留 Caddyfile 路径未知，迁移已中止")
+        raise MigrationError("legacy Caddyfile path is unknown; migration aborted")
     notes: list[str] = []
     if not config_path.exists():
-        return [f"遗留 Caddyfile 不存在，跳过站点拆分：{config_path}"]
+        return [f"legacy Caddyfile does not exist; skipping site split: {config_path}"]
     legacy = config_path.read_text(encoding="utf-8")
     personal_blocks, dropped = split_caddyfile_blocks(legacy, suffix=config.domain_suffix)
     if dropped:
         addresses = block_addresses(dropped)
         notes.append(
-            f"已丢弃 {len(dropped)} 个 .{config.domain_suffix} 站点块"
-            f"（由工具接管）：{', '.join(addresses)}；"
-            f"旧 Caddyfile 未被改动且已完整备份，需要可从备份里取回"
+            f"discarded {len(dropped)} .{config.domain_suffix} site block(s) "
+            f"(taken over by the tool): {', '.join(addresses)}; "
+            f"the old Caddyfile was left untouched and fully backed up, "
+            f"so you can recover them from the backup"
         )
     if not personal_blocks:
         return notes
@@ -52,11 +55,12 @@ def _write_sites_caddy(paths: Paths, state: LegacyState, config: Config) -> list
     if _has_content(existing):
         addresses = block_addresses(personal_blocks)
         notes.append(
-            f"⚠ 迁移后这些个人站点将不再被服务：{config_path} 已不再被"
-            f"主 Caddyfile import，工具只 import {paths.sites_caddy}。"
-            f"涉及地址：{', '.join(addresses) or '（无法从文件解析）'}。"
-            f"请手工把这些站点块从 {config_path} 合并到 {paths.sites_caddy}"
-            f"（备份目录里也有原件）。"
+            f"⚠ these personal sites will no longer be served after migration: "
+            f"{config_path} is no longer imported by the main Caddyfile; "
+            f"the tool only imports {paths.sites_caddy}. "
+            f"Affected addresses: {', '.join(addresses) or '(could not be parsed from the file)'}. "
+            f"Please merge these site blocks manually from {config_path} into "
+            f"{paths.sites_caddy} (the originals are also in the backup directory)"
         )
         return notes
     paths.sites_caddy.parent.mkdir(parents=True, exist_ok=True)
@@ -65,7 +69,7 @@ def _write_sites_caddy(paths: Paths, state: LegacyState, config: Config) -> list
 
 
 def _main_caddyfile_content(paths: Paths, config: Config) -> str:
-    """工具自己的主 Caddyfile（全局块 + 两个 import）。"""
+    """The tool's own main Caddyfile (global block + two imports)."""
     from devproxy.gateway.caddy import MainCaddyfileSpec
     from devproxy.gateway.caddy import build_main_caddyfile
 
@@ -87,10 +91,11 @@ def _write_main_caddyfile(paths: Paths, config: Config) -> None:
 
 
 def _legacy_caddy_binary(state: LegacyState | None, home: Path | None = None) -> Path | None:
-    """遗留单元的 ExecStart 指向的 caddy 二进制。
+    """The caddy binary pointed to by the legacy unit's ExecStart.
 
-    配置里的 caddy_bin 可能还没下载（首次 setup），但遗留单元里的那个
-    正在这台机器上跑 —— 用它做配置校验才有意义。
+    caddy_bin in the config may not be downloaded yet (first setup), but the one
+    in the legacy unit is running on this machine -- validating config with it is
+    what makes sense.
     """
     if state is None:
         return None
@@ -114,24 +119,32 @@ def _validate_caddyfile(
     config: Config,
     state: LegacyState | None = None,
 ) -> list[str]:
-    """换单元之前先让 caddy 验一遍配置，返回提示。
+    """Let caddy validate the config before swapping the unit, returning notes.
 
-    个人站点块是从用户自己的 Caddyfile 原样搬过来的 —— 语法冲突、重复站点
-    都可能让 Caddy 起不来。校验不通过就不能换单元：否则服务起不来，
-    用户连"是哪一行的错"都看不到。
+    Personal site blocks are copied verbatim from the user's own Caddyfile --
+    syntax conflicts or duplicate sites may prevent Caddy from starting. If
+    validation fails, the unit must not be swapped: otherwise the service would
+    not start and the user would not even see which line is wrong.
 
-    配置里的 caddy 二进制还没下载时，退回遗留单元里的那个 —— 否则
-    "换单元前必校验"会因为一个路径不存在而变成空话。
+    When the caddy binary in the config is not downloaded yet, fall back to the
+    one in the legacy unit -- otherwise "must validate before swapping the unit"
+    would become empty words because of a nonexistent path.
     """
     notes: list[str] = []
     binary = config.caddy_bin_path
     if not binary.exists():
         fallback = _legacy_caddy_binary(state)
         if fallback is not None and fallback.exists():
-            notes.append(f"配置里的 caddy 二进制不存在，改用遗留单元里的 {fallback} 校验配置")
+            notes.append(
+                f"caddy binary from config does not exist; validating with the one "
+                f"from the legacy unit: {fallback}"
+            )
             binary = fallback
         else:
-            notes.append("caddy 二进制不存在，跳过配置校验（setup 下载后仍会校验）")
+            notes.append(
+                "caddy binary does not exist; skipping config validation "
+                "(it will still be validated after setup downloads it)"
+            )
             return notes
     fd, tmp_name = tempfile.mkstemp(prefix="devproxy-validate-", suffix=".Caddyfile")
     tmp = Path(tmp_name)
@@ -142,7 +155,10 @@ def _validate_caddyfile(
     finally:
         tmp.unlink(missing_ok=True)
     if code != 0:
-        raise MigrationError(f"caddy 配置校验未通过，迁移已中止（单元未改动）：{msg or '校验失败'}")
+        raise MigrationError(
+            f"caddy config validation failed; migration aborted (unit unchanged): "
+            f"{msg or 'validation failed'}"
+        )
     return notes
 
 
@@ -152,15 +168,17 @@ def _install_caddy_unit(
     config: Config,
     state: LegacyState,
 ) -> list[str]:
-    """改写单元：指向工具的 Caddyfile，保留原有 Environment=，返回提示。
+    """Rewrite the unit: point it at the tool's Caddyfile, keep the existing Environment=, return notes.
 
-    二进制路径必须能落到一个**真实存在**的文件上：迁移发生在组件流程
-    之前，caddy 二进制可能还没下载（首次 setup、无网络）。那时若照抄
-    config 里的路径，单元就指向一个不存在的二进制 —— 正在跑的 Caddy
-    会被这一改弄坏，而且没有任何东西能把它拉起来。
+    The binary path must land on a file that **actually exists**: migration
+    happens before the component flow, so the caddy binary may not be downloaded
+    yet (first setup, no network). Copying the path from config then would point
+    the unit at a nonexistent binary -- the running Caddy would be broken by
+    this change, and nothing could bring it back up.
 
-    所以退回遗留单元里的 ExecStart 二进制：那个文件正在这台机器上跑，
-    一定可用。setup 后续的组件流程会把单元换成正式路径。
+    So fall back to the ExecStart binary from the legacy unit: that file is
+    running on this machine and is definitely usable. setup's subsequent
+    component flow will switch the unit to the official path.
     """
     notes: list[str] = []
     binary = config.caddy_bin_path
@@ -168,13 +186,15 @@ def _install_caddy_unit(
         fallback = _legacy_caddy_binary(state)
         if fallback is not None and fallback.exists():
             notes.append(
-                f"配置里的 caddy 二进制不存在，单元先沿用遗留的 {fallback}"
-                f"（setup 下载完成后会自动换成 {binary}）"
+                f"caddy binary from config does not exist; the unit will keep using "
+                f"the legacy {fallback} (setup will switch to {binary} automatically "
+                f"once the download finishes)"
             )
             binary = fallback
         else:
             notes.append(
-                f"caddy 二进制不存在（{binary}），单元将指向它 —— setup 下载完成后才会可用"
+                f"caddy binary does not exist ({binary}); the unit will point at it -- "
+                f"it becomes usable only after setup downloads it"
             )
     platform.install_service(
         "caddy",
@@ -196,15 +216,16 @@ def _install_caddy_unit(
 
 
 def _restart_caddy(platform: Platform) -> list[str]:
-    """重启 caddy，让新配置真正生效，返回提示。
+    """Restart caddy so the new config actually takes effect, returning notes.
 
-    单元换了但进程没重启的话，跑的还是旧配置 —— 这种"看起来迁移完了"的
-    状态比迁移失败更难查。启动失败不阻断迁移：setup 随后的组件流程会
-    把服务拉起来。
+    If the unit changed but the process was not restarted, the old config is
+    still running -- this "looks migrated" state is harder to diagnose than a
+    failed migration. A start failure does not block migration: setup's
+    subsequent component flow will bring the service up.
     """
     try:
         platform.enable_service("caddy")
         platform.restart_service("caddy")
-    except Exception as exc:  # noqa: BLE001 —— 服务起不来不该回滚文件迁移
-        return [f"caddy 服务未能重启（{exc}）；devproxy setup 会继续处理"]
+    except Exception as exc:  # noqa: BLE001 -- a failing service must not roll back the file migration
+        return [f"caddy service could not be restarted ({exc}); devproxy setup will continue"]
     return []

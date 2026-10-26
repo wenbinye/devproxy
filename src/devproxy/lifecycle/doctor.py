@@ -1,4 +1,4 @@
-"""doctor：体检报告。只读，不改任何东西。"""
+"""doctor: health check report. Read-only; changes nothing."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from devproxy.lifecycle.setup import check_component
 
 
 def build_report(components: list[Component]) -> list[ComponentReport]:
-    """逐组件 check()，复用 setup 的异常隔离 —— 一个组件炸了也要列完其余。"""
+    """Run check() for each component, reusing setup's exception isolation -- even if one component crashes, the rest are still listed."""
     return [check_component(c)[0] for c in components]
 
 
@@ -22,14 +22,16 @@ def report_is_healthy(reports: list[ComponentReport]) -> bool:
 def find_wildcard_sites(
     paths, config, legacy_config: Path | None = None
 ) -> list[tuple[Path, list[str]]]:
-    """仍在生效的 Caddy 配置里的通配站点块。返回 [(文件, 地址列表)]。
+    """Wildcard site blocks in Caddy configs that are still active. Returns [(file, address list)].
 
-    工具的设计前提是"精确站点块、没有通配"：通配块（如 *.test）与精确
-    块同后缀时，Caddy 的 TLS 握手会整体失败（实测过）。所以现役配置里
-    还有通配块就必须报出来 —— 迁移正是移除它的动作。
+    The tool's design premise is "exact site blocks, no wildcards": when a
+    wildcard block (e.g. *.test) shares a suffix with exact blocks, Caddy's TLS
+    handshake fails entirely (measured). So any wildcard block still present in
+    active configs must be reported -- migration is exactly the action that
+    removes it.
 
-    扫描范围：工具自己的主 Caddyfile 与它 import 的两个文件，以及迁移
-    之前仍然生效的遗留 Caddyfile。
+    Scan scope: the tool's own main Caddyfile and the two files it imports, plus
+    the legacy Caddyfile still in effect before migration.
     """
     targets: list[Path] = []
     if legacy_config is not None:

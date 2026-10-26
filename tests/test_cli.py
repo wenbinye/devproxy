@@ -18,7 +18,7 @@ from devproxy.gateway.store import RouteStoreError
 
 
 class FakeCaddy:
-    """假 Caddy：validate/reload 恒成功，避免测试真的去调 caddy 二进制。"""
+    """Fake Caddy: validate/reload always succeeds, so tests never call the real caddy binary."""
 
     def validate(self, caddyfile=None):
         return True, "ok"
@@ -28,7 +28,7 @@ class FakeCaddy:
 
 
 class FakeAdmin:
-    """假 Admin API 客户端：alive 可编排，供前置条件测试使用。"""
+    """Fake Admin API client: alive is scriptable, for precondition tests."""
 
     def __init__(self, alive=True):
         self.alive = alive
@@ -48,7 +48,7 @@ def runner():
 
 @pytest.fixture
 def env(tmp_path, monkeypatch):
-    """把 devproxy 的三棵目录指向 tmp_path。"""
+    """Point devproxy's three directory trees at tmp_path."""
     monkeypatch.setenv("DEVPROXY_CONFIG_DIR", str(tmp_path / "config"))
     monkeypatch.setenv("DEVPROXY_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("DEVPROXY_DATA_DIR", str(tmp_path / "data"))
@@ -56,10 +56,10 @@ def env(tmp_path, monkeypatch):
 
 
 def _patch_ctx(monkeypatch, tmp_path, admin_alive=True):
-    """替换 build_context，注入假 Caddy 与假 Admin API。"""
+    """Replace build_context to inject a fake Caddy and fake Admin API."""
     paths = Paths(tmp_path / "config", tmp_path / "state", tmp_path / "data")
     paths.ensure_files()
-    # up/expose 以主 Caddyfile 存在为前置条件（缺了应先 devproxy setup）
+    # up/expose require the main Caddyfile to exist (when missing, run devproxy setup first)
     paths.caddyfile.write_text("# test Caddyfile\n", encoding="utf-8")
     cfg = Config(storage=str(paths.data_dir))
     store = RouteStore(paths, cfg, FakeCaddy())
@@ -93,7 +93,7 @@ def _seed_route(state_dir: Path, name="codeup", port=42133, mode="up"):
 
 
 def test_separator_is_split_and_passed_through(env, monkeypatch):
-    """-- 之后的参数原样交给子命令，不被 devproxy 的选项解析器吞掉。"""
+    """Arguments after -- go to the subcommand untouched, not swallowed by devproxy's option parser."""
     _patch_ctx(monkeypatch, env)
     captured = {}
 
@@ -116,7 +116,7 @@ def test_separator_is_split_and_passed_through(env, monkeypatch):
 def test_up_without_separator_is_rejected(env, monkeypatch):
     _patch_ctx(monkeypatch, env)
     res = CliRunner().invoke(app, ["up", "codeup", "npx", "vite"])
-    # 命令写法错误 → 参数错误（2），不是运行失败
+    # Wrong command syntax -> usage error (2), not a runtime failure
     assert res.exit_code == 2, res.output
     assert "--" in res.output
 
@@ -128,7 +128,7 @@ def test_up_without_command_is_rejected(env, monkeypatch):
 
 
 def test_expose_registers_route(env, monkeypatch):
-    """expose 是一次性的：注册完立即返回，路由常驻。"""
+    """expose is one-shot: it returns right after registering, and the route persists."""
     _patch_ctx(monkeypatch, env)
     res = CliRunner().invoke(app, ["expose", "legacy", "--port", "3000"])
     assert res.exit_code == 0, res.output
@@ -154,7 +154,7 @@ def test_down_unknown_name_is_ok(env, monkeypatch):
 
 
 def test_down_kills_leftover_process_group(env, monkeypatch):
-    """down 要顺带杀掉 mode=up 路由的残留子进程组（带注册时的进程身份）。"""
+    """down must also kill leftover process groups of mode=up routes (using the identity recorded at registration)."""
     _patch_ctx(monkeypatch, env)
     killed = []
 
@@ -182,7 +182,7 @@ def test_ls_lists_routes(env, monkeypatch):
 
 
 def test_ls_sorts_routes_by_name(env, monkeypatch):
-    """ls 按应用名升序 —— 与注册顺序无关，输出稳定可预期。"""
+    """ls sorts by app name ascending -- independent of registration order, stable and predictable."""
     _patch_ctx(monkeypatch, env)
     state = env / "state"
     state.mkdir(parents=True, exist_ok=True)
@@ -208,7 +208,7 @@ def test_ls_sorts_routes_by_name(env, monkeypatch):
     res = CliRunner().invoke(app, ["ls"])
     assert res.exit_code == 0, res.output
     positions = [res.output.index(f"{name}.test") for name in ("alpha", "mike", "zebra")]
-    assert positions == sorted(positions), f"应按名字升序：\n{res.output}"
+    assert positions == sorted(positions), f"should be sorted by name:\n{res.output}"
 
 
 def test_config_shows_effective_config(env, monkeypatch):
@@ -219,14 +219,14 @@ def test_config_shows_effective_config(env, monkeypatch):
 
 
 def test_config_marks_effective_storage_and_labels_default_dir(env, monkeypatch):
-    """config 只该说清"哪条 storage 真正生效"。
+    """config should only make clear "which storage is actually in effect".
 
-    Paths.data_dir（只受 DEVPROXY_DATA_DIR 影响）与 config.toml 里的
-    storage 可能不是同一个 —— 两个都叫 storage 会让人以为 Caddy 的数据
-    在错的地方。
+    Paths.data_dir (affected only by DEVPROXY_DATA_DIR) and the storage in config.toml
+    may not be the same -- calling both "storage" makes users think Caddy's data lives
+    in the wrong place.
     """
     paths, cfg, _ = _patch_ctx(monkeypatch, env)
-    # 让两处真的不一致：config.toml 指向别处
+    # Make the two genuinely disagree: config.toml points elsewhere
     other = env / "other-storage"
     cfg = replace(cfg, storage=str(other))
     store = RouteStore(paths, cfg, FakeCaddy())
@@ -235,16 +235,16 @@ def test_config_marks_effective_storage_and_labels_default_dir(env, monkeypatch)
     )
     res = CliRunner().invoke(app, ["config"])
     assert res.exit_code == 0, res.output
-    assert str(other) in res.output, "生效的 storage 必须打出来"
-    assert "data_dir_default" in res.output, "默认目录必须换个不误导的名字"
-    assert "storage 才是生效的" in res.output
+    assert str(other) in res.output, "the storage in effect must be printed"
+    assert "data_dir_default" in res.output, "the default directory must get a non-misleading name"
+    assert "is the Caddy storage path in effect" in res.output
 
 
-# ---------------------------------------------- 注册路由后的信任提示
+# ---------------------------------------------- Trust hint after registering a route
 
 
 def _write_ca(storage: Path) -> Path:
-    """在 Caddy storage 下放一份 CA 根证书（模拟"首条路由已生成 CA"）。"""
+    """Put a CA root certificate under Caddy storage (simulating "the first route generated a CA")."""
     ca = storage / "pki" / "authorities" / "local" / "root.crt"
     ca.parent.mkdir(parents=True, exist_ok=True)
     ca.write_text(
@@ -254,9 +254,10 @@ def _write_ca(storage: Path) -> Path:
 
 
 def test_expose_prints_trust_hint_when_ca_not_trusted(env, monkeypatch):
-    """CA 是第一条路由注册时才生成的 —— 那一刻必须告诉用户去 trust。
+    """The CA is generated when the first route is registered -- at that moment the user must be told to trust it.
 
-    不说的话，用户只会看到"浏览器报证书不安全"，根本不知道还差一步。
+    Without that, the user only sees "the browser says the certificate is insecure" and
+    has no idea there is still one step left.
     """
     paths, cfg, _ = _patch_ctx(monkeypatch, env)
     _write_ca(Path(cfg.storage))
@@ -266,10 +267,10 @@ def test_expose_prints_trust_hint_when_ca_not_trusted(env, monkeypatch):
 
 
 def test_expose_does_not_print_trust_hint_when_ca_trusted(env, monkeypatch):
-    """CA 已被信任时不再重复提示 —— 每次都冒出来就是噪音。"""
+    """When the CA is already trusted, do not repeat the hint -- popping up every time is noise."""
     paths, cfg, _ = _patch_ctx(monkeypatch, env)
     ca = _write_ca(Path(cfg.storage))
-    platform = monkeypatch.undo  # noqa: F841 —— 只是让下面读起来清楚
+    platform = monkeypatch.undo  # noqa: F841 -- only to make the following read clearly
     from devproxy.platform.fake import FakePlatform
 
     fake = FakePlatform()
@@ -282,7 +283,7 @@ def test_expose_does_not_print_trust_hint_when_ca_trusted(env, monkeypatch):
 
 
 def test_expose_does_not_print_trust_hint_without_ca(env, monkeypatch):
-    """还没有 CA（没生成）就没什么可信任的 —— 不提示。"""
+    """With no CA yet (not generated), there is nothing to trust -- do not hint."""
     _patch_ctx(monkeypatch, env)
     res = CliRunner().invoke(app, ["expose", "legacy", "--port", "3000"])
     assert res.exit_code == 0, res.output
@@ -304,11 +305,11 @@ def test_up_prints_trust_hint_when_ca_not_trusted(env, monkeypatch):
     assert "devproxy trust" in res.output
 
 
-# ---------------------------------------------------------------- I-1: 退出码 3
+# ---------------------------------------------------------------- I-1: exit code 3
 
 
 def test_up_when_caddy_not_running_exits_3(env, monkeypatch):
-    """Caddy 未运行是前置条件不满足 → 退出码 3（不是 1）。"""
+    """Caddy not running is an unmet precondition -> exit code 3 (not 1)."""
     _patch_ctx(monkeypatch, env, admin_alive=False)
     res = CliRunner().invoke(app, ["up", "codeup", "--", "sleep", "5"])
     assert res.exit_code == 3, res.output
@@ -316,16 +317,18 @@ def test_up_when_caddy_not_running_exits_3(env, monkeypatch):
 
 
 def test_expose_when_caddy_not_running_exits_3(env, monkeypatch):
-    """expose 要注册活路由，同样要求 Caddy 在运行 → 退出码 3。"""
+    """expose registers a live route, so it also requires Caddy to be running -> exit code 3."""
     _patch_ctx(monkeypatch, env, admin_alive=False)
     res = CliRunner().invoke(app, ["expose", "legacy", "--port", "3000"])
     assert res.exit_code == 3, res.output
     assert "Caddy" in res.output
-    assert not (env / "state" / "routes.json").exists(), "前置条件不满足时不得写路由表"
+    assert not (env / "state" / "routes.json").exists(), (
+        "must not write the route table when a precondition is unmet"
+    )
 
 
 def test_up_without_main_caddyfile_exits_3_and_points_at_setup(env, monkeypatch):
-    """还没 setup（主 Caddyfile 不存在）是前置条件问题，不是 reload 运行失败。"""
+    """Not set up yet (main Caddyfile missing) is a precondition problem, not a reload runtime failure."""
     paths, _, _ = _patch_ctx(monkeypatch, env)
     paths.caddyfile.unlink()
     res = CliRunner().invoke(app, ["up", "codeup", "--", "sleep", "5"])
@@ -342,7 +345,7 @@ def test_expose_without_main_caddyfile_exits_3(env, monkeypatch):
     assert not (env / "state" / "routes.json").exists()
 
 
-# ---------------------------------------------------- I-2: 路由表损坏要干净报错
+# ---------------------------------------------------- I-2: corrupt route table must fail cleanly
 
 
 def _write_routes_file(state_dir: Path, text: str) -> None:
@@ -351,31 +354,31 @@ def _write_routes_file(state_dir: Path, text: str) -> None:
 
 
 def test_ls_with_invalid_json_routes_file_is_clean_error(env, monkeypatch):
-    """routes.json 不是合法 JSON → 一行错误 + 退出码 1，而不是 Rich traceback。"""
+    """routes.json is not valid JSON -> one-line error + exit code 1, not a Rich traceback."""
     _patch_ctx(monkeypatch, env)
-    _write_routes_file(env / "state", "{ 不是 json")
+    _write_routes_file(env / "state", "{ not json")
     res = CliRunner().invoke(app, ["ls"])
     assert res.exit_code == 1, res.output
-    assert "devproxy" in res.output and "路由表" in res.output
+    assert "devproxy" in res.output and "route table" in res.output
     assert "Traceback" not in res.output
 
 
 def test_ls_with_routes_missing_required_key_is_clean_error(env, monkeypatch):
-    """routes.json 缺必需键 → 同样是干净的一行错误。"""
+    """routes.json is missing a required key -> likewise a clean one-line error."""
     _patch_ctx(monkeypatch, env)
     _write_routes_file(env / "state", '{"version": 1, "routes": [{"name": "x"}]}')
     res = CliRunner().invoke(app, ["ls"])
     assert res.exit_code == 1, res.output
-    assert "路由表" in res.output
+    assert "route table" in res.output
     assert "Traceback" not in res.output
 
 
 def test_down_with_corrupt_routes_file_is_clean_error(env, monkeypatch):
     _patch_ctx(monkeypatch, env)
-    _write_routes_file(env / "state", "[]")  # 顶层是列表而非对象
+    _write_routes_file(env / "state", "[]")  # top level is a list rather than an object
     res = CliRunner().invoke(app, ["down", "codeup"])
     assert res.exit_code == 1, res.output
-    assert "路由表" in res.output
+    assert "route table" in res.output
     assert "Traceback" not in res.output
 
 
@@ -384,7 +387,7 @@ def test_config_with_corrupt_routes_file_is_clean_error(env, monkeypatch):
     _write_routes_file(env / "state", "{ oops")
     res = CliRunner().invoke(app, ["config"])
     assert res.exit_code == 1, res.output
-    assert "路由表" in res.output
+    assert "route table" in res.output
     assert "Traceback" not in res.output
 
 
@@ -392,16 +395,16 @@ def test_config_with_corrupt_routes_file_is_clean_error(env, monkeypatch):
     "exc",
     [
         RouteStoreError("boom"),
-        RouteTableError("损坏"),
-        ConfigError("坏"),
+        RouteTableError("corrupt"),
+        ConfigError("bad"),
         pytest.param(
-            CaddyEnvArchiveError("环境变量留档损坏"),
+            CaddyEnvArchiveError("caddy env archive corrupt"),
             id="caddy-env-archive",
         ),
     ],
 )
 def test_main_backstop_turns_domain_errors_into_exit_1(monkeypatch, exc):
-    """main() 兜底：领域异常绝不能以 traceback 的形式漏到终端。"""
+    """main() backstop: domain exceptions must never leak to the terminal as a traceback."""
     from devproxy import cli
 
     def fake_app():
@@ -413,21 +416,22 @@ def test_main_backstop_turns_domain_errors_into_exit_1(monkeypatch, exc):
     assert cm.value.code == 1
 
 
-# ------------------------------------- 迁移与回滚（setup）
+# ------------------------------------- Migration and rollback (setup)
 
 
 def test_cli_never_builds_the_real_platform(env, monkeypatch, tmp_path):
-    """回归防线：CLI 路径绝不能构造真实平台。
+    """Regression guard: the CLI path must never construct the real platform.
 
-    真实平台会去看 ~/.config/systemd/user/ 下的真实单元，迁移一旦跑起来
-    就会改写用户机器上的 caddy.service（曾因此真的覆盖过一次）。
-    conftest 的 autouse fixture 负责兜底，这里把"真实平台不许被构造"
-    变成显式断言，防止兜底被摘掉。
+    The real platform looks at the real units under ~/.config/systemd/user/, and once
+    migration runs it rewrites the user's caddy.service (this really overwrote one
+    once). conftest's autouse fixture provides the safety net; this turns "the real
+    platform must not be constructed" into an explicit assertion so the net cannot be
+    removed unnoticed.
     """
     import devproxy.platform.linux as linux_mod
 
     def boom(*args, **kwargs):
-        raise AssertionError("测试里不允许构造真实平台")
+        raise AssertionError("constructing the real platform is not allowed in tests")
 
     monkeypatch.setattr(linux_mod, "LinuxPlatform", boom)
     monkeypatch.setattr("devproxy.cli._shared._components", lambda *a, **k: [])
@@ -436,12 +440,13 @@ def test_cli_never_builds_the_real_platform(env, monkeypatch, tmp_path):
 
 
 def _fake_setup_platform(monkeypatch, tmp_path, patch_dns_route=True):
-    """把 setup 依赖的一切换成 tmp_path 里的假东西 —— 绝不碰真实系统。"""
+    """Replace everything setup depends on with fakes under tmp_path -- never touch the real system."""
     from devproxy.platform.fake import FakePlatform
 
     platform = FakePlatform()
     monkeypatch.setattr("devproxy.cli._shared._platform", lambda: platform)
-    # 不装配任何组件：迁移本身与组件流程无关，测试只盯迁移与回滚
+    # Do not assemble any components: migration itself is unrelated to the component
+    # flow, and these tests only watch migration and rollback
     monkeypatch.setattr("devproxy.cli._shared._components", lambda *a, **k: [])
     monkeypatch.setattr("devproxy.cli._shared.DNSMASQ_CONF", tmp_path / "dnsmasq.conf")
     if patch_dns_route:
@@ -452,7 +457,7 @@ def _fake_setup_platform(monkeypatch, tmp_path, patch_dns_route=True):
 
 
 def _seed_legacy_unit(platform, tmp_path, caddyfile_text=None):
-    """造一套遗留环境：单元 + 旧 Caddyfile。"""
+    """Build a legacy environment: unit + old Caddyfile."""
     old_cfg = tmp_path / "old" / "Caddyfile"
     old_cfg.parent.mkdir(parents=True, exist_ok=True)
     old_cfg.write_text(
@@ -471,9 +476,9 @@ def _seed_legacy_unit(platform, tmp_path, caddyfile_text=None):
 
 
 class _CountingPath(Path):
-    """统计 read_text 次数的路径：证明 setup 没有在迁移前预读。"""
+    """A path that counts read_text calls: proves setup did not pre-read before the migration."""
 
-    if hasattr(type(Path()), "_flavour"):  # Python 3.11 的路径子类需要它
+    if hasattr(type(Path()), "_flavour"):  # Python 3.11's path subclass needs it
         _flavour = type(Path())._flavour
 
     reads: list[str] = []
@@ -484,7 +489,7 @@ class _CountingPath(Path):
 
 
 def test_setup_does_not_pre_read_legacy_caddyfile(env, monkeypatch, tmp_path):
-    """遗留 Caddyfile 只由迁移内部读取；setup 不再为了 storage 预读一遍。"""
+    """The legacy Caddyfile is read only inside the migration; setup no longer pre-reads it for storage."""
     from devproxy.cli import setup as setup_mod
     from devproxy.lifecycle.migrate import LegacyState
     from devproxy.platform.fake import FakePlatform
@@ -527,9 +532,13 @@ def test_setup_does_not_pre_read_legacy_caddyfile(env, monkeypatch, tmp_path):
         platform, paths, Config(storage=str(tmp_path / "config-data")), "auto", True
     )
 
-    assert reads_before_migration == [], "setup 在迁移前不该读遗留 Caddyfile"
-    assert _CountingPath.reads, "迁移内部仍要读取（storage 与站点拆分各一次）"
-    # 生效配置必须从 MigrationOutcome 带回，组件流程才不会写回旧 storage
+    assert reads_before_migration == [], (
+        "setup must not read the legacy Caddyfile before the migration"
+    )
+    assert _CountingPath.reads, (
+        "the migration itself must still read it (once for storage, once for the site split)"
+    )
+    # The effective config must be carried back from MigrationOutcome, so the component flow does not write back the old storage
     assert config.storage_path == legacy_storage
 
 
@@ -539,12 +548,12 @@ def test_setup_migrates_legacy_caddy(env, monkeypatch, tmp_path):
 
     res = CliRunner().invoke(app, ["setup", "--yes"])
     assert res.exit_code == 0, res.output
-    assert "遗留" in res.output
+    assert "legacy" in res.output
     sites = (env / "config" / "sites.caddy").read_text(encoding="utf-8")
     assert "localhost" in sites
     assert "*.test" not in sites
     assert "MINIKUBE_IP=1.2.3.4" in platform.services["caddy"]
-    # 备份目录必须真的建出来了
+    # The backup directory must really have been created
     backups = list((env / "state" / "backups").iterdir())
     assert len(backups) == 1
     assert (backups[0] / "MANIFEST.txt").exists()
@@ -568,22 +577,22 @@ def test_setup_rollback_restores_files(env, monkeypatch, tmp_path):
     unit.write_text("CLOBBERED\n", encoding="utf-8")
     res = CliRunner().invoke(app, ["setup", "--rollback", str(backup_dir)])
     assert res.exit_code == 0, res.output
-    assert "已回滚" in res.output
+    assert "Rolled back" in res.output
     assert "MINIKUBE_IP=1.2.3.4" in unit.read_text(encoding="utf-8")
 
 
 def test_setup_rollback_reports_partial_failure(env, monkeypatch, tmp_path):
-    """部分条目还原失败时，已还原清单必须如实报出来（不能随异常丢掉）。"""
+    """When some entries fail to restore, the list of restored entries must be reported honestly (not lost with the exception)."""
     platform = _fake_setup_platform(monkeypatch, tmp_path)
     unit, _old = _seed_legacy_unit(platform, tmp_path)
     assert CliRunner().invoke(app, ["setup", "--yes"]).exit_code == 0
     backup_dir = next((env / "state" / "backups").iterdir())
 
-    # 删掉单元的备份副本 → 还原该条目必然失败（与 uid 无关）
+    # Delete the unit's backup copy -> restoring that entry must fail (independent of uid)
     (backup_dir / "caddy.service.bak").unlink()
     res = CliRunner().invoke(app, ["setup", "--rollback", str(backup_dir)])
     assert res.exit_code == 1, res.output
-    assert "已还原" in res.output
+    assert "restored" in res.output
     assert "Traceback" not in res.output
 
 
@@ -594,14 +603,14 @@ def test_setup_rollback_with_bad_directory_is_clean_error(env, monkeypatch, tmp_
     assert "Traceback" not in res.output
 
 
-# ------------------------------------- Rich 标记不得吞掉错误消息里的字符集
+# ------------------------------------- Rich markup must not swallow the charset in error messages
 
 
 def test_invalid_name_error_keeps_charset_in_output(env, monkeypatch):
-    """[a-z0-9-] 会被 Rich 当标记吞掉 —— 错误输出必须保留字面字符集。"""
+    """[a-z0-9-] would be swallowed by Rich as markup -- error output must keep the literal charset."""
     _patch_ctx(monkeypatch, env)
     res = CliRunner().invoke(app, ["expose", "Bad_Name", "--port", "3000"])
-    # 非法路由名是参数错误（约定 2），不是运行失败
+    # An illegal route name is a usage error (convention 2), not a runtime failure
     assert res.exit_code == 2
     assert "[a-z0-9-]" in res.output
 
@@ -614,10 +623,10 @@ def test_up_help_text_keeps_charset(env, monkeypatch):
 
 
 def test_setup_backup_targets_follow_dns_backend(env, monkeypatch, tmp_path):
-    """--dns-backend system 时，备份的必须是 /etc/dnsmasq.d 那个文件。
+    """With --dns-backend system, the file backed up must be the one under /etc/dnsmasq.d.
 
-    组件写的是 dnsmasq.d，备份的却是 resolved —— 被改动的文件不在备份里，
-    回滚就删不掉它。
+    The component writes dnsmasq.d, but the backup would take resolved -- the file that
+    was actually changed would not be in the backup, and rollback could not delete it.
     """
     platform = _fake_setup_platform(monkeypatch, tmp_path, patch_dns_route=False)
     _seed_legacy_unit(platform, tmp_path)
@@ -632,27 +641,27 @@ def test_setup_backup_targets_follow_dns_backend(env, monkeypatch, tmp_path):
 
 
 def test_setup_migration_failure_still_prints_notes(env, monkeypatch, tmp_path):
-    """迁移失败时，已经收集到的提示（丢了哪些块等）必须照样打出来。"""
+    """When migration fails, the hints already collected (which blocks were lost, etc.) must still be printed."""
     platform = _fake_setup_platform(monkeypatch, tmp_path)
     _seed_legacy_unit(platform, tmp_path)
 
     def boom(*args, **kwargs):
-        raise RuntimeError("写单元失败")
+        raise RuntimeError("failed to write the unit")
 
     monkeypatch.setattr(platform, "install_service", boom)
     res = CliRunner().invoke(app, ["setup", "--yes"])
     assert res.exit_code == 1, res.output
-    assert "已丢弃" in res.output
+    assert "discarded" in res.output
     assert "devproxy: " in res.output
     assert "Traceback" not in res.output
 
 
 def test_setup_persists_legacy_storage_for_later_setups(env, monkeypatch, tmp_path):
-    """沿用遗留 storage 之后必须留档 —— 否则下一次 setup 会把 CA 换地方。
+    """After adopting the legacy storage it must be archived -- otherwise the next setup moves the CA.
 
-    迁移时换了 storage 位置，Caddy 会重新生成 CA：浏览器里的信任与个人
-    站点已有的 tls internal 证书全部失效。留档之后，每次 setup 都要用
-    同一个地方。
+    Migration changes the storage location, and Caddy regenerates its CA: every browser
+    trust entry and every tls internal certificate already used by personal sites
+    becomes void. Once archived, every setup must use the same location.
     """
     platform = _fake_setup_platform(monkeypatch, tmp_path)
     legacy_storage = tmp_path / "legacy-caddy-data"
@@ -666,14 +675,16 @@ def test_setup_persists_legacy_storage_for_later_setups(env, monkeypatch, tmp_pa
     res = CliRunner().invoke(app, ["setup", "--yes"])
     assert res.exit_code == 0, res.output
     saved = env / "state" / "caddy-storage.json"
-    assert saved.exists(), "沿用的 storage 必须留档，否则下次 setup 会换地方"
+    assert saved.exists(), "the adopted storage must be archived, otherwise the next setup moves it"
     assert str(legacy_storage) in saved.read_text(encoding="utf-8")
-    # Rich 会按终端宽度折行（长路径甚至会被拆断）—— 比对前把空白全去掉
+    # Rich wraps to the terminal width (long paths may even be split) -- strip all whitespace before comparing
     squashed = "".join(res.output.split())
-    assert "".join(str(legacy_storage).split()) in squashed, "storage 的差异必须对用户说出来"
+    assert "".join(str(legacy_storage).split()) in squashed, (
+        "the storage difference must be told to the user"
+    )
 
 
-# ------------------------------------- 留档的 storage 覆盖 config.toml 时必须说
+# ------------------------------------- Archived storage overriding config.toml must be reported
 
 
 def _write_storage_pair(env, config_storage: str, stored_storage: str):
@@ -688,25 +699,30 @@ def _write_storage_pair(env, config_storage: str, stored_storage: str):
 
 
 def test_build_context_says_so_when_stored_storage_overrides_config(env, capsys):
-    """留档的 storage 覆盖了 config.toml —— 必须说出来，并给出退出路径。
+    """Archived storage overrides config.toml -- must be reported, with a way out.
 
-    用户改了 config.toml 却被无声忽略，是最难查的一类问题。
+    A user edits config.toml and is silently ignored: that is the hardest class of
+    problem to diagnose.
     """
     from devproxy.cli._shared import build_context
 
     paths = _write_storage_pair(env, "/tmp/from-config-toml", "/tmp/from-legacy")
     _paths, config, _store, _admin = build_context()
-    assert config.storage == "/tmp/from-legacy", "留档必须继续生效（CA 不能换地方）"
+    assert config.storage == "/tmp/from-legacy", (
+        "the archive must keep taking effect (the CA must not move)"
+    )
     err = capsys.readouterr().err
-    assert "/tmp/from-legacy" in err, "必须说出实际生效的路径"
-    assert "/tmp/from-config-toml" in err, "必须说出被忽略的配置值"
-    # Rich 会按终端宽度折行（长路径甚至会被拆断）—— 比对前把空白全去掉
+    assert "/tmp/from-legacy" in err, "must state the path actually in effect"
+    assert "/tmp/from-config-toml" in err, "must state the ignored config value"
+    # Rich wraps to the terminal width (long paths may even be split) -- strip all whitespace before comparing
     squashed = "".join(err.split())
-    assert "".join(str(paths.caddy_storage).split()) in squashed, "必须给出退出路径（留档文件）"
+    assert "".join(str(paths.caddy_storage).split()) in squashed, (
+        "must give the way out (the archive file)"
+    )
 
 
 def test_build_context_quiet_when_storage_agrees(env, capsys):
-    """两边一致时不啰嗦。"""
+    """When both agree, say nothing extra."""
     from devproxy.cli._shared import build_context
 
     _write_storage_pair(env, "/tmp/same", "/tmp/same")
@@ -716,7 +732,7 @@ def test_build_context_quiet_when_storage_agrees(env, capsys):
 
 
 def test_cli_setup_reports_the_storage_override(env, monkeypatch, tmp_path):
-    """CLI 路径上也要说出来 —— 用户看到的是终端输出，不是源码。"""
+    """It must also be reported on the CLI path -- users see terminal output, not source code."""
     from devproxy.cli._shared import build_context
 
     _write_storage_pair(env, "/tmp/from-config-toml", "/tmp/from-legacy")
@@ -726,23 +742,24 @@ def test_cli_setup_reports_the_storage_override(env, monkeypatch, tmp_path):
     assert "/tmp/from-config-toml" in res.output
 
 
-# ------------------------------------- setup 结束提示里的示例命令
+# ------------------------------------- Example command in the setup completion hint
 
 
 def test_setup_example_command_actually_uses_port():
-    """setup 结束时的示例命令必须真的用上 $PORT。
+    """The example command at the end of setup must really use $PORT.
 
-    `python3 -m http.server` 不读 PORT（永远绑 8000）：照抄示例的用户会
-    等满 60 秒后看到「就绪超时」。示例必须是跑得通的那种写法。
+    `python3 -m http.server` does not read PORT (it always binds 8000): a user copying
+    the example waits the full 60 seconds and then sees "ready timeout". The example
+    must be a form that actually works.
     """
     from devproxy.cli._shared import UP_EXAMPLE
 
-    assert "sh -c" in UP_EXAMPLE, "示例必须用 sh -c 把 $PORT 推迟展开"
-    assert "$PORT" in UP_EXAMPLE, "示例必须真的把 PORT 交给应用"
+    assert "sh -c" in UP_EXAMPLE, "the example must use sh -c to defer $PORT expansion"
+    assert "$PORT" in UP_EXAMPLE, "the example must actually pass PORT to the app"
 
 
 def test_setup_prints_the_working_example(env, monkeypatch):
-    """终端上打出来的示例必须是同一个能跑通的写法。"""
+    """The example printed on the terminal must be that same working form."""
     from devproxy.cli._shared import UP_EXAMPLE
     from devproxy.lifecycle.setup import ComponentReport
     from devproxy.lifecycle.setup import SetupPlan
@@ -751,7 +768,7 @@ def test_setup_prints_the_working_example(env, monkeypatch):
 
     report = ComponentReport(
         name="caddy",
-        status=Status(ok=True, detail="已就绪"),
+        status=Status(ok=True, detail="ready"),
         actions=[Action(description="noop", kind="run", command=["noop"])],
     )
     monkeypatch.setattr("devproxy.cli._shared._components", lambda *a, **k: [])
@@ -760,7 +777,7 @@ def test_setup_prints_the_working_example(env, monkeypatch):
     )
     monkeypatch.setattr(
         "devproxy.cli._shared.apply_plan",
-        lambda plan: [("caddy", Status(ok=True, detail="已就绪"))],
+        lambda plan: [("caddy", Status(ok=True, detail="ready"))],
     )
     res = CliRunner().invoke(app, ["setup", "--yes"])
     assert res.exit_code == 0, res.output
@@ -768,7 +785,7 @@ def test_setup_prints_the_working_example(env, monkeypatch):
     assert "$PORT" in res.output
 
 
-# ------------------------------------- I7：参数错误一律退出 2
+# ------------------------------------- I7: usage errors always exit 2
 
 
 def test_up_invalid_name_exits_2(env, monkeypatch):
@@ -782,14 +799,14 @@ def test_up_invalid_port_exits_2(env, monkeypatch):
     _patch_ctx(monkeypatch, env)
     res = CliRunner().invoke(app, ["up", "codeup", "--port", "0", "--", "sleep", "1"])
     assert res.exit_code == 2, res.output
-    assert "1..65535" in res.output
+    assert "must be between 1 and 65535" in res.output
 
 
 def test_up_invalid_ready_timeout_exits_2(env, monkeypatch):
     _patch_ctx(monkeypatch, env)
     res = CliRunner().invoke(app, ["up", "codeup", "--ready-timeout", "0", "--", "sleep", "1"])
     assert res.exit_code == 2, res.output
-    assert "就绪超时" in res.output
+    assert "invalid ready timeout" in res.output
 
 
 def test_expose_invalid_port_exits_2(env, monkeypatch):
@@ -804,39 +821,39 @@ def test_down_invalid_name_exits_2(env, monkeypatch):
     assert res.exit_code == 2, res.output
 
 
-# ------------------------------------- I1：只读命令不产生写副作用
+# ------------------------------------- I1: read-only commands produce no write side effects
 
 
 @pytest.mark.parametrize("command", ["ls", "config", "doctor"])
 def test_readonly_commands_do_not_create_config_dir(env, monkeypatch, command):
-    """查询命令不得 mkdir/touch —— 配置目录父路径是普通文件时也不能炸。"""
+    """Query commands must not mkdir/touch -- and must not explode when the config dir's parent is a regular file."""
     blocker = env / "blocker"
     blocker.write_text("not a directory", encoding="utf-8")
     config_dir = blocker / "devproxy"
     monkeypatch.setenv("DEVPROXY_CONFIG_DIR", str(config_dir))
     if command == "doctor":
-        # doctor 会做真实组件探测（读宿主 /etc 等）—— 这里只关心 build_context
+        # doctor does real component probing (reads the host's /etc, etc.) -- here we only care about build_context
         monkeypatch.setattr("devproxy.cli._shared._components", lambda *a, **k: [])
     res = CliRunner().invoke(app, [command])
     assert "Traceback" not in res.output, res.output
     assert res.exit_code in (0, 3), res.output
-    assert not config_dir.exists(), "只读命令不得创建配置目录"
+    assert not config_dir.exists(), "read-only commands must not create the config directory"
 
 
-# ------------------------------------- I2：storage 留档损坏不得静默回退
+# ------------------------------------- I2: a corrupt storage archive must not fall back silently
 
 
 def test_corrupt_storage_archive_is_precondition_error(env):
-    """留档存在但读不懂 → 退出 3，提示删除留档，绝不静默换 storage。"""
+    """The archive exists but cannot be read -> exit 3, tell the user to delete it, never switch storage silently."""
     from devproxy.core.paths import default_paths
 
     paths = default_paths()
     paths.caddy_storage.parent.mkdir(parents=True, exist_ok=True)
-    paths.caddy_storage.write_text("{ 截断", encoding="utf-8")
-    with pytest.warns(UserWarning, match="storage 留档不可读"):
+    paths.caddy_storage.write_text("{ truncated", encoding="utf-8")
+    with pytest.warns(UserWarning, match="storage archive is unreadable"):
         res = CliRunner().invoke(app, ["config"])
     assert res.exit_code == 3, res.output
-    assert "留档损坏" in res.output
+    assert "migration archive is corrupt" in res.output
     assert "Traceback" not in res.output
 
 
@@ -846,34 +863,38 @@ def test_missing_storage_archive_is_not_an_error(env):
 
 
 def test_resolve_storage_reports_warnings_without_side_effects(env, capsys):
-    """M2：查询函数只返回警告，不直接写 stderr。"""
+    """M2: the query function only returns warnings; it does not write to stderr directly."""
     from devproxy.cli._shared import _resolve_storage
 
     paths = _write_storage_pair(env, "/tmp/from-config-toml", "/tmp/from-legacy")
     config, warnings = _resolve_storage(Config(), paths)
     assert config.storage == "/tmp/from-legacy"
     assert warnings and "/tmp/from-legacy" in warnings[0]
-    assert capsys.readouterr().err == "", "解析函数不应有 stderr 副作用"
+    assert capsys.readouterr().err == "", (
+        "the resolution function should have no stderr side effects"
+    )
 
 
-# ------------------------------------- C1：回滚后重启失败不得静默
+# ------------------------------------- C1: a failed restart after rollback must not be silent
 
 
 def test_setup_rollback_restart_failure_is_reported(env, monkeypatch, tmp_path):
-    """文件已还原但 caddy 重启失败：必须报出来，且不能说成回滚失败。"""
+    """Files are restored but the caddy restart fails: must be reported, and must not be described as a failed rollback."""
     platform = _fake_setup_platform(monkeypatch, tmp_path)
     unit, _old = _seed_legacy_unit(platform, tmp_path)
     assert CliRunner().invoke(app, ["setup", "--yes"]).exit_code == 0
     backup_dir = next((env / "state" / "backups").iterdir())
 
     def boom(name):
-        raise RuntimeError("systemctl restart caddy 失败: unit 坏了")
+        raise RuntimeError("systemctl restart caddy failed: unit is broken")
 
     monkeypatch.setattr(platform, "restart_service", boom)
     res = CliRunner().invoke(app, ["setup", "--rollback", str(backup_dir)])
     assert res.exit_code == 1, res.output
-    assert "已回滚" in res.output, "文件确实还原了，必须如实说"
-    assert "Caddy 可能仍在运行迁移后的配置" in res.output
+    assert "Rolled back" in res.output, (
+        "the files really were restored; that must be stated honestly"
+    )
+    assert "Caddy may still be running the post-migration config" in res.output
     assert "Traceback" not in res.output
 
 
@@ -884,17 +905,17 @@ def test_setup_rollback_restart_permission_error_exits_4(env, monkeypatch, tmp_p
     backup_dir = next((env / "state" / "backups").iterdir())
 
     def boom(name):
-        raise PermissionError("提权失败：sudo 不可用")
+        raise PermissionError("elevation failed: sudo is unavailable")
 
     monkeypatch.setattr(platform, "restart_service", boom)
     res = CliRunner().invoke(app, ["setup", "--rollback", str(backup_dir)])
     assert res.exit_code == 4, res.output
-    assert "已还原" in res.output
+    assert "restored" in res.output
     assert "Traceback" not in res.output
 
 
 def test_setup_rollback_skips_restart_when_service_was_absent(env, monkeypatch, tmp_path):
-    """迁移前没有服务单元 → 回滚无需重启，也不该报错。"""
+    """No service unit before the migration -> rollback needs no restart, and must not error."""
     platform = _fake_setup_platform(monkeypatch, tmp_path)
     _seed_legacy_unit(platform, tmp_path)
     assert CliRunner().invoke(app, ["setup", "--yes"]).exit_code == 0
@@ -903,22 +924,24 @@ def test_setup_rollback_skips_restart_when_service_was_absent(env, monkeypatch, 
     monkeypatch.setattr(
         platform, "service_unit_path", lambda name: tmp_path / "no-such-unit.service"
     )
-    monkeypatch.setattr(platform, "restart_service", lambda name: pytest.fail("不应尝试重启"))
+    monkeypatch.setattr(
+        platform, "restart_service", lambda name: pytest.fail("must not attempt a restart")
+    )
     res = CliRunner().invoke(app, ["setup", "--rollback", str(backup_dir)])
     assert res.exit_code == 0, res.output
-    assert "跳过重启" in res.output
+    assert "skipping the restart" in res.output
 
 
-# ------------------------------------- I5 / I6：回滚参数的边界与恢复路径
+# ------------------------------------- I5 / I6: rollback argument boundaries and the recovery path
 
 
 def test_setup_rejects_empty_rollback_dir(env, monkeypatch, tmp_path):
-    """--rollback "" 是参数错误，绝不能落进完整部署分支。"""
+    """--rollback "" is a usage error and must never fall into the full deploy branch."""
     platform = _fake_setup_platform(monkeypatch, tmp_path)
     res = CliRunner().invoke(app, ["setup", "--rollback", ""])
     assert res.exit_code == 2, res.output
-    assert "空字符串" in res.output
-    # 没做迁移、也没开始部署
+    assert "empty string" in res.output
+    # No migration and no deploy started
     assert platform.services == {}
 
 
@@ -930,7 +953,7 @@ def test_setup_rejects_empty_domain_suffix(env, monkeypatch, tmp_path):
 
 
 def test_setup_rollback_works_with_corrupt_config_toml(env, monkeypatch, tmp_path):
-    """配置损坏正是最需要回滚的时刻 —— 恢复路径不能先加载配置。"""
+    """A corrupt config is exactly when a rollback is most needed -- the recovery path must not load the config first."""
     platform = _fake_setup_platform(monkeypatch, tmp_path)
     unit, _old = _seed_legacy_unit(platform, tmp_path)
     assert CliRunner().invoke(app, ["setup", "--yes"]).exit_code == 0
@@ -943,11 +966,11 @@ def test_setup_rollback_works_with_corrupt_config_toml(env, monkeypatch, tmp_pat
     assert "MINIKUBE_IP=1.2.3.4" in unit.read_text(encoding="utf-8")
 
 
-# ------------------------------------- M7：交互判定统一走 _shared 接缝
+# ------------------------------------- M7: interaction decisions all go through the _shared seam
 
 
 def test_setup_migration_uses_interactive_seam(env, monkeypatch, tmp_path):
-    """打桩 `_shared._interactive` 必须能驱动迁移的交互确认分支。"""
+    """Stubbing `_shared._interactive` must be able to drive migration's interactive confirmation branch."""
     platform = _fake_setup_platform(monkeypatch, tmp_path)
     _seed_legacy_unit(platform, tmp_path)
     monkeypatch.setattr("devproxy.cli._shared._interactive", lambda: True)
@@ -957,15 +980,15 @@ def test_setup_migration_uses_interactive_seam(env, monkeypatch, tmp_path):
     assert "MINIKUBE_IP=1.2.3.4" in platform.services["caddy"]
 
 
-# ------------------------------------- 平台构造失败（如 sudo/root）
+# ------------------------------------- Platform construction failures (e.g. sudo/root)
 
 
 def test_up_does_not_mask_programming_errors(env, monkeypatch):
-    """M1：UpRunner 只该把已知运行错误转成退出码；bug 不能被伪装成运行失败。"""
+    """M1: UpRunner should only turn known runtime errors into exit codes; bugs must not be disguised as runtime failures."""
     _patch_ctx(monkeypatch, env)
 
     def boom(self, *a, **k):
-        raise AttributeError("runner 内部 bug")
+        raise AttributeError("bug inside runner")
 
     monkeypatch.setattr("devproxy.cli._shared.UpRunner.run", boom)
     res = CliRunner().invoke(app, ["up", "codeup", "--", "sleep", "1"])
@@ -973,7 +996,7 @@ def test_up_does_not_mask_programming_errors(env, monkeypatch):
 
 
 def test_trust_lets_programming_errors_escape(env, monkeypatch):
-    """M6：trust 只该捕获契约内的 PermissionError / RuntimeError。"""
+    """M6: trust should only catch PermissionError / RuntimeError from its contract."""
     from devproxy.platform.base import Action
     from devproxy.platform.fake import FakePlatform
 
@@ -985,10 +1008,10 @@ def test_trust_lets_programming_errors_escape(env, monkeypatch):
             pass
 
         def plan(self):
-            return [Action(description="装 CA")]
+            return [Action(description="install CA")]
 
         def apply(self, actions):
-            raise AttributeError("组件内部 bug")
+            raise AttributeError("bug inside component")
 
     monkeypatch.setattr("devproxy.cli._shared.CertComponent", BoomCert)
     with pytest.raises(AttributeError):
@@ -996,51 +1019,53 @@ def test_trust_lets_programming_errors_escape(env, monkeypatch):
 
 
 def test_platform_construction_failure_is_clean_precondition(env, monkeypatch):
-    """sudo devproxy ... 在构造平台时被拒绝 → 一行可读错误 + 退出 3。"""
+    """sudo devproxy ... is rejected while constructing the platform -> one readable line + exit 3."""
     from devproxy.cli import _context
 
     _patch_ctx(monkeypatch, env)
     monkeypatch.setattr("devproxy.cli._shared._platform", _context._platform)
 
     def refuse():
-        raise RuntimeError("请以普通用户运行 devproxy：以 root 运行会装错家目录")
+        raise RuntimeError(
+            "run devproxy as a normal user: running as root would install into the wrong home directory"
+        )
 
     monkeypatch.setattr("devproxy.platform.get_platform", refuse)
     res = CliRunner().invoke(app, ["trust"])
     assert res.exit_code == 3, res.output
-    assert "普通用户" in res.output
+    assert "normal user" in res.output
     assert "Traceback" not in res.output
 
 
-# ------------------------------------- 顶级域白名单的退出码语义
+# ------------------------------------- Exit-code semantics of the top-level domain allowlist
 
 
 def test_setup_rejects_public_tld_from_cli_with_exit_2(env, monkeypatch):
-    """--domain-suffix 传公共顶级域 → 参数错误（2）。
+    """--domain-suffix given a public TLD -> usage error (2).
 
-    与写在 config.toml 里的同一个值不同：那属于配置错误（1）。
+    Unlike the same value written in config.toml: that is a configuration error (1).
     """
     platform = _fake_setup_platform(monkeypatch, env)
     res = CliRunner().invoke(app, ["setup", "--domain-suffix", "com"])
     assert res.exit_code == 2, res.output
     assert "com" in res.output
-    assert "test" in res.output, "报错要说清该改用什么"
-    assert platform.services == {}, "参数不合法时不该有任何副作用"
+    assert "test" in res.output, "the error must make clear what to use instead"
+    assert platform.services == {}, "an invalid argument must have no side effects"
 
 
 def test_setup_accepts_tld_explicitly_allowed_in_config(env, monkeypatch):
-    """config.toml 里显式放行后，命令行用同一个后缀必须放行。"""
+    """Once explicitly allowed in config.toml, the same suffix on the command line must be accepted."""
     config_dir = env / "config"
     config_dir.mkdir(parents=True, exist_ok=True)
     (config_dir / "config.toml").write_text('allowed_domain_suffixes = ["dev"]\n', encoding="utf-8")
     platform = _fake_setup_platform(monkeypatch, env)
     res = CliRunner().invoke(app, ["setup", "--domain-suffix", "dev"])
     assert res.exit_code == 0, res.output
-    assert platform.services == {}  # 假平台没装任何东西，但流程走完了
+    assert platform.services == {}  # the fake platform installed nothing, but the flow completed
 
 
 def test_config_toml_with_public_tld_exits_1(env, monkeypatch):
-    """写在 config.toml 里属于**配置错误**（1）—— 走 main() 的兜底。"""
+    """Written in config.toml it is a **configuration error** (1) -- goes through main()'s backstop."""
     import sys
 
     from devproxy import cli
@@ -1054,11 +1079,11 @@ def test_config_toml_with_public_tld_exits_1(env, monkeypatch):
     assert cm.value.code == 1
 
 
-# ------------------------------------- Firefox 的证书信任提醒
+# ------------------------------------- Firefox certificate trust reminder
 
 
 class _FakeTrustCert:
-    """假的证书组件：装 CA 的动作与 Firefox 提示都可编排。"""
+    """Fake certificate component: both the CA install action and the Firefox note are scriptable."""
 
     name = "cert"
 
@@ -1068,17 +1093,17 @@ class _FakeTrustCert:
     def plan(self):
         from devproxy.platform.base import Action
 
-        return [Action(description="装 CA", command=["certutil", "-A", "-n", "x"])]
+        return [Action(description="install CA", command=["certutil", "-A", "-n", "x"])]
 
     def apply(self, actions):
         return None
 
     def firefox_note(self):
-        return "Firefox 有自己的证书库（cert9.db），需要单独导入 CA"
+        return "Firefox has its own certificate store (cert9.db); the CA must be imported into it separately"
 
 
 def test_trust_reminds_about_firefox(env, monkeypatch):
-    """Firefox 不读 NSS 库也不读系统信任库 —— 装完必须提醒它单独信任。"""
+    """Firefox reads neither the NSS store nor the system trust store -- after installing, the user must be reminded to trust it separately."""
     monkeypatch.setattr("devproxy.cli._shared.CertComponent", _FakeTrustCert)
     res = CliRunner().invoke(app, ["trust", "--yes"])
     assert res.exit_code == 0, res.output
@@ -1087,7 +1112,7 @@ def test_trust_reminds_about_firefox(env, monkeypatch):
 
 
 def test_trust_stays_silent_without_firefox(env, monkeypatch):
-    """本机没装 Firefox 就别提 —— 不制造噪音。"""
+    """Do not mention Firefox when it is not installed on this machine -- do not create noise."""
 
     class NoFirefoxCert(_FakeTrustCert):
         def firefox_note(self):
@@ -1100,7 +1125,7 @@ def test_trust_stays_silent_without_firefox(env, monkeypatch):
 
 
 def test_trust_tolerates_component_without_firefox_note(env, monkeypatch):
-    """组件没有 firefox_note 这个能力时，trust 照常跑完。"""
+    """When the component lacks the firefox_note capability, trust still completes normally."""
 
     class PlainCert(_FakeTrustCert):
         firefox_note = None

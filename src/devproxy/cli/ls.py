@@ -12,14 +12,14 @@ from devproxy.gateway.runner import reachable
 
 
 def _list_routes() -> None:
-    """列出所有已注册路由。"""
+    """List every registered route."""
     _, _, store, _ = s.build_context()
     try:
         routes = store.list()
     except RouteTableError as e:
         s.fail(str(e))
     if not routes:
-        s.console.print("（无路由）")
+        s.console.print("(no routes)")
         raise typer.Exit(EXIT_OK)
     table = Table(show_header=True, header_style="bold")
     table.add_column("NAME")
@@ -36,16 +36,16 @@ def _list_routes() -> None:
             str(r.port),
             escape(r.mode),
             escape(r.upstream),
-            "● reachable" if ok else "⛔ 不可达",
+            "● reachable" if ok else "⛔ unreachable",
         )
     s.console.print(table)
 
 
-@app.command(name="ls", help="列出所有已注册路由（= ps）")
+@app.command(name="ls", help="List every registered route (= ps)")
 def ls() -> None:
     _list_routes()
 
 
-@app.command(name="ps", help="列出所有已注册路由（= ls，对齐 docker compose）")
+@app.command(name="ps", help="List every registered route (= ls, named after docker compose)")
 def ps() -> None:
     _list_routes()

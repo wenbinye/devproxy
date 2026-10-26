@@ -1,8 +1,8 @@
-"""DNS 路由组件：把 *.test 指向本机。
+"""DNS route component: point *.test at this machine.
 
-两个后端：
-- resolved（Linux 默认）：写 /etc/systemd/resolved.conf.d/devproxy.conf
-- system：写 /etc/dnsmasq.d/devproxy.conf（需自行处理 53 端口冲突）
+Two backends:
+- resolved (the Linux default): writes /etc/systemd/resolved.conf.d/devproxy.conf
+- system: writes /etc/dnsmasq.d/devproxy.conf (you must handle port 53 conflicts yourself)
 """
 
 from __future__ import annotations
@@ -21,40 +21,46 @@ from devproxy.platform.base import Platform
 from devproxy.platform.base import Status
 from devproxy.platform.base import render_resolver_file
 
-# 路径常量的定义在 `platform/base.py`（单一来源）；这里只导入使用。
+# The path constants are defined in `platform/base.py` (single source); import and use them here.
 
-# resolved 的整机兜底解析器。披露文案与真正写进配置的必须是同一份 ——
-# 两处各写一遍就会漂移，用户看到的和实际生效的就对不上了。
+# Machine-wide fallback resolver for resolved. The disclosure text and what is
+# actually written into the config must be the same thing -- writing it twice
+# would drift, and what the user sees would no longer match what takes effect.
 FALLBACK_DNS = "1.1.1.1 8.8.8.8"
 
-# 记录上次写入的路由内容哈希 —— /etc 下的文件普通用户未必读得到，
-# 靠自家 state 目录里的哈希判断“是否已就绪”，让 setup 第二次跑成 no-op。
+# Record the hash of the route content last written -- a normal user cannot
+# necessarily read files under /etc, so the hash in our own state directory
+# decides "is it already ready", letting a second setup run be a no-op.
 STATE_FILE = "dns-route.json"
 
 
 def global_scope_disclosure(port: int) -> str:
-    """resolved 后端的整机作用域披露（多行短句，便于终端阅读）。
+    """Machine-wide scope disclosure for the resolved backend (multi-line short sentences, easy to read in a terminal).
 
-    `DNS=` 写在 drop-in 的全局段里 —— 它决定的是**这台机器全部域名**的解析
-    都先问用户级的 dnsmasq，不只是 `*.test`。`FallbackDNS=` 则是整机兜底：
-    dnsmasq 起不来时，全机解析退化为公共 DNS。
+    `DNS=` is written in the global section of the drop-in -- it makes
+    **every domain on this machine** ask the user-scope dnsmasq, not just
+    `*.test`. `FallbackDNS=` is the machine-wide fallback: if dnsmasq cannot
+    start, resolution across the machine degrades to public DNS.
 
-    这两件事必须写进 setup 的变更清单：用户点确认之前就该知道自己在改什么。
+    Both facts must appear in setup's change list: the user should know what
+    they are changing before confirming.
     """
     return (
-        "⚠ 整机作用域（这台机器全部域名，不只是 *.test）\n"
-        f"  · DNS=127.0.0.1:{port}：全机解析先问用户级 dnsmasq\n"
-        f"  · FallbackDNS={FALLBACK_DNS}：整机兜底\n"
-        "    dnsmasq 起不来时，全机解析退化为公共 DNS"
+        "⚠ machine-wide scope (every domain on this machine, not just *.test)\n"
+        f"  · DNS=127.0.0.1:{port}: machine-wide resolution asks the user-scope dnsmasq first\n"
+        f"  · FallbackDNS={FALLBACK_DNS}: machine-wide fallback\n"
+        "    when dnsmasq cannot start, machine-wide resolution degrades to public DNS"
     )
 
 
 def render_resolved_conf(*, port: int, suffix: str) -> str:
-    """systemd-resolved 的 drop-in 内容。
+    """Contents of the systemd-resolved drop-in.
 
-    `Domains=` 是**空格分隔**的域名列表；逗号不是分隔符。工具只需要
-    维护一个后缀，参数保持单值 —— 免得将来有人传两个域名时生成
-    `Domains=~.test,~.dev` 这种整行无效、双方却都不报错的配置。
+    `Domains=` is a **space-separated** list of domains; commas are not
+    separators. The tool only needs to maintain one suffix, so the parameter
+    stays single-valued -- this prevents a future caller passing two domains
+    from generating `Domains=~.test,~.dev`, an entirely invalid line that
+    neither side reports.
     """
     return (
         "[Resolve]\n"
@@ -84,20 +90,25 @@ class DnsComponent:
 
     @property
     def resolved_backend(self) -> bool:
-        """auto 时优先 resolved（不占 53，用户态守护）。
+        """Prefer resolved for auto (does not occupy port 53, user-space daemon).
 
-        判据必须是 resolved **真的在运行**，而不是目录存在 ——
-        /etc/systemd/resolved.conf.d 可能只是被手工创建过；反过来干净机器
-        上目录不存在也不代表 resolved 没装。目录存在与否都不是可靠信号。
+        The criterion must be that resolved is **actually running**, not that
+        the directory exists -- /etc/systemd/resolved.conf.d may have been
+        created by hand; conversely, on a clean machine a missing directory
+        does not mean resolved is not installed. Whether the directory exists
+        is not a reliable signal either way.
 
-        macOS 根本没有 systemd-resolved：auto 静默走 resolver，但用户
-        **显式**要求 resolved 时必须报错 —— 否则显式输入被悄悄改成另一种
-        行为，用户永远不知道自己的配置没生效。
+        macOS has no systemd-resolved at all: auto silently uses resolver,
+        but when the user **explicitly** asks for resolved it must raise --
+        otherwise explicit input would be silently changed to different
+        behavior, and the user would never know their config did not take
+        effect.
         """
         if self.backend == "resolved":
             if self.platform.name == "mac":
                 raise RuntimeError(
-                    "macOS 不支持 resolved 后端（没有 systemd-resolved），请使用 auto 或 system"
+                    "macOS does not support the resolved backend (no systemd-resolved); "
+                    "use auto or system"
                 )
             return True
         if self.platform.name == "mac" or self.backend == "system":
@@ -106,9 +117,10 @@ class DnsComponent:
 
     @property
     def target_path(self) -> Path:
-        """本次要写/要查的 DNS 路由文件。
+        """The DNS route file to write/check this time.
 
-        macOS 是每域解析器文件（/etc/resolver/<后缀>）—— 不动 /etc/resolv.conf。
+        On macOS this is the per-domain resolver file (/etc/resolver/<suffix>)
+        -- it does not touch /etc/resolv.conf.
         """
         if self.resolved_backend:
             return RESOLVED_CONF
@@ -117,11 +129,12 @@ class DnsComponent:
         return SYSTEM_DNSMASQ_CONF
 
     def _backend_key(self, resolved: bool | None = None) -> str:
-        """本次要写/要查的 DNS 路由后端。
+        """The DNS routing backend to write/check this time.
 
-        `resolved` 可由调用方传入已算好的结果，避免同一轮重复探测。
-        macOS 没有 systemd-resolved，用 launchd 之外的 resolver 机制
-        （/etc/resolver/<suffix>），后端名是 "resolver"。
+        `resolved` may be supplied by the caller from an already-computed
+        result, to avoid probing twice in the same round. macOS has no
+        systemd-resolved and uses the resolver mechanism outside launchd
+        (/etc/resolver/<suffix>); the backend name is "resolver".
         """
         if resolved is None:
             resolved = self.resolved_backend
@@ -131,15 +144,18 @@ class DnsComponent:
             return "resolver"
         return "system"
 
-    # -- 披露 ------------------------------------------------------------
+    # -- disclosure ----------------------------------------------------
     def global_scope_note(self) -> str | None:
-        """整机作用域的披露文案；不涉及整机时返回 None。
+        """Machine-wide scope disclosure text; None when machine-wide scope is not involved.
 
-        只有 resolved 后端有整机作用域：`DNS=` 与 `FallbackDNS=` 写在 drop-in 的
-        全局段里，改的是**这台机器**的解析路径。macOS 的每域解析器文件与
-        `system` 后端的 dnsmasq 片段都只影响本后缀，不涉及整机。
+        Only the resolved backend has machine-wide scope: `DNS=` and
+        `FallbackDNS=` are written in the drop-in's global section and change
+        **this machine's** resolution path. macOS's per-domain resolver file
+        and the `system` backend's dnsmasq snippet only affect this suffix,
+        not the whole machine.
 
-        setup 会把这段话单独打一遍 —— 变更清单的表格里放不下，也放不下重点。
+        setup prints this paragraph separately -- it does not fit in the
+        change list table, nor would the emphasis.
         """
         if not self.resolved_backend:
             return None
@@ -147,45 +163,51 @@ class DnsComponent:
 
     # -- check ---------------------------------------------------------
     def check(self) -> Status:
-        """就绪判据必须与 plan 一致 —— 否则 doctor 会说谎。
+        """The readiness criterion must match plan -- otherwise doctor lies.
 
-        `platform.dns_route_installed` 只回答"文件在不在"：macOS 上
-        `/etc/resolver/test` 可能是别的工具多年前留下的 `nameserver 127.0.0.1`
-        （没有 `port 5300`），Linux 上 drop-in 也可能被手改过。文件在、内容不对
-        时仍然报"已就绪"，用户会对着一个 `doctor` 全绿的机器调半天解析。
+        `platform.dns_route_installed` only answers "is the file there": on
+        macOS, `/etc/resolver/test` may be a `nameserver 127.0.0.1` (without
+        `port 5300`) left by another tool years ago; on Linux the drop-in may
+        have been hand-edited too. Reporting "ready" when the file exists but
+        its content is wrong leaves the user debugging resolution for a long
+        time on a machine where `doctor` is all green.
 
-        所以：内容能读到就以内容为准；读不到（权限）才退回平台的存在性判据 ——
-        那时无法证伪，不该凭空报错。这条回退由 `_route_in_place()` 统一实现，
-        check 与 plan 共用，避免"doctor 绿而 setup 又要重写并重启解析器"。
+        So: when the content is readable, go by the content; only when it
+        cannot be read (permissions) fall back to the platform's existence
+        criterion -- at that point it cannot be disproven, so it should not
+        error out of thin air. This fallback is implemented once in
+        `_route_in_place()`, shared by check and plan, to avoid "doctor green
+        but setup wants to rewrite and restart the resolver again".
         """
         try:
             resolved = self.resolved_backend
             key = self._backend_key(resolved)
             content = self._expected_content(resolved)
         except RuntimeError as e:
-            # 配置与平台不匹配（如 macOS 显式指定 resolved）：如实报配置错误，
-            # 但 check 依然不抛异常。
+            # Config does not match the platform (e.g. resolved explicitly
+            # requested on macOS): report the config error truthfully, but
+            # check still does not raise.
             return Status(
                 ok=False,
                 detail=str(e),
-                hint="把 dns_backend 改为 auto 或 system",
+                hint="change dns_backend to auto or system",
             )
         if self._route_in_place(content):
-            return Status(ok=True, detail=f"DNS 路由已配置（{key} 后端）")
+            return Status(ok=True, detail=f"DNS route configured ({key} backend)")
         if self._read_target() is not None:
             return Status(
                 ok=False,
-                detail=f"DNS 路由内容不是预期（{key} 后端）：{self.target_path}",
-                hint="devproxy setup 会重写",
+                detail=f"DNS route content is not as expected ({key} backend): {self.target_path}",
+                hint="devproxy setup will rewrite it",
             )
         return Status(
             ok=False,
-            detail=f"DNS 路由缺失（{key} 后端）：{self.target_path}",
-            hint="devproxy setup 会写入（需要 sudo）",
+            detail=f"DNS route missing ({key} backend): {self.target_path}",
+            hint="devproxy setup will write it (requires sudo)",
         )
 
     def _read_target(self) -> str | None:
-        """目标文件的内容；不存在或读不了返回 None（两者都是"不知道"）。"""
+        """Contents of the target file; None when it does not exist or cannot be read (both mean "unknown")."""
         try:
             return self.target_path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
@@ -193,13 +215,15 @@ class DnsComponent:
 
     # -- plan ----------------------------------------------------------
     def _expected_content(self, resolved: bool | None = None) -> str:
-        """当前平台/后端下，路由文件应有的内容。
+        """The content the route file should have under the current platform/backend.
 
-        check 与 plan 必须用**同一份**判据 —— 两处各算一遍迟早会漂移，
-        而漂移的表现就是"doctor 说就绪、setup 却要重写"。
-        `resolved` 可由调用方传入，避免同一轮重复探测。
+        check and plan must use the **same** criterion -- computing it twice
+        would eventually drift, and drift shows up as "doctor says ready but
+        setup wants to rewrite". `resolved` may be supplied by the caller to
+        avoid probing twice in the same round.
         """
-        # 先取 resolved_backend 完成平台适用性校验（macOS 显式 resolved 会抛）。
+        # Resolve resolved_backend first to complete the platform applicability
+        # check (explicit resolved on macOS raises).
         if resolved is None:
             resolved = self.resolved_backend
         if self.platform.name == "mac":
@@ -211,16 +235,18 @@ class DnsComponent:
         return render_system_dnsmasq_conf(suffix=self.config.domain_suffix)
 
     def plan(self) -> list[Action]:
-        """路由已是预期内容时返回空列表 —— 重复 setup 不该再要 sudo、
-        更不该再重启系统 resolver（那会造成全机 DNS 抖动）。"""
-        # content 只算一次：分支只决定文案与 reload 动作。两处各算一遍
-        # 不只是浪费探测，并发状态变化时甚至会与后端选择不一致。
+        """Return an empty list when the route already has the expected content -- a repeated setup should not ask for sudo again, let alone restart the system resolver (that would cause machine-wide DNS flapping)."""
+        # Compute content only once: the branch only decides the wording and
+        # reload action. Computing it twice is not just wasted probing; under
+        # concurrent state changes it could even disagree with the backend
+        # choice.
         resolved = self.resolved_backend
         content = self._expected_content(resolved)
         if self.platform.name == "mac":
-            # macOS 的每域解析器文件：mDNSResponder 会自己重载，
-            # 不需要（也不能）重启任何解析服务。
-            desc = f"写入 {self.target_path}（macOS 每域解析器）"
+            # macOS per-domain resolver files: mDNSResponder reloads itself,
+            # so there is no need (and no way) to restart any resolution
+            # service.
+            desc = f"write {self.target_path} (macOS per-domain resolver)"
             if self._route_in_place(content):
                 return []
             return [
@@ -234,19 +260,19 @@ class DnsComponent:
             ]
         if resolved:
             desc = (
-                "写入 systemd-resolved 路由"
-                f"（*.{self.config.domain_suffix} → 127.0.0.1，整机 DNS 作用域）"
+                "write the systemd-resolved route"
+                f" (*.{self.config.domain_suffix} -> 127.0.0.1, machine-wide DNS scope)"
             )
             reload_action = Action(
-                description="重载 systemd-resolved 使路由生效",
+                description="reload systemd-resolved to activate the route",
                 kind="run",
                 command=["systemctl", "restart", "systemd-resolved"],
                 privileged=True,
             )
         else:
-            desc = f"写入系统 dnsmasq 路由（*.{self.config.domain_suffix} → 127.0.0.1）"
+            desc = f"write the system dnsmasq route (*.{self.config.domain_suffix} -> 127.0.0.1)"
             reload_action = Action(
-                description="重载系统 dnsmasq 使路由生效",
+                description="reload system dnsmasq to activate the route",
                 kind="run",
                 command=["systemctl", "restart", "dnsmasq"],
                 privileged=True,
@@ -266,10 +292,11 @@ class DnsComponent:
 
     # -- apply ---------------------------------------------------------
     def apply(self, actions: list[Action]) -> None:
-        """提权会话按需获取 —— 没有特权动作时绝不触发 sudo 密码提示。
+        """Acquire the elevated session on demand -- never trigger a sudo password prompt when there are no privileged actions.
 
-        状态只在**全部动作成功后**记录：重载失败时若先记状态，下次 plan 会
-        返回空列表，把“未生效”误报成“已就绪”。
+        State is recorded only **after all actions succeed**: if a reload
+        fails after state was recorded, the next plan would return an empty
+        list and misreport "not in effect" as "already ready".
         """
         elevated = None
         written: tuple[Path, str] | None = None
@@ -290,23 +317,23 @@ class DnsComponent:
                     elevated = self.platform.privilege()
                 code, msg = elevated.run(action.command)
                 if code != 0:
-                    raise RuntimeError(f"执行 {' '.join(action.command)} 失败: {msg}")
+                    raise RuntimeError(f"failed to run {' '.join(action.command)}: {msg}")
                 continue
-            raise RuntimeError(f"未知动作: {action.command}")
+            raise RuntimeError(f"unknown action: {action.command}")
         if written is not None:
             self._record_state(*written)
 
     # -- verify --------------------------------------------------------
     def verify(self) -> Status:
-        """路由文件在位还不够 —— 必须真的能经系统解析器解析到本机。"""
+        """The route file being present is not enough -- resolution through the system resolver must actually reach this machine."""
         key = self._backend_key()
         mac = self.platform.name == "mac"
         if not self.platform.dns_route_installed(key, self.config.domain_suffix):
             return Status(
                 ok=False,
-                detail="DNS 路由未生效",
+                detail="DNS route is not in effect",
                 hint=(
-                    f"确认 {self.target_path} 存在且内容正确"
+                    f"check that {self.target_path} exists and has the right content"
                     if mac
                     else "systemctl restart systemd-resolved"
                 ),
@@ -317,17 +344,18 @@ class DnsComponent:
             return Status(
                 ok=False,
                 detail=(
-                    f"系统解析器未把 {name} 指到本机（{answer or '无响应'}）；路由文件已写但未生效"
+                    f"the system resolver does not point {name} at this machine "
+                    f"({answer or 'no response'}); the route file was written but is not in effect"
                 ),
                 hint=(
                     f"dscacheutil -q host -a name {name}"
                     if mac
-                    else "systemctl restart systemd-resolved；resolvectl query " + name
+                    else "systemctl restart systemd-resolved; resolvectl query " + name
                 ),
             )
-        return Status(ok=True, detail=f"DNS 路由已生效（{name} → {answer}）")
+        return Status(ok=True, detail=f"DNS route is in effect ({name} -> {answer})")
 
-    # -- 状态记录 ------------------------------------------------------
+    # -- state recording -----------------------------------------------
     @property
     def state_path(self) -> Path:
         return self.paths.state_dir / STATE_FILE
@@ -354,15 +382,20 @@ class DnsComponent:
         )
 
     def _route_in_place(self, content: str) -> bool:
-        """路由是否已是预期内容。
+        """Whether the route already has the expected content.
 
-        判据按可用信息逐级退让：
-        1. 文件读得到 → 直接比内容（用户在 /etc 下改过就重写）；
-        2. 文件读不到 / 不可见（普通用户未必能读 /etc 下的文件）→ 先比 state
-           目录里上次写入的哈希；
-        3. 连 state 也对不上 → 退回平台的存在性判据。此时无法证伪，
-           不该凭空报错；plan 与 check 必须共用这条回退，否则 doctor 报绿
-           而 setup 又要 sudo 重写并重启整机解析器。
+        The criterion steps back level by level according to the available
+        information:
+        1. File readable -> compare content directly (rewrite if the user
+           edited it under /etc);
+        2. File unreadable / invisible (a normal user cannot necessarily read
+           files under /etc) -> compare the hash recorded last time in the
+           state directory;
+        3. Not even the state matches -> fall back to the platform's
+           existence criterion. At that point it cannot be disproven, so it
+           should not error out of thin air; plan and check must share this
+           fallback, otherwise doctor reports green while setup wants sudo to
+           rewrite and restart the machine-wide resolver.
         """
         digest = _sha256(content)
         current = None
@@ -376,7 +409,9 @@ class DnsComponent:
             state = self._read_state()
             if state.get("content_sha256") == digest and state.get("path") == str(self.target_path):
                 return True
-        # 文件不存在或普通用户读不到（如 root:root 0600），且 state 哈希缺失/
-        # 过期：平台的"文件存在"判据是此时唯一可用的信息。check 与 plan 必须
-        # 共用它——否则 doctor 报绿而 setup 又要 sudo 重写并重启整机解析器。
+        # The file is missing or unreadable by a normal user (e.g. root:root
+        # 0600), and the state hash is missing/stale: the platform's "file
+        # exists" criterion is the only information available at this point.
+        # check and plan must share it -- otherwise doctor reports green while
+        # setup wants sudo to rewrite and restart the machine-wide resolver.
         return self.platform.dns_route_installed(self._backend_key(), self.config.domain_suffix)

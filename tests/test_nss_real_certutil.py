@@ -1,13 +1,15 @@
-"""真 NSS 库上的行为：**真的 certutil** + 临时库。
+"""Behavior against a real NSS database: the **real certutil** + a temporary DB.
 
-2026-10-23 真机首跑暴露的缺陷之二：NSS 按 (issuer, serial) 去重 ——
-同一张证书换个昵称再 `certutil -A`，会**静默无操作**（返回 0，条目并不新增）。
-于是"这张 CA 装进 NSS 库了没"只能按**证书内容**判定，不能按昵称。
+The second defect exposed by the first real-machine run on 2026-10-23: NSS
+deduplicates by (issuer, serial) -- adding the same certificate again under a different
+nickname with `certutil -A` **silently does nothing** (returns 0, no new entry).
+So "is this CA in the NSS DB?" can only be judged by **certificate content**, not by nickname.
 
-本文件用真的 certutil 复现这个现象 —— 假平台永远测不出来：
-`FakePlatform` 不实现 certutil 的去重规则。
+This file reproduces that behavior with the real certutil -- a fake platform can never
+test it: `FakePlatform` does not implement certutil's deduplication rules.
 
-本机没有 certutil 就整组跳过（`sudo apt install libnss3-tools`）。
+The whole group is skipped when certutil is not available on this machine
+(`sudo apt install libnss3-tools`).
 """
 
 import os
@@ -24,13 +26,13 @@ from devproxy.platform.base import Action
 from devproxy.platform.linux import LinuxPlatform
 
 pytestmark = pytest.mark.skipif(
-    shutil.which("certutil") is None, reason="本机没有 certutil（libnss3-tools）"
+    shutil.which("certutil") is None, reason="no certutil on this machine (libnss3-tools)"
 )
 
 
 def _need_openssl() -> None:
     if shutil.which("openssl") is None:
-        pytest.skip("本机没有 openssl")
+        pytest.skip("no openssl on this machine")
 
 
 def _certutil(db: Path, *args: str) -> subprocess.CompletedProcess:
@@ -43,7 +45,7 @@ def _certutil(db: Path, *args: str) -> subprocess.CompletedProcess:
 
 
 def _new_db(path: Path) -> Path:
-    """建一个空的 NSS 库。"""
+    """Create an empty NSS database."""
     path.mkdir(parents=True, exist_ok=True)
     subprocess.run(
         ["certutil", "-N", "-d", f"sql:{path}", "--empty-password"],
@@ -55,7 +57,7 @@ def _new_db(path: Path) -> Path:
 
 
 def _make_ca(tmp_path: Path, cn: str = "devproxy fixwave test CA") -> Path:
-    """造一张自签 CA（内容可比对，不用假 PEM）。"""
+    """Create a self-signed CA (content can be compared; no fake PEM needed)."""
     _need_openssl()
     stem = cn.replace(" ", "-")
     ca = tmp_path / f"{stem}.crt"
@@ -86,10 +88,11 @@ def _make_ca(tmp_path: Path, cn: str = "devproxy fixwave test CA") -> Path:
 
 
 def _rows(db: Path) -> list[tuple[str, str]]:
-    """列出库里的条目：[(昵称, 信任标志)]。
+    """List the entries in the DB: [(nickname, trust flags)].
 
-    昵称列宽固定 55（测试里的昵称都不长），标志在第 57 列 ——
-    这里刻意**不复用**平台层的解析代码，免得实现错了测试也跟着错。
+    The nickname column is fixed at width 55 (test nicknames are short) and flags start at
+    column 57 -- this deliberately **does not reuse** the platform-layer parser, so a
+    wrong implementation cannot make the test wrong too.
     """
     out = _certutil(db, "-L").stdout
     rows: list[tuple[str, str]] = []
@@ -105,14 +108,14 @@ def _rows(db: Path) -> list[tuple[str, str]]:
     return rows
 
 
-# -- 现象复现 ---------------------------------------------------------------
+# -- behavior reproduction --------------------------------------------------
 
 
 def test_certutil_add_dedups_by_issuer_and_serial(tmp_path):
-    """复现真机现象：同一张证书换个昵称再 -A，条目**不会**新增。
+    """Reproduce the real-machine behavior: adding the same certificate under another nickname with -A does **not** create an entry.
 
-    返回码仍是 0 —— 这就是"静默失败"：调用方以为装上了，库里却根本没有
-    自己那个昵称的条目。
+    The return code is still 0 -- this is "silent failure": the caller thinks it
+    installed it, but the DB has no entry under its own nickname.
     """
     ca = _make_ca(tmp_path)
     db = _new_db(tmp_path / "nssdb")
@@ -121,20 +124,20 @@ def test_certutil_add_dedups_by_issuer_and_serial(tmp_path):
     )
     assert [name for name, _ in _rows(db)] == ["devproxy Local CA"]
 
-    again = _certutil(db, "-A", "-n", "另一个昵称", "-t", "C,,", "-i", str(ca))
-    assert again.returncode == 0, "certutil 对重复证书返回 0"
+    again = _certutil(db, "-A", "-n", "another nickname", "-t", "C,,", "-i", str(ca))
+    assert again.returncode == 0, "certutil returns 0 for a duplicate certificate"
     assert [name for name, _ in _rows(db)] == ["devproxy Local CA"], (
-        "重复的证书不会新增条目 —— NSS 按 (issuer, serial) 去重"
+        "a duplicate certificate does not add an entry -- NSS deduplicates by (issuer, serial)"
     )
 
 
-# -- 平台层：按内容判定 ---------------------------------------------------
+# -- platform layer: judge by content --------------------------------------
 
 
 def test_nss_trusted_when_cert_stored_under_other_nickname(tmp_path):
-    """同一张 CA 用别的昵称入库 —— 判定为已信任。
+    """The same CA is stored under another nickname -- judged as trusted.
 
-    真机上这条是老 devp 装的 "Caddy Local Authority"。
+    On a real machine this entry is the "Caddy Local Authority" installed by the old devp.
     """
     ca = _make_ca(tmp_path)
     home = tmp_path / "home"
@@ -147,7 +150,7 @@ def test_nss_trusted_when_cert_stored_under_other_nickname(tmp_path):
 
 
 def test_nss_trusted_false_when_entry_has_no_trust_flag(tmp_path):
-    """库里有这张 CA 但标志是 ",,"（无信任）—— 不算已信任。"""
+    """The DB has this CA but the flags are ",," (no trust) -- not counted as trusted."""
     ca = _make_ca(tmp_path)
     home = tmp_path / "home"
     db = _new_db(home / ".pki" / "nssdb")
@@ -159,7 +162,7 @@ def test_nss_trusted_false_when_entry_has_no_trust_flag(tmp_path):
 
 
 def test_nss_trusted_false_when_other_cert_stored(tmp_path):
-    """库里是**别的**证书 —— 不算这张 CA 已信任。"""
+    """The DB holds a **different** certificate -- this CA is not counted as trusted."""
     ca = _make_ca(tmp_path)
     other = tmp_path / "other.crt"
     _need_openssl()
@@ -188,7 +191,7 @@ def test_nss_trusted_false_when_other_cert_stored(tmp_path):
     )
     home = tmp_path / "home"
     db = _new_db(home / ".pki" / "nssdb")
-    _certutil(db, "-A", "-n", "别的 CA", "-t", "C,,", "-i", str(other))
+    _certutil(db, "-A", "-n", "other CA", "-t", "C,,", "-i", str(other))
 
     platform = LinuxPlatform(user_home=home)
     assert platform.nss_trusted(ca) is False
@@ -196,7 +199,7 @@ def test_nss_trusted_false_when_other_cert_stored(tmp_path):
 
 
 def test_nss_entries_finds_entry_whose_nickname_has_spaces(tmp_path):
-    """昵称可以含空格 —— 解析不能按"第一个空格"切。"""
+    """Nicknames may contain spaces -- parsing must not split on the first space."""
     ca = _make_ca(tmp_path)
     home = tmp_path / "home"
     db = _new_db(home / ".pki" / "nssdb")
@@ -207,11 +210,11 @@ def test_nss_entries_finds_entry_whose_nickname_has_spaces(tmp_path):
     assert platform.nss_entries(ca) == [("my local ca", "C,,")]
 
 
-# -- 组件层：plan / apply --------------------------------------------------
+# -- component layer: plan / apply -----------------------------------------
 
 
 class _SystemTrusted(LinuxPlatform):
-    """假装 CA 已经进了系统信任库 —— 本组只关心 NSS 这一半。"""
+    """Pretend the CA already went into the system trust store -- this group only cares about the NSS half."""
 
     def ca_trusted(self, ca: Path) -> bool:
         return True
@@ -228,7 +231,7 @@ def _component(tmp_path, home: Path, db: Path):
 
 def _install_action(ca: Path, db: Path) -> Action:
     return Action(
-        description="安装 CA 根证书到 NSS 库（Chrome/Chromium）",
+        description="install the CA root certificate into the NSS DB (Chrome/Chromium)",
         kind="run",
         command=["install-nss-ca", str(ca), str(db)],
         privileged=False,
@@ -237,7 +240,7 @@ def _install_action(ca: Path, db: Path) -> Action:
 
 def _remove_action(ca: Path, db: Path) -> Action:
     return Action(
-        description="清理 NSS 库中工具昵称下的陈旧 CA 根证书",
+        description="remove the stale CA root under the tool's nickname in the NSS DB",
         kind="run",
         command=["remove-stale-nss-ca", str(ca), str(db)],
         privileged=False,
@@ -245,7 +248,7 @@ def _remove_action(ca: Path, db: Path) -> Action:
 
 
 def test_plan_is_empty_when_ca_trusted_under_other_nickname(tmp_path):
-    """库里已有这张 CA 且带信任标志 → 不该再要求用户做一遍。"""
+    """The DB already has this CA with a trust flag -> do not ask the user to do it again."""
     ca = _make_ca(tmp_path)
     home = tmp_path / "home"
     db = _new_db(home / ".pki" / "nssdb")
@@ -260,7 +263,7 @@ def test_plan_is_empty_when_ca_trusted_under_other_nickname(tmp_path):
 
 
 def test_apply_does_not_touch_existing_entry(tmp_path):
-    """已经信任时执行安装动作：不得报错，也不得动用户已有的条目。"""
+    """Running the install action when already trusted: must not error and must not touch the user's existing entry."""
     ca = _make_ca(tmp_path)
     home = tmp_path / "home"
     db = _new_db(home / ".pki" / "nssdb")
@@ -274,12 +277,12 @@ def test_apply_does_not_touch_existing_entry(tmp_path):
 
     rows = _rows(db)
     assert rows == [("Caddy Local Authority", "C,,")], (
-        "用户已有的条目不能被删掉或改名 —— 工具不该往用户库里塞第二个昵称"
+        "the user's existing entry must not be deleted or renamed -- the tool must not add a second nickname to the user's DB"
     )
 
 
 def test_apply_repairs_missing_trust_flag(tmp_path):
-    """库里有这张 CA 但缺 SSL 信任标志 → 装完必须有信任标志。"""
+    """The DB has this CA but lacks the SSL trust flag -> it must have the trust flag after installation."""
     ca = _make_ca(tmp_path)
     home = tmp_path / "home"
     db = _new_db(home / ".pki" / "nssdb")
@@ -296,7 +299,7 @@ def test_apply_repairs_missing_trust_flag(tmp_path):
 
 
 def test_apply_installs_into_empty_database(tmp_path):
-    """空库 → 正常装上，昵称就是工具自己的那个。"""
+    """Empty DB -> install normally; the nickname is the tool's own."""
     ca = _make_ca(tmp_path)
     home = tmp_path / "home"
     db = _new_db(home / ".pki" / "nssdb")
@@ -310,7 +313,7 @@ def test_apply_installs_into_empty_database(tmp_path):
     assert comp.check().ok is True
 
 
-# -- fix round 1：只认 SSL 列的 "C"，以及三列标志 ------------------------------
+# -- fix round 1: only the SSL column's "C" counts, plus three-column flags --
 
 
 def _trusted(ca: Path, home: Path, db: Path) -> tuple[bool, list]:
@@ -319,10 +322,10 @@ def _trusted(ca: Path, home: Path, db: Path) -> tuple[bool, list]:
 
 
 def test_nss_trusted_false_for_trusted_peer_flag(tmp_path):
-    """`P,,` 是"受信任的对端"，**不是 CA 锚点** —— 不能算已信任。
+    """`P,,` is "trusted peer", **not a CA anchor** -- must not count as trusted.
 
-    评测实测（真 NSS）：把 CA 以 `P,,` 入库后，用它签发的叶子在
-    `certutil -V -u V` 下报 "issuer has been marked as not trusted"。
+    Measured during evaluation (real NSS): after storing the CA as `P,,`, a leaf it
+    signed reports "issuer has been marked as not trusted" under `certutil -V -u V`.
     """
     ca = _make_ca(tmp_path)
     home = tmp_path / "home"
@@ -335,7 +338,7 @@ def test_nss_trusted_false_for_trusted_peer_flag(tmp_path):
 
 
 def test_nss_trusted_false_for_client_ca_flag(tmp_path):
-    """`T,,` 是"可签发客户端证书的 CA"，**不是**服务端锚点 —— 不算已信任。"""
+    """`T,,` is "CA that can issue client certificates", **not** a server anchor -- must not count as trusted."""
     ca = _make_ca(tmp_path)
     home = tmp_path / "home"
     db = _new_db(home / ".pki" / "nssdb")
@@ -347,25 +350,26 @@ def test_nss_trusted_false_for_client_ca_flag(tmp_path):
 
 
 def test_nss_trusted_false_when_only_smime_column_trusted(tmp_path):
-    """`,C,` 只信任 S/MIME 用途 —— SSL 列是空的，HTTPS 不认。"""
+    """`,C,` trusts only S/MIME usage -- the SSL column is empty, so HTTPS does not accept it."""
     ca = _make_ca(tmp_path)
     home = tmp_path / "home"
     db = _new_db(home / ".pki" / "nssdb")
     _certutil(db, "-A", "-n", "Caddy Local Authority", "-t", ",C,", "-i", str(ca))
 
     platform = LinuxPlatform(user_home=home)
-    # 先确认 certutil 真的把 ",C," 存进去了（不是被 NSS 改写）
+    # First confirm certutil really stored ",C," (not rewritten by NSS)
     assert _rows(db) == [("Caddy Local Authority", ",C,")]
     assert platform.nss_trusted(ca) is False
     assert platform.nss_entries(ca) == [("Caddy Local Authority", ",C,")]
 
 
 def test_nss_trusted_true_for_three_column_flags(tmp_path):
-    """`C,C,C`（三列全信任）必须判为已信任。
+    """`C,C,C` (all three columns trusted) must be judged trusted.
 
-    真机上 `Caddy Local Authority` 就是这个形态。旧的"至少两个连续逗号"
-    正则解析不了它 → 判成未信任 → 计划里多一步安装 → `-A -t C,,`
-    把这行改写成 `C,,`，另外两列的信任被静默抹掉。
+    On a real machine `Caddy Local Authority` has exactly this shape. The old "at least
+    two consecutive commas" regex cannot parse it -> judged untrusted -> adds an install
+    step to the plan -> `-A -t C,,` rewrites the row as `C,,`, silently wiping the trust
+    in the other two columns.
     """
     ca = _make_ca(tmp_path)
     home = tmp_path / "home"
@@ -379,7 +383,7 @@ def test_nss_trusted_true_for_three_column_flags(tmp_path):
 
 
 def test_plan_is_empty_for_three_column_flags(tmp_path):
-    """`C,C,C` 已信任 → plan() 必须为空（B-5）。"""
+    """`C,C,C` already trusted -> plan() must be empty (B-5)."""
     ca = _make_ca(tmp_path)
     home = tmp_path / "home"
     db = _new_db(home / ".pki" / "nssdb")
@@ -394,7 +398,7 @@ def test_plan_is_empty_for_three_column_flags(tmp_path):
 
 
 def test_apply_keeps_three_column_flags(tmp_path):
-    """apply 之后条目必须仍是 `C,C,C` —— 不许被 `-A -t C,,` 抹成 `C,,`。"""
+    """After apply the entry must still be `C,C,C` -- it must not be wiped to `C,,` by `-A -t C,,`."""
     ca = _make_ca(tmp_path)
     home = tmp_path / "home"
     db = _new_db(home / ".pki" / "nssdb")
@@ -406,11 +410,13 @@ def test_apply_keeps_three_column_flags(tmp_path):
 
     comp.apply([_install_action(comp.ca_path, db)])
 
-    assert _rows(db) == [("Caddy Local Authority", "C,C,C")], "用户条目的另外两列信任不能被抹掉"
+    assert _rows(db) == [("Caddy Local Authority", "C,C,C")], (
+        "the other two trust columns of the user entry must not be wiped"
+    )
 
 
 def test_apply_repairs_only_ssl_column(tmp_path):
-    """修 `,C,` 时只补 SSL 列 → `C,C,`，S/MIME 的信任必须保留。"""
+    """Repairing `,C,` patches only the SSL column -> `C,C,`; S/MIME trust must be preserved."""
     ca = _make_ca(tmp_path)
     home = tmp_path / "home"
     db = _new_db(home / ".pki" / "nssdb")
@@ -423,18 +429,20 @@ def test_apply_repairs_only_ssl_column(tmp_path):
     assert comp.check().ok is False
     comp.apply([_install_action(comp.ca_path, db)])
     assert comp.check().ok is True
-    assert _rows(db) == [("Caddy Local Authority", "C,C,")], "补 SSL 列不能顺手把 S/MIME 的信任清掉"
+    assert _rows(db) == [("Caddy Local Authority", "C,C,")], (
+        "adding the SSL column must not wipe S/MIME trust"
+    )
 
 
-# -- fix round 1：自有昵称下的陈旧条目 --------------------------------------
+# -- fix round 1: stale entries under the tool's own nickname ---------------
 
 
 def test_plan_offers_stale_cleanup_when_ca_trusted_elsewhere(tmp_path):
-    """自有昵称下残留旧 CA、当前 CA 在异昵称已信任 → plan() 必须产出清理动作。
+    """An old CA is left under the tool's own nickname while the current CA is trusted under another nickname -> plan() must produce a cleanup action.
 
-    这个场景下**没有安装动作**：如果清理只写在安装路径里，
-    `apply()` 根本不会被调用（CLI 与 setup 在 plan 为空时直接跳过），
-    那段代码在生产上永远执行不到。
+    In this scenario there is **no install action**: if cleanup only lived in the install
+    path, `apply()` would never be called (CLI and setup skip when plan is empty), so that
+    code would never run in production.
     """
     old_ca = _make_ca(tmp_path, "old devproxy CA")
     ca = _make_ca(tmp_path, "current devproxy CA")
@@ -448,12 +456,14 @@ def test_plan_offers_stale_cleanup_when_ca_trusted_elsewhere(tmp_path):
     comp.ca_path.write_text(ca.read_text(encoding="utf-8"), encoding="utf-8")
 
     status = comp.check()
-    assert status.ok is True, "CA 确实已信任 —— 陈旧根是卫生问题，不是未就绪"
-    assert "陈旧" in status.detail, "detail 不能谎称完全没问题"
+    assert status.ok is True, (
+        "the CA really is trusted -- the stale root is a hygiene issue, not unreadiness"
+    )
+    assert "stale" in status.detail, "detail must not falsely claim everything is fine"
 
     actions = comp.plan()
     assert [a.command[0] for a in actions] == ["remove-stale-nss-ca"], (
-        "已信任时不该再计划安装动作，但必须计划清理动作"
+        "when already trusted, no install action should be planned, but a cleanup action must be"
     )
     assert actions[0].privileged is False
 
@@ -464,12 +474,14 @@ def test_plan_offers_stale_cleanup_when_ca_trusted_elsewhere(tmp_path):
             "Caddy Local Authority",
             "C,,",
         )
-    ], "自有昵称下的陈旧 CA 必须删掉，用户那条不能动"
-    assert comp.plan() == [], "清理之后应当彻底无事可做"
+    ], (
+        "the stale CA under the tool's own nickname must be deleted; the user's entry must not be touched"
+    )
+    assert comp.plan() == [], "after cleanup there should be absolutely nothing left to do"
 
 
 def test_apply_removes_stale_entry_while_repairing_flags(tmp_path):
-    """补信任标志那条路径也要清陈旧条目 —— 修好之后没人会回头看那个旧根。"""
+    """The trust-flag repair path must also clean up stale entries -- nobody looks back at the old root after the fix."""
     old_ca = _make_ca(tmp_path, "old devproxy CA")
     ca = _make_ca(tmp_path, "current devproxy CA")
     home = tmp_path / "home"
@@ -487,15 +499,16 @@ def test_apply_removes_stale_entry_while_repairing_flags(tmp_path):
 
 
 def test_production_construction_detects_stale_entry(tmp_path, isolated_home):
-    """**生产构造**（不注入 nss_dir）也必须能看见陈旧条目。
+    """**Production construction** (without injecting nss_dir) must also see the stale entry.
 
-    `NSS_DIR = Path("~/.pki/nssdb")` —— pathlib 不展开 `~`。组件构造时若不展开，
-    `(nss_dir / "cert9.db").exists()` 查的是「当前工作目录下名为 `~` 的目录」，
-    恒为 False。cli.py 的三处生产构造都不传 nss_dir，于是这整条清理逻辑
-    在任何真实用户身上都是死的。
+    `NSS_DIR = Path("~/.pki/nssdb")` -- pathlib does not expand `~`. If the component does
+    not expand it at construction, `(nss_dir / "cert9.db").exists()` checks "a directory
+    named `~` in the current working directory", which is always False. All three
+    production constructions in cli.py do not pass nss_dir, so this whole cleanup path is
+    dead for every real user.
 
-    本用例刻意**不注入** nss_dir：库放在 `$HOME/.pki/nssdb`（isolated_home），
-    平台也用默认的 `Path.home()`。
+    This case deliberately **does not inject** nss_dir: the DB lives in
+    `$HOME/.pki/nssdb` (isolated_home), and the platform also uses the default `Path.home()`.
     """
     old_ca = _make_ca(tmp_path, "old devproxy CA")
     ca = _make_ca(tmp_path, "current devproxy CA")
@@ -506,23 +519,25 @@ def test_production_construction_detects_stale_entry(tmp_path, isolated_home):
     paths = Paths(tmp_path / "config", tmp_path / "state", tmp_path / "data")
     paths.ensure_files()
     cfg = Config(storage=str(paths.data_dir))
-    platform = _SystemTrusted()  # user_home 默认 = Path.home() = isolated_home
-    comp = CertComponent(platform, paths, cfg)  # ← 生产构造：不传 nss_dir
+    platform = _SystemTrusted()  # user_home defaults to Path.home() = isolated_home
+    comp = CertComponent(platform, paths, cfg)  # <- production construction: no nss_dir
 
     comp.ca_path.parent.mkdir(parents=True, exist_ok=True)
     comp.ca_path.write_text(ca.read_text(encoding="utf-8"), encoding="utf-8")
 
-    assert comp.nss_dir == isolated_home / ".pki" / "nssdb", "`~` 必须被展开"
+    assert comp.nss_dir == isolated_home / ".pki" / "nssdb", "`~` must be expanded"
     assert (comp.nss_dir / "cert9.db").exists()
 
     status = comp.check()
     assert status.ok is True
-    assert "陈旧" in status.detail, "生产构造下 check() 必须报出陈旧条目"
+    assert "stale" in status.detail, (
+        "under production construction check() must report the stale entry"
+    )
     assert "devproxy trust" in status.hint
 
     actions = comp.plan()
     assert [a.command[0] for a in actions] == ["remove-stale-nss-ca"], (
-        "生产构造下 plan() 必须产出清理动作，否则 apply() 永远不会被调用"
+        "under production construction plan() must produce a cleanup action, otherwise apply() is never called"
     )
 
     comp.apply(actions)
@@ -536,7 +551,7 @@ def test_production_construction_detects_stale_entry(tmp_path, isolated_home):
 
 
 def test_apply_keeps_own_entry_when_it_is_the_current_ca(tmp_path):
-    """自有昵称下就是**当前** CA（已信任）→ 什么都不删。"""
+    """The tool's own nickname holds the **current** CA (already trusted) -> delete nothing."""
     ca = _make_ca(tmp_path)
     home = tmp_path / "home"
     db = _new_db(home / ".pki" / "nssdb")
@@ -550,40 +565,42 @@ def test_apply_keeps_own_entry_when_it_is_the_current_ca(tmp_path):
     assert _rows(db) == [("devproxy Local CA", "C,,")]
 
 
-# -- fix round 1：复查的库必须与写库一致 ------------------------------------
+# -- fix round 1: the re-check DB must match the write DB ------------------
 
 
 def test_apply_fails_loud_when_platform_db_differs(tmp_path):
-    """组件写入的库与平台复查的库不一致 → 显式报错，绝不静默查另一个库。"""
+    """The DB the component writes and the DB the platform re-checks differ -> explicit error; never silently check another DB."""
     ca = _make_ca(tmp_path)
     home = tmp_path / "home"
     platform_db = _new_db(home / ".pki" / "nssdb")
     other_db = _new_db(tmp_path / "injected" / "nssdb")
 
     comp, _platform, _paths, _cfg = _component(tmp_path, home, platform_db)
-    comp.nss_dir = other_db  # 故意让两边不一致
+    comp.nss_dir = other_db  # deliberately make the two sides disagree
     comp.ca_path.parent.mkdir(parents=True, exist_ok=True)
     comp.ca_path.write_text(ca.read_text(encoding="utf-8"), encoding="utf-8")
 
     with pytest.raises(RuntimeError) as ei:
         comp.apply([_install_action(comp.ca_path, other_db)])
     message = str(ei.value)
-    assert "不一致" in message
+    assert "mismatch" in message
     assert str(other_db) in message and str(platform_db) in message
-    assert _rows(other_db) == [], "报错前不得往任何一个库写东西"
+    assert _rows(other_db) == [], "must not write to either DB before erroring"
 
 
-# -- fix round 3：删除之后的复验 -------------------------------------------
+# -- fix round 3: re-verification after deletion ---------------------------
 
 
 def test_apply_reports_when_delete_silently_does_nothing(tmp_path):
-    """库**目录只读**时 `certutil -D` 返回 0 但什么都没删 —— 必须报错。
+    """When the DB **directory is read-only**, `certutil -D` returns 0 but deletes nothing -- must error.
 
-    实测（NSS 3.120）：`chmod 500 <db>` 后 `certutil -D` 返回码是 0，
-    `certutil -L` 里条目却还在。只看返回码就会报"清理成功"。
+    Measured (NSS 3.120): after `chmod 500 <db>`, `certutil -D` returns 0 while
+    `certutil -L` still lists the entry. Trusting the return code alone would report "cleaned up".
     """
     if os.geteuid() == 0:
-        pytest.skip("root 不受目录写权限限制，复现不出这个场景")
+        pytest.skip(
+            "root is not restricted by directory write permissions, so this scenario cannot be reproduced"
+        )
     old_ca = _make_ca(tmp_path, "old devproxy CA")
     ca = _make_ca(tmp_path, "current devproxy CA")
     home = tmp_path / "home"
@@ -601,7 +618,7 @@ def test_apply_reports_when_delete_silently_does_nothing(tmp_path):
             comp.apply([_remove_action(comp.ca_path, db)])
     finally:
         db.chmod(0o700)
-    assert "未生效" in str(ei.value)
+    assert "had no effect" in str(ei.value)
     assert [n for n, _ in _rows(db)] == ["devproxy Local CA", "Caddy Local Authority"], (
-        "这个场景下条目本来就删不掉 —— 测试的职责是断言我们**报错**了"
+        "the entries cannot be deleted in this scenario anyway -- the test's job is to assert that we **error**"
     )

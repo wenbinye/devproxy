@@ -1,8 +1,9 @@
-"""devproxy 命令行入口。
+"""devproxy command-line entry point.
 
-命令按模块拆分（一命令一文件）。接缝（平台、组件装配、交互判定等）
-统一放在 `_shared`，命令模块通过 `devproxy.cli._shared` 在**调用时**查找，
-所以测试对 `devproxy.cli._shared.<名字>` 打桩一定能生效。
+One module per command. The seams (platform, component assembly, interactivity
+checks, ...) live in `_shared`, and command modules look them up at **call time**
+through `devproxy.cli._shared`, so patching `devproxy.cli._shared.<name>` in tests
+is guaranteed to take effect.
 """
 
 from __future__ import annotations
@@ -22,11 +23,11 @@ from devproxy.gateway.store import RouteStoreError
 
 app = typer.Typer(
     cls=DevProxyGroup,
-    help="本地开发环境一键部署与域名网关",
+    help="One-command local dev environment and domain gateway",
     no_args_is_help=True,
 )
 
-# 导入即注册：每个模块用 @app.command() 把命令挂到 app 上。
+# Importing registers the command: each module attaches itself via @app.command().
 from devproxy.cli import config  # noqa: E402,F401
 from devproxy.cli import doctor  # noqa: E402,F401
 from devproxy.cli import down  # noqa: E402,F401
@@ -46,6 +47,6 @@ def main() -> None:
     try:
         app()
     except (CaddyEnvArchiveError, ConfigError, RouteStoreError, RouteTableError) as e:
-        # 兜底：领域异常绝不能以 traceback 形态漏到终端
+        # Last resort: a domain exception must never reach the terminal as a traceback
         err_console.print(f"devproxy: {escape(str(e))}")
         sys.exit(EXIT_FAIL)

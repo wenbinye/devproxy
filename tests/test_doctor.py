@@ -21,22 +21,22 @@ def test_report_is_unhealthy_when_any_fails():
 
 
 def test_build_report_isolates_check_exception():
-    """某个组件 check() 抛异常：记为失败行，其余组件照常列出。"""
+    """A component's check() raises: record a failure row and list the other components as usual."""
 
     class Boom:
         name = "boom"
 
         def check(self):
-            raise PermissionError("二进制不可执行")
+            raise PermissionError("binary is not executable")
 
     reports = build_report([Boom(), C("good", True)])
     assert [r.name for r in reports] == ["boom", "good"]
     assert reports[0].status.ok is False
-    assert "二进制不可执行" in reports[0].status.detail
+    assert "binary is not executable" in reports[0].status.detail
     assert reports[1].status.ok is True
 
 
-# -- CLI：doctor 只读 -------------------------------------------------------
+# -- CLI: doctor is read-only -------------------------------------------------
 
 
 class FakeCliComponent:
@@ -53,7 +53,7 @@ class FakeCliComponent:
         return []
 
     def apply(self, actions):
-        raise AssertionError("doctor 不应执行任何动作")
+        raise AssertionError("doctor must not execute any action")
 
 
 def _patch_cli(monkeypatch, tmp_path, components):
@@ -97,7 +97,7 @@ def test_cli_doctor_ok_when_healthy(tmp_path, monkeypatch):
 
 
 def test_cli_doctor_handles_check_exception_without_traceback(tmp_path, monkeypatch):
-    """组件 check() 抛异常只能变成一行失败报告，不能是 traceback。"""
+    """A component's check() raises: it may become one failure row, never a traceback."""
     from typer.testing import CliRunner
 
     from devproxy.cli import app
@@ -106,13 +106,13 @@ def test_cli_doctor_handles_check_exception_without_traceback(tmp_path, monkeypa
         name = "boom"
 
         def check(self):
-            raise PermissionError("二进制不可执行")
+            raise PermissionError("binary is not executable")
 
     _patch_cli(monkeypatch, tmp_path, [BoomCheck(), FakeCliComponent("good", True)])
     result = CliRunner().invoke(app, ["doctor"])
     assert result.exit_code == 3, result.output
     assert "boom" in result.stdout
-    assert "检查失败" in result.stdout
+    assert "check failed" in result.stdout
     assert "Traceback" not in result.output
 
 
@@ -128,7 +128,7 @@ def _patch_cli_with_config(monkeypatch, tmp_path, cfg):
 
 
 def test_cli_doctor_uses_config_dns_backend(tmp_path, monkeypatch):
-    """doctor 必须和 setup 用同一个 DNS 后端，否则 setup 成功后 doctor 仍报缺失。"""
+    """doctor must use the same DNS backend as setup; otherwise doctor keeps reporting missing after setup succeeds."""
     from typer.testing import CliRunner
 
     from devproxy.cli import app
@@ -169,7 +169,7 @@ def test_cli_doctor_accepts_dns_backend_override(tmp_path, monkeypatch):
 
 
 def test_cli_doctor_macos_rejects_resolved_backend(tmp_path, monkeypatch):
-    """macOS 显式 resolved：doctor 也要给参数错误，而不是组件 traceback。"""
+    """macOS with an explicit resolved backend: doctor must return an argument error, not a component traceback."""
     from types import SimpleNamespace
 
     from typer.testing import CliRunner
@@ -183,7 +183,7 @@ def test_cli_doctor_macos_rejects_resolved_backend(tmp_path, monkeypatch):
     monkeypatch.setattr("devproxy.cli._shared._platform", lambda: SimpleNamespace(name="mac"))
     result = CliRunner().invoke(app, ["doctor", "--dns-backend", "resolved"])
     assert result.exit_code == 2, result.output
-    assert "macOS 不支持 resolved" in result.output
+    assert "macOS does not support the resolved backend" in result.output
     assert "Traceback" not in result.output
 
 
@@ -199,11 +199,11 @@ def test_cli_doctor_rejects_invalid_dns_backend(tmp_path, monkeypatch):
     assert result.exit_code == 2
 
 
-# -- 现役配置里的通配站点块 -------------------------------------------------
+# -- wildcard site blocks in the live config ---------------------------------
 
 
 def test_find_wildcard_sites_detects_test_wildcard(tmp_path):
-    """工具的设计前提是"精确站点块、没有通配"。"""
+    """The tool's design premise is "exact site blocks, no wildcards"."""
     from devproxy.core.config import Config
     from devproxy.core.paths import Paths
     from devproxy.lifecycle.doctor import find_wildcard_sites
@@ -212,12 +212,12 @@ def test_find_wildcard_sites_detects_test_wildcard(tmp_path):
     paths.ensure_files()
     paths.sites_caddy.write_text("*.test {\n\ttls {\n\t\ton_demand\n\t}\n}\n", encoding="utf-8")
     found = find_wildcard_sites(paths, Config())
-    assert found, "必须发现 *.test 通配块"
+    assert found, "must detect the *.test wildcard block"
     assert any("*.test" in a for _, addrs in found for a in addrs)
 
 
 def test_find_wildcard_sites_ignores_other_suffix(tmp_path):
-    """别的后缀的通配块与本工具无关（*.local.yikuaigao.com 不算）。"""
+    """Wildcard blocks under other suffixes are unrelated to this tool (*.local.yikuaigao.com does not count)."""
     from devproxy.core.config import Config
     from devproxy.core.paths import Paths
     from devproxy.lifecycle.doctor import find_wildcard_sites
@@ -231,10 +231,11 @@ def test_find_wildcard_sites_ignores_other_suffix(tmp_path):
 
 
 def test_cli_doctor_reports_wildcard_and_exits_3(tmp_path, monkeypatch):
-    """现役配置里还有通配块 → doctor 必须报出来并给修复动作。
+    """A wildcard block still present in the live config -> doctor must report it and offer a fix.
 
-    通配块与工具生成的精确块同后缀时，Caddy 的 TLS 握手会整体失败；
-    迁移正是移除它的动作，所以修复提示就是"跑 setup 完成迁移"。
+    When a wildcard block shares the suffix with the exact blocks generated by
+    the tool, Caddy's TLS handshake fails entirely; migration is the action
+    that removes it, so the fix hint is "run setup to finish the migration".
     """
     from typer.testing import CliRunner
 
@@ -249,7 +250,7 @@ def test_cli_doctor_reports_wildcard_and_exits_3(tmp_path, monkeypatch):
     )
     result = CliRunner().invoke(app, ["doctor"])
     assert result.exit_code == 3, result.stdout
-    assert "通配" in result.stdout
+    assert "wildcard" in result.stdout
     assert "devproxy setup" in result.stdout
 
 
@@ -269,18 +270,18 @@ def test_cli_doctor_ok_when_no_wildcard(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.stdout
 
 
-# -- Firefox 的证书库提示（提示，不是缺陷） --------------------------------
+# -- Firefox certificate-store note (a note, not a defect) --------------------
 
 
 class FakeFirefoxComponent(FakeCliComponent):
-    """带 Firefox 提示的假组件。"""
+    """Fake component with a Firefox note."""
 
     def firefox_note(self):
-        return "Firefox 有自己的证书库（cert9.db），需要单独导入 CA"
+        return "Firefox has its own certificate store (cert9.db); import the CA separately"
 
 
 def test_cli_doctor_prints_firefox_note(tmp_path, monkeypatch):
-    """本机有 Firefox：doctor 必须把手动信任的解法说出来。"""
+    """Firefox present on this machine: doctor must state the manual-trust workaround."""
     from typer.testing import CliRunner
 
     from devproxy.cli import app
@@ -293,7 +294,7 @@ def test_cli_doctor_prints_firefox_note(tmp_path, monkeypatch):
 
 
 def test_cli_doctor_without_firefox_note_is_silent(tmp_path, monkeypatch):
-    """组件没有这个能力就当没有 —— 不能因此报错。"""
+    """A component without this capability is treated as absent -- that must not cause an error."""
     from typer.testing import CliRunner
 
     from devproxy.cli import app
@@ -305,14 +306,14 @@ def test_cli_doctor_without_firefox_note_is_silent(tmp_path, monkeypatch):
 
 
 def test_cli_doctor_survives_broken_firefox_note(tmp_path, monkeypatch):
-    """组件的提示方法抛异常时，doctor 仍然要跑完。"""
+    """When a component's note method raises, doctor must still finish."""
     from typer.testing import CliRunner
 
     from devproxy.cli import app
 
     class BoomNote(FakeCliComponent):
         def firefox_note(self):
-            raise RuntimeError("探不了")
+            raise RuntimeError("probe failed")
 
     _patch_cli(monkeypatch, tmp_path, [BoomNote("a", True)])
     result = CliRunner().invoke(app, ["doctor"])
@@ -321,7 +322,7 @@ def test_cli_doctor_survives_broken_firefox_note(tmp_path, monkeypatch):
 
 
 def test_cli_doctor_with_real_cert_component_hints_firefox(tmp_path, monkeypatch, isolated_home):
-    """真组件 + 真 Firefox profile：hint 与表格都要出现 Firefox 的指引。"""
+    """Real component + real Firefox profile: both the hint and the table must show the Firefox guidance."""
     from typer.testing import CliRunner
 
     from devproxy.cli import app

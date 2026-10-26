@@ -1,6 +1,6 @@
-"""迁移流程的测试。
+"""Tests for the migration flow.
 
-铁律：测试里绝不碰真实系统 —— 所有路径都指向 tmp_path，平台一律用 FakePlatform。
+Iron rule: tests never touch the real system -- every path points at tmp_path and the platform is always FakePlatform.
 """
 
 import warnings
@@ -33,7 +33,7 @@ from tests.support import UnreadablePath
 
 
 class _UnreadableUnitPlatform(FakePlatform):
-    """单元文件普通用户读不了（macOS system scope 的 0600 root 单元）。"""
+    """The unit file is unreadable by a normal user (a 0600 root unit in the macOS system scope)."""
 
     def service_unit_path(self, name):
         return UnreadablePath(str(super().service_unit_path(name)))
@@ -47,7 +47,7 @@ def _paths(tmp_path):
 
 
 def _legacy_state(tmp_path, unit_text=None, caddyfile_text=None):
-    """造一套遗留环境：单元 + 旧 Caddyfile，全在 tmp_path 下。"""
+    """Build a legacy environment: unit + old Caddyfile, all under tmp_path."""
     unit_path = tmp_path / "caddy.service"
     unit_path.write_text(
         unit_text
@@ -68,7 +68,7 @@ def _legacy_state(tmp_path, unit_text=None, caddyfile_text=None):
 
 
 def _run_migration(platform, paths, config, state, tmp_path):
-    """迁移，但把 dnsmasq 配置与 DNS 路由文件指向 tmp_path（绝不碰真实系统）。"""
+    """Migrate, but point the dnsmasq config and DNS route file at tmp_path (never touch the real system)."""
     return run_migration(
         MigrationRequest(
             platform=platform,
@@ -82,11 +82,11 @@ def _run_migration(platform, paths, config, state, tmp_path):
 
 
 def _migrate(platform, paths, config, state, tmp_path):
-    """只要备份对象的快捷方式。"""
+    """Convenience shortcut that returns only the backup object."""
     return _run_migration(platform, paths, config, state, tmp_path).backup
 
 
-# -- Caddyfile 拆分 ------------------------------------------------------------
+# -- Caddyfile splitting ------------------------------------------------------
 
 
 def test_split_keeps_personal_sites_and_drops_test_blocks():
@@ -133,7 +133,7 @@ def test_split_preserves_nested_braces():
 
 
 def test_split_drops_global_block():
-    """全局块不能进 sites.caddy —— 导入文件里出现第二个全局块，Caddy 直接报错。"""
+    """The global block must not go into sites.caddy -- a second global block in the imported file makes Caddy fail outright."""
     legacy = "{\n\tstorage file_system /data\n}\n\nlocalhost {\n\ttls internal\n}\n"
     personal, dropped = split_caddyfile(legacy)
     assert "storage" not in personal
@@ -141,19 +141,20 @@ def test_split_drops_global_block():
 
 
 def test_split_keeps_comments_with_their_site():
-    """站点块前面的注释属于用户自己的文档 —— 不能在拆分时丢掉。
+    """Comments before a site block are the user's own documentation -- they must not be dropped during the split.
 
-    真实用户的 Caddyfile 里每个站点前面都有说明；按"首行是不是注释"
-    判块的话，*.test 块会被当成个人站点留下来，与工具生成的站点冲突。
+    Real users put an explanation before every site in their Caddyfile; if blocks were
+    detected by "is the first line a comment", the *.test block would be kept as a
+    personal site and conflict with the tool-generated sites.
     """
     legacy = (
-        "# 本地网关\n"
+        "# local gateway\n"
         "*.local.yikuaigao.com {\n"
         "\ttls internal\n"
         "\treverse_proxy {$MINIKUBE_IP:192.168.49.2}:30800\n"
         "}\n"
         "\n"
-        "# 动态路由（由 devp 管理）\n"
+        "# dynamic routes (managed by devp)\n"
         "*.test {\n"
         "\ttls {\n"
         "\t\ton_demand\n"
@@ -163,26 +164,26 @@ def test_split_keeps_comments_with_their_site():
     )
     personal, dropped = split_caddyfile(legacy)
     assert "*.local.yikuaigao.com" in personal
-    assert "# 本地网关" in personal
+    assert "# local gateway" in personal
     assert "*.test" not in personal
     assert len(dropped) == 1
 
 
 def test_split_ignores_braces_inside_comments():
-    legacy = "# 注释里有 { 和 } 也不能影响切分\nlocalhost {\n\ttls internal\n}\n"
+    legacy = "# braces { and } inside comments must not affect the split\nlocalhost {\n\ttls internal\n}\n"
     personal, dropped = split_caddyfile(legacy)
     assert "localhost" in personal
     assert dropped == []
 
 
 def test_split_ignores_braces_inside_inline_comments():
-    """`example.test { # 站点 } 说明` 不能把块当场截断。"""
-    legacy = "example.test { # 站点 } 说明\n\treverse_proxy 1.2.3.4:80\n}\n"
+    """`example.test { # site } explanation` must not truncate the block."""
+    legacy = "example.test { # site } explanation\n\treverse_proxy 1.2.3.4:80\n}\n"
     personal, dropped = split_caddyfile_blocks(legacy)
     assert dropped == []
     assert len(personal) == 1
     assert "reverse_proxy" in personal[0]
-    assert len(personal[0].splitlines()) == 3, "块必须完整，不能被切成两段"
+    assert len(personal[0].splitlines()) == 3, "the block must be intact and not split in two"
 
 
 def test_split_ignores_braces_inside_quotes():
@@ -203,7 +204,7 @@ def test_split_ignores_braces_inside_quotes():
         "https://*.local.test {\n\trespond 404\n}\n",
         "*.test:8443 {\n\trespond 404\n}\n",
         "foo.test, *.test {\n\trespond 404\n}\n",
-        "*.test { # 通配 } 块\n\trespond 404\n}\n",
+        "*.test { # wildcard } block\n\trespond 404\n}\n",
     ],
 )
 def test_wildcard_blocks_are_dropped_in_all_forms(block):
@@ -236,11 +237,11 @@ def test_wildcard_detection_follows_custom_suffix():
 
 
 def test_wildcard_addresses_reports_scheme_form():
-    """doctor 必须能看见 https://*.test —— 漏报会让 TLS 握手整体失败。"""
+    """doctor must be able to see https://*.test -- missing it makes every TLS handshake fail."""
     assert wildcard_addresses("https://*.test {\n\trespond 404\n}\n") == ["https://*.test"]
 
 
-# -- 单元解析 -----------------------------------------------------------------
+# -- Unit parsing -------------------------------------------------------------
 
 
 def test_unit_config_path_parsed():
@@ -254,7 +255,7 @@ def test_unit_config_path_none_when_absent():
 
 
 def test_unit_config_path_accepts_equals_form():
-    """Caddy/pflag 接受 --config=path —— 这也是一种合法单元写法。"""
+    """Caddy/pflag accept --config=path -- that is also a valid unit form."""
     unit = "[Service]\nExecStart=/usr/bin/caddy run --config=/etc/caddy/Caddyfile\n"
     assert unit_config_path(unit, Path("/home/u")) == Path("/etc/caddy/Caddyfile")
 
@@ -280,7 +281,7 @@ def test_detect_legacy_accepts_equals_form(tmp_path):
     unit_path = tmp_path / "caddy.service"
     unit_path.write_text("[Service]\nExecStart=/bin/caddy run --config=/old/Caddyfile\n")
     state = detect_legacy(platform, paths, unit_dir=tmp_path, home=tmp_path)
-    assert state is not None, "--config=<path> 不能被当成没有遗留环境"
+    assert state is not None, "--config=<path> must not be treated as no legacy environment"
     assert state.config_path == Path("/old/Caddyfile")
     assert state.error is None
 
@@ -296,7 +297,7 @@ def test_unit_env_ignores_comments():
 
 
 def test_unit_env_handles_quoted_values_with_spaces():
-    """systemd 的 Environment= 是 shell 风格分词 —— 带空格的值不能被拆坏。"""
+    """systemd's Environment= uses shell-style word splitting -- values with spaces must not be broken apart."""
     unit = '[Service]\nEnvironment="GREETING=hello world" "MINIKUBE_IP=1.2.3.4"\n'
     assert unit_env(unit) == {"GREETING": "hello world", "MINIKUBE_IP": "1.2.3.4"}
 
@@ -312,7 +313,7 @@ def test_unit_environment_files_detected():
 
 
 def test_detect_legacy_refuses_environment_file(tmp_path):
-    """EnvironmentFile 的内容无法安全重写 —— 必须拒绝自动迁移并点名。"""
+    """The content of EnvironmentFile cannot be rewritten safely -- automatic migration must be refused and named."""
     paths = _paths(tmp_path)
     platform = FakePlatform()
     (tmp_path / "caddy.service").write_text(
@@ -326,7 +327,7 @@ def test_detect_legacy_refuses_environment_file(tmp_path):
     assert "/etc/default/caddy" in state.error
 
 
-# -- 遗留检测 -----------------------------------------------------------------
+# -- Legacy detection ---------------------------------------------------------
 
 
 def test_detect_legacy_returns_none_without_unit(tmp_path):
@@ -351,7 +352,7 @@ def test_detect_legacy_finds_existing_unit(tmp_path):
 
 
 def test_detect_legacy_none_when_unit_already_managed(tmp_path):
-    """单元已经指向工具的 Caddyfile —— 不是遗留环境，不能再迁一遍。"""
+    """The unit already points at the tool's Caddyfile -- not a legacy environment; do not migrate it again."""
     paths = _paths(tmp_path)
     paths.ensure_files()
     platform = FakePlatform()
@@ -363,10 +364,11 @@ def test_detect_legacy_none_when_unit_already_managed(tmp_path):
 
 
 def test_detect_legacy_returns_unconfirmed_state_when_config_unparseable(tmp_path):
-    """单元存在但解析不出 --config：不能当成“干净机器”。
+    """A unit exists but --config cannot be parsed: do not treat it as a "clean machine".
 
-    返回 None 会让 setup 直接重写用户的单元 —— 没有备份，手工配置全丢。
-    必须返回带 error 的状态，让迁移拒绝动手。
+    Returning None would make setup rewrite the user's unit directly -- with no
+    backup, all manual configuration is lost. Must return a state with an error so
+    migration refuses to touch anything.
     """
     paths = _paths(tmp_path)
     platform = FakePlatform()
@@ -378,11 +380,12 @@ def test_detect_legacy_returns_unconfirmed_state_when_config_unparseable(tmp_pat
 
 
 def test_detect_legacy_reads_unreadable_unit_through_elevation(tmp_path):
-    """单元普通用户读不了 —— 必须走提权会话去读。
+    """The unit is unreadable by a normal user -- it must be read through an elevated session.
 
-    macOS 的 system scope 单元在 /Library/LaunchDaemons，权限或归属不对时
-    普通用户读不了。读不到就当"没有遗留环境"，等于把用户手工维护的
-    Caddyfile 与环境变量悄悄接管掉 —— 那是迁移最不能犯的错。
+    macOS system-scope units live in /Library/LaunchDaemons; with wrong permissions
+    or ownership a normal user cannot read them. Treating an unreadable unit as "no
+    legacy environment" silently takes over the user's hand-maintained Caddyfile and
+    environment variables -- the worst mistake migration can make.
     """
     paths = _paths(tmp_path)
     platform = _UnreadableUnitPlatform()
@@ -394,11 +397,11 @@ def test_detect_legacy_reads_unreadable_unit_through_elevation(tmp_path):
         encoding="utf-8",
     )
     state = detect_legacy(platform, paths, home=tmp_path)
-    assert state is not None, "读不到单元不能当成没有遗留环境"
+    assert state is not None, "an unreadable unit must not be treated as no legacy environment"
     assert state.env == {"MINIKUBE_IP": "1.2.3.4"}
 
 
-# -- 迁移 ---------------------------------------------------------------------
+# -- Migration ----------------------------------------------------------------
 
 
 def test_migrate_backs_up_before_writing(tmp_path):
@@ -413,15 +416,15 @@ def test_migrate_backs_up_before_writing(tmp_path):
 
     state = LegacyState(unit_path=unit_path, config_path=old_cfg, env={"MINIKUBE_IP": "1.2.3.4"})
     backup = _migrate(platform, paths, Config(), state, tmp_path)
-    assert backup.entries, "迁移必须产生备份"
+    assert backup.entries, "migration must produce a backup"
     assert (backup.directory / "MANIFEST.txt").exists()
     assert (backup.directory / "manifest.json").exists()
-    # 原文件仍在备份里
+    # The original files are still in the backup
     assert any(e.original == unit_path and e.existed for e in backup.entries)
 
 
 def test_migrate_backup_covers_every_file_to_be_touched(tmp_path):
-    """每一个将被改动的既有文件都必须在备份里 —— 否则回滚留残留。"""
+    """Every existing file that will be touched must be in the backup -- otherwise rollback leaves residue."""
     paths = _paths(tmp_path)
     paths.ensure_files()
     platform = FakePlatform()
@@ -439,11 +442,11 @@ def test_migrate_backup_covers_every_file_to_be_touched(tmp_path):
         )
     )
     originals = {e.original for e in outcome.backup.entries}
-    assert state.unit_path in originals, "单元会被改写"
-    assert paths.sites_caddy in originals, "个人站点会被写入"
-    assert paths.caddyfile in originals, "主 Caddyfile 会被生成"
-    assert dnsmasq_conf in originals, "dnsmasq 配置会被合并改写"
-    assert tmp_path / "resolved.conf" in originals, "DNS 路由文件会被改写"
+    assert state.unit_path in originals, "the unit will be rewritten"
+    assert paths.sites_caddy in originals, "personal sites will be written"
+    assert paths.caddyfile in originals, "the main Caddyfile will be generated"
+    assert dnsmasq_conf in originals, "the dnsmasq config will be merged and rewritten"
+    assert tmp_path / "resolved.conf" in originals, "the DNS route file will be rewritten"
 
 
 def test_migrate_writes_sites_caddy_from_legacy(tmp_path):
@@ -461,7 +464,7 @@ def test_migrate_writes_sites_caddy_from_legacy(tmp_path):
 
 
 def test_migrate_does_not_overwrite_existing_sites_caddy(tmp_path):
-    """工具只 import sites.caddy —— 用户自己写的内容一个字都不能动。"""
+    """The tool only imports sites.caddy -- not a single character of the user's own content may be touched."""
     paths = _paths(tmp_path)
     paths.ensure_files()
     paths.sites_caddy.write_text('mine.example { respond "hi" }\n', encoding="utf-8")
@@ -469,14 +472,16 @@ def test_migrate_does_not_overwrite_existing_sites_caddy(tmp_path):
     state = _legacy_state(tmp_path, caddyfile_text="localhost {\n\ttls internal\n}\n")
     outcome = _run_migration(platform, paths, Config(), state, tmp_path)
     assert paths.sites_caddy.read_text() == 'mine.example { respond "hi" }\n'
-    assert any("sites.caddy" in n for n in outcome.notes), "必须告诉用户个人站点没被迁走"
+    assert any("sites.caddy" in n for n in outcome.notes), (
+        "must tell the user personal sites were not migrated"
+    )
 
 
 def test_migrate_states_that_personal_sites_are_no_longer_served(tmp_path):
-    """迁移后旧 Caddyfile 不再被 import —— 里面的站点就此不再被服务。
+    """After migration the old Caddyfile is no longer imported -- the sites inside it are no longer served.
 
-    这件事必须明说（点名文件与地址）：只留一句"未覆盖"会让人以为
-    个人站点还好好的，实际上它们已经 404 了。
+    This must be stated explicitly (naming the file and addresses): a bare "not
+    covered" makes people think their personal sites are fine when they are already 404ing.
     """
     paths = _paths(tmp_path)
     paths.ensure_files()
@@ -490,17 +495,20 @@ def test_migrate_states_that_personal_sites_are_no_longer_served(tmp_path):
     )
     outcome = _run_migration(platform, paths, Config(), state, tmp_path)
     joined = "\n".join(outcome.notes)
-    assert "不再被服务" in joined, f"必须明说站点不再被服务：{outcome.notes}"
-    assert "localhost" in joined and "api.example.com" in joined, "必须点名涉及的地址"
-    assert str(state.config_path) in joined, "必须点名要从哪个文件合并"
-    assert str(paths.sites_caddy) in joined, "必须点名要合并到哪个文件"
+    assert "will no longer be served" in joined, (
+        f"must state that sites are no longer served: {outcome.notes}"
+    )
+    assert "localhost" in joined and "api.example.com" in joined, "must name the affected addresses"
+    assert str(state.config_path) in joined, "must name the file to merge from"
+    assert str(paths.sites_caddy) in joined, "must name the file to merge into"
 
 
 def test_migrate_unit_falls_back_to_legacy_binary_when_config_binary_missing(tmp_path):
-    """二进制还没下载时，单元不能指向一个不存在的文件。
+    """When the binary has not been downloaded yet, the unit must not point at a nonexistent file.
 
-    迁移发生在组件流程（下载）之前 —— 照抄 config 里的路径会让正在跑的
-    Caddy 被改坏（单元指向不存在的二进制），而且没有东西能把它拉起来。
+    Migration happens before the component flow (download) -- copying the path from
+    config would break the running Caddy (the unit points at a nonexistent binary),
+    and nothing could bring it back up.
     """
     paths = _paths(tmp_path)
     paths.ensure_files()
@@ -521,7 +529,9 @@ def test_migrate_unit_falls_back_to_legacy_binary_when_config_binary_missing(tmp
     )
     unit = platform.services["caddy"]
     assert f"ExecStart={legacy_bin} run" in unit, unit
-    assert any("沿用遗留" in n for n in outcome.notes), f"必须说明用了哪个二进制：{outcome.notes}"
+    assert any("keep using the legacy" in n for n in outcome.notes), (
+        f"must state which binary was used: {outcome.notes}"
+    )
 
 
 def test_migrate_preserves_unit_env(tmp_path):
@@ -541,7 +551,7 @@ def test_migrate_preserves_unit_env(tmp_path):
 
 
 def test_migrate_persists_unit_env_for_later_setup(tmp_path):
-    """后续 setup 重装单元时也必须带上 MINIKUBE_IP —— 个人站点依赖它。"""
+    """When setup later reinstalls the unit it must also include MINIKUBE_IP -- personal sites depend on it."""
     from devproxy.components.caddy import CaddyComponent
     from devproxy.platform.base import Action
 
@@ -554,7 +564,9 @@ def test_migrate_persists_unit_env_for_later_setup(tmp_path):
     comp = CaddyComponent(platform, paths, Config())
     assert comp.extra_env == {"MINIKUBE_IP": "1.2.3.4"}
     platform.services.clear()
-    comp.apply([Action(description="装单元", kind="run", command=["install-service", "caddy"])])
+    comp.apply(
+        [Action(description="install unit", kind="run", command=["install-service", "caddy"])]
+    )
     assert "MINIKUBE_IP=1.2.3.4" in platform.services["caddy"]
 
 
@@ -572,7 +584,7 @@ def test_migrate_writes_tool_caddyfile_and_points_unit_at_it(tmp_path):
 
 
 def test_migrate_leaves_legacy_caddyfile_untouched(tmp_path):
-    """旧 Caddyfile 只被备份，不被改写 —— 它是回滚时要还原的东西。"""
+    """The old Caddyfile is only backed up, never rewritten -- it is what rollback restores."""
     paths = _paths(tmp_path)
     paths.ensure_files()
     platform = FakePlatform()
@@ -582,22 +594,22 @@ def test_migrate_leaves_legacy_caddyfile_untouched(tmp_path):
 
 
 def test_migrate_aborts_when_backup_target_is_not_a_regular_file(tmp_path):
-    """备份失败 → 迁移中止，一个文件都不改。"""
+    """Backup failure -> migration aborts without changing a single file."""
     paths = _paths(tmp_path)
     paths.ensure_files()
     platform = FakePlatform()
     state = _legacy_state(tmp_path)
-    # 把旧 Caddyfile 换成符号链接 —— 备份器必须拒绝，而不是记成"原本不存在"
+    # Replace the old Caddyfile with a symlink -- the backupper must refuse, not record it as "did not exist"
     state.config_path.unlink()
     state.config_path.symlink_to(tmp_path / "target.txt")
     with pytest.raises(MigrationError):
         _migrate(platform, paths, Config(), state, tmp_path)
-    assert platform.services == {}, "备份失败时不得改写单元"
+    assert platform.services == {}, "the unit must not be rewritten when backup fails"
     assert paths.sites_caddy.read_text(encoding="utf-8") == ""
 
 
 def test_migrate_restores_backup_when_rewrite_fails(tmp_path, monkeypatch):
-    """改写中途失败 → 按备份还原，机器不能停在半迁移状态。"""
+    """A failure in the middle of rewriting -> restore from backup; never leave the machine half-migrated."""
     paths = _paths(tmp_path)
     paths.ensure_files()
     platform = FakePlatform()
@@ -605,7 +617,7 @@ def test_migrate_restores_backup_when_rewrite_fails(tmp_path, monkeypatch):
     original_unit = state.unit_path.read_text(encoding="utf-8")
 
     def boom(*args, **kwargs):
-        raise RuntimeError("写单元失败")
+        raise RuntimeError("failed to write unit")
 
     monkeypatch.setattr(platform, "install_service", boom)
     with pytest.raises(MigrationError):
@@ -614,10 +626,11 @@ def test_migrate_restores_backup_when_rewrite_fails(tmp_path, monkeypatch):
 
 
 def test_migrate_restores_backup_on_keyboard_interrupt(tmp_path, monkeypatch):
-    """Ctrl-C 也是失败路径：必须还原，且报错里带上备份位置。
+    """Ctrl-C is also a failure path: must restore, and the error must include the backup location.
 
-    KeyboardInterrupt 是 BaseException —— 只接 Exception 会把机器留在
-    “写了 sites.caddy、还没换单元”的半迁移状态，用户还不知道备份在哪。
+    KeyboardInterrupt is a BaseException -- catching only Exception would leave the
+    machine in a half-migrated state ("sites.caddy written, unit not swapped yet"),
+    and the user would not know where the backup is.
     """
     paths = _paths(tmp_path)
     paths.ensure_files()
@@ -635,30 +648,34 @@ def test_migrate_restores_backup_on_keyboard_interrupt(tmp_path, monkeypatch):
     with pytest.raises(MigrationError) as ei:
         _migrate(platform, paths, Config(), state, tmp_path)
     message = str(ei.value)
-    assert "中断" in message
+    assert "interrupted" in message
     assert "devproxy setup --rollback" in message
     assert state.unit_path.read_text(encoding="utf-8") == original_unit
     assert paths.sites_caddy.read_text(encoding="utf-8").strip() == ""
-    assert any("丢弃" in n for n in ei.value.notes), "失败前的提示也必须交给调用方"
+    assert any("discarded" in n for n in ei.value.notes), (
+        "notes emitted before the failure must also reach the caller"
+    )
 
 
 def test_migrate_refuses_unconfirmed_legacy_state(tmp_path):
-    """无法确认的遗留单元：拒绝迁移，一个文件都不动、也不建备份目录。"""
+    """Unconfirmable legacy unit: refuse migration without touching a file or creating the backup directory."""
     paths = _paths(tmp_path)
     platform = FakePlatform()
     unit_path = tmp_path / "caddy.service"
     unit_path.write_text("ORIGINAL\n", encoding="utf-8")
-    state = LegacyState(unit_path=unit_path, config_path=None, error="无法确认遗留 caddy 单元")
+    state = LegacyState(
+        unit_path=unit_path, config_path=None, error="cannot confirm legacy caddy unit"
+    )
     with pytest.raises(MigrationError) as ei:
         _migrate(platform, paths, Config(), state, tmp_path)
-    assert "无法确认" in str(ei.value)
+    assert "cannot confirm" in str(ei.value)
     assert unit_path.read_text(encoding="utf-8") == "ORIGINAL\n"
     assert platform.services == {}
     assert not paths.backup_dir.exists()
 
 
 def test_run_migration_returns_notes_in_outcome(tmp_path):
-    """notes 是返回值的一部分，不再靠调用方传可变列表。"""
+    """notes are part of the return value, no longer passed in by the caller as a mutable list."""
     paths = _paths(tmp_path)
     paths.ensure_files()
     platform = FakePlatform()
@@ -677,11 +694,11 @@ def test_run_migration_returns_notes_in_outcome(tmp_path):
         )
     )
     assert outcome.backup.entries
-    assert any("丢弃" in n for n in outcome.notes)
+    assert any("discarded" in n for n in outcome.notes)
     assert outcome.notes is not None
 
 
-# -- 回滚 ---------------------------------------------------------------------
+# -- Rollback -----------------------------------------------------------------
 
 
 def test_rollback_restores_unit_and_caddyfile(tmp_path):
@@ -704,20 +721,20 @@ def test_rollback_restores_unit_and_caddyfile(tmp_path):
 
 
 def test_rollback_removes_files_that_did_not_exist_before(tmp_path):
-    """原本不存在 → 还原时删除 —— 工具造的文件不能留在机器上。"""
+    """Did not exist before -> delete on restore; tool-created files must not be left on the machine."""
     paths = _paths(tmp_path)
     paths.ensure_files()
     platform = FakePlatform()
     state = _legacy_state(tmp_path)
     backup = _migrate(platform, paths, Config(), state, tmp_path)
-    # 主 Caddyfile 迁移前不存在，迁移后被生成
+    # The main Caddyfile did not exist before migration; it was generated afterwards
     assert paths.caddyfile.exists()
     rollback(backup)
-    assert not paths.caddyfile.exists(), "工具生成的 Caddyfile 必须被删掉"
+    assert not paths.caddyfile.exists(), "the tool-generated Caddyfile must be deleted"
 
 
 def test_rollback_restores_sites_caddy_to_empty(tmp_path):
-    """sites.caddy 迁移前是空的（工具建的）→ 还原后不能留个人站点残留。"""
+    """sites.caddy was empty before migration (created by the tool) -> restore must not leave personal site residue."""
     paths = _paths(tmp_path)
     paths.ensure_files()
     platform = FakePlatform()
@@ -729,7 +746,7 @@ def test_rollback_restores_sites_caddy_to_empty(tmp_path):
 
 
 def test_rollback_from_loaded_backup(tmp_path):
-    """回滚目录可以事后重新加载 —— manifest.json 是机器可读的。"""
+    """The rollback directory can be reloaded later -- manifest.json is machine-readable."""
     paths = _paths(tmp_path)
     paths.ensure_files()
     platform = FakePlatform()
@@ -741,14 +758,15 @@ def test_rollback_from_loaded_backup(tmp_path):
     assert "ExecStart" in state.unit_path.read_text(encoding="utf-8")
 
 
-# -- DNS 后端一致性（备份的必须是真正会被改动的那个文件）--------------------
+# -- DNS backend consistency (the backup must be the file that will actually be changed) --
 
 
 def test_default_dns_route_follows_explicit_backend(tmp_path):
-    """用户显式指定后端时，备份的 drop-in 必须跟着换。
+    """When the user explicitly selects a backend, the backed-up drop-in must follow it.
 
-    组件写 /etc/dnsmasq.d/devproxy.conf，备份的却是 resolved 那个文件 ——
-    被改动的文件不在备份里，回滚就删不掉它。
+    The component writes /etc/dnsmasq.d/devproxy.conf, but the resolved file was
+    backed up -- the file actually changed is not in the backup, so rollback cannot
+    delete it.
     """
     paths = _paths(tmp_path)
     platform = FakePlatform()
@@ -760,18 +778,18 @@ def test_default_dns_route_follows_explicit_backend(tmp_path):
     assert system != resolved
 
 
-# -- 配置校验：换单元之前必须让 caddy 自己验一遍 ------------------------------
+# -- Config validation: caddy itself must validate before swapping the unit ----
 
 
 def test_migrate_aborts_when_caddy_validate_fails(tmp_path, monkeypatch):
-    """个人站点里有语法错误时，迁移必须中止 —— 单元一个字都不能改。"""
+    """A syntax error in personal sites must abort migration -- not one character of the unit may change."""
     paths = _paths(tmp_path)
     paths.ensure_files()
     platform = FakePlatform()
     state = _legacy_state(tmp_path)
     original_unit = state.unit_path.read_text(encoding="utf-8")
 
-    # 造一个"存在但校验不过"的 caddy 二进制
+    # Build a caddy binary that exists but fails validation
     binary = tmp_path / "caddy"
     binary.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
     config = Config(caddy_bin=str(binary))
@@ -785,29 +803,34 @@ def test_migrate_aborts_when_caddy_validate_fails(tmp_path, monkeypatch):
 
     with pytest.raises(MigrationError) as ei:
         _migrate(platform, paths, config, state, tmp_path)
-    assert "校验" in str(ei.value)
+    assert "config validation failed" in str(ei.value)
     assert state.unit_path.read_text(encoding="utf-8") == original_unit
-    assert not paths.caddyfile.exists(), "校验不过就不该写主 Caddyfile"
-    assert paths.sites_caddy.read_text(encoding="utf-8").strip() == "", "sites.caddy 必须被还原"
+    assert not paths.caddyfile.exists(), (
+        "the main Caddyfile must not be written when validation fails"
+    )
+    assert paths.sites_caddy.read_text(encoding="utf-8").strip() == "", (
+        "sites.caddy must be restored"
+    )
 
 
 def test_migrate_skips_validation_when_binary_missing(tmp_path):
-    """二进制还没下载时不能因此判定迁移失败 —— setup 会下载后再校验。"""
+    """A missing binary must not be treated as migration failure -- setup validates after downloading."""
     paths = _paths(tmp_path)
     paths.ensure_files()
     platform = FakePlatform()
     state = _legacy_state(tmp_path)
     config = Config(caddy_bin=str(tmp_path / "absent"))
     outcome = _run_migration(platform, paths, config, state, tmp_path)
-    assert any("跳过配置校验" in n for n in outcome.notes)
+    assert any("skipping config validation" in n for n in outcome.notes)
     assert paths.caddyfile.exists()
 
 
 def test_validate_falls_back_to_legacy_unit_binary(tmp_path, monkeypatch):
-    """config.toml 里的 caddy 不存在时，改用遗留单元里的二进制校验。
+    """When the caddy in config.toml does not exist, validate with the binary from the legacy unit.
 
-    "换单元前必校验"不能因为配置里的路径还没下载就变成空话 ——
-    遗留单元里的 ExecStart 指向的正是这台机器上真正在跑的 caddy。
+    "Always validate before swapping the unit" must not become empty words just
+    because the configured path has not been downloaded yet -- the legacy unit's
+    ExecStart points at the caddy actually running on this machine.
     """
     paths = _paths(tmp_path)
     paths.ensure_files()
@@ -834,14 +857,14 @@ def test_validate_falls_back_to_legacy_unit_binary(tmp_path, monkeypatch):
         tmp_path,
     )
     validate_calls = [c for c in calls if "validate" in c]
-    assert validate_calls, "必须真的跑一次 caddy validate"
+    assert validate_calls, "caddy validate must actually run once"
     assert validate_calls[0][0] == str(legacy_bin)
-    assert any("遗留单元" in n for n in outcome.notes)
-    assert not any("跳过配置校验" in n for n in outcome.notes)
+    assert any("from the legacy unit" in n for n in outcome.notes)
+    assert not any("skipping config validation" in n for n in outcome.notes)
 
 
 def test_validate_still_skips_when_no_binary_anywhere(tmp_path):
-    """配置与遗留单元里都没有二进制 —— 只能跳过，但必须留下提示。"""
+    """There is no binary in either config or the legacy unit -- can only skip, but must leave a hint."""
     paths = _paths(tmp_path)
     paths.ensure_files()
     platform = FakePlatform()
@@ -853,7 +876,7 @@ def test_validate_still_skips_when_no_binary_anywhere(tmp_path):
         state,
         tmp_path,
     )
-    assert any("跳过配置校验" in n for n in outcome.notes)
+    assert any("skipping config validation" in n for n in outcome.notes)
 
 
 def test_unit_exec_start_parsed():
@@ -868,7 +891,7 @@ def test_unit_exec_start_parsed():
     assert unit_exec_start("[Service]\nEnvironment=X=1\n") is None
 
 
-# -- storage 连续性：CA 不能换地方 -------------------------------------------
+# -- storage continuity: the CA must not move --------------------------------
 
 
 def test_legacy_storage_path_parsed():
@@ -881,12 +904,12 @@ def test_legacy_storage_path_none_without_global_block():
 
 
 def test_legacy_storage_path_strips_inline_comment():
-    """`storage file_system /data # old ca` 的路径是 /data，不是带注释的整串。"""
+    """For `storage file_system /data # old ca` the path is /data, not the whole string including the comment."""
     assert legacy_storage_path("{\n\tstorage file_system /data # old ca\n}\n") == Path("/data")
 
 
 def test_legacy_storage_path_keeps_quoted_path_with_spaces():
-    text = '{\n\tstorage file_system "/home/u/my caddy" # 旧 CA\n}\n'
+    text = '{\n\tstorage file_system "/home/u/my caddy" # old CA\n}\n'
     assert legacy_storage_path(text) == Path("/home/u/my caddy")
 
 
@@ -896,7 +919,7 @@ def test_legacy_storage_path_keeps_hash_inside_quotes():
 
 
 def test_migrate_keeps_legacy_storage_so_ca_stays(tmp_path):
-    """遗留 storage 与配置不同时必须沿用遗留的 —— 换了 CA 浏览器就不信任了。"""
+    """When legacy storage differs from config, the legacy one must be kept -- changing the CA makes browsers stop trusting it."""
     paths = _paths(tmp_path)
     paths.ensure_files()
     platform = FakePlatform()
@@ -919,10 +942,12 @@ def test_migrate_keeps_legacy_storage_so_ca_stays(tmp_path):
     )
     caddyfile = paths.caddyfile.read_text(encoding="utf-8")
     assert f"storage file_system {legacy_storage}" in caddyfile
-    assert any("storage" in n and str(legacy_storage) in n for n in outcome.notes), "差异必须说出来"
-    # 生效配置必须带回：setup 要用它继续组件流程，不能写回旧 storage
+    assert any("storage" in n and str(legacy_storage) in n for n in outcome.notes), (
+        "the difference must be stated"
+    )
+    # The effective config must be carried back: setup uses it to continue the component flow and must not write back the old storage
     assert outcome.config.storage_path == legacy_storage
-    # 留档：之后的 setup 必须用同一个地方，否则 CA 会重新生成
+    # Archive: later setup must use the same place, otherwise the CA is regenerated
     assert str(legacy_storage) in paths.caddy_storage.read_text(encoding="utf-8")
 
 
@@ -938,18 +963,18 @@ def test_resolve_storage_details_keeps_config_when_same(tmp_path):
     assert same.storage_path == config.storage_path
 
 
-# -- 失败路径要给出备份位置（I5）--------------------------------------------
+# -- Failure paths must give the backup location (I5) -------------------------
 
 
 def test_failure_message_points_at_backup_dir(tmp_path, monkeypatch):
-    """还原失败时用户最需要知道的是：备份在哪、怎么手动还原。"""
+    """When restore fails, what the user most needs to know is: where the backup is and how to restore manually."""
     paths = _paths(tmp_path)
     paths.ensure_files()
     platform = FakePlatform()
     state = _legacy_state(tmp_path)
 
     def boom(*args, **kwargs):
-        raise RuntimeError("写单元失败")
+        raise RuntimeError("failed to write unit")
 
     monkeypatch.setattr(platform, "install_service", boom)
     with pytest.raises(MigrationError) as ei:
@@ -959,11 +984,11 @@ def test_failure_message_points_at_backup_dir(tmp_path, monkeypatch):
     assert "devproxy setup --rollback" in message, message
 
 
-# -- 备份目标与丢弃提示 -------------------------------------------------------
+# -- Backup targets and discard notes -----------------------------------------
 
 
 def test_backup_covers_caddy_env_and_storage(tmp_path):
-    """迁移留下的留档（环境变量、storage）也必须进备份 —— 否则回滚后还在。"""
+    """Archives left by migration (environment variables, storage) must also be backed up -- otherwise they survive rollback."""
     paths = _paths(tmp_path)
     paths.ensure_files()
     platform = FakePlatform()
@@ -975,7 +1000,7 @@ def test_backup_covers_caddy_env_and_storage(tmp_path):
 
 
 def test_dropped_blocks_note_lists_addresses(tmp_path):
-    """丢弃哪些块必须点名 —— 用户得能看出里面有没有自己手写的 *.test 块。"""
+    """Discarded blocks must be named -- the user needs to see whether any hand-written *.test block is among them."""
     paths = _paths(tmp_path)
     paths.ensure_files()
     platform = FakePlatform()
@@ -997,21 +1022,22 @@ def test_dropped_blocks_note_lists_addresses(tmp_path):
             dns_route=tmp_path / "resolved.conf",
         )
     )
-    dropped_notes = [n for n in outcome.notes if "丢弃" in n]
+    dropped_notes = [n for n in outcome.notes if "discarded" in n]
     assert dropped_notes, outcome.notes
     assert "*.test" in dropped_notes[0]
     assert "http://*.test" in dropped_notes[0]
-    assert "备份" in dropped_notes[0]
+    assert "backup" in dropped_notes[0]
 
 
 def test_migrate_creates_import_targets_before_validation(tmp_path, monkeypatch):
-    """校验之前 import 目标必须已经存在 —— caddy 遇到缺失的 import 会直接拒绝。
+    """Import targets must already exist before validation -- caddy rejects a missing import outright.
 
-    迁移是 API，不能假设调用方已经建好 sites.caddy / routes.caddy：
-    校验用的主 Caddyfile 里就 import 这两个文件，缺一个 caddy 必然报
-    "file not found"，迁移会被自己的校验拦死。
+    Migration is an API; it must not assume the caller has already created
+    sites.caddy / routes.caddy: the main Caddyfile used for validation imports both,
+    and if either is missing caddy necessarily reports "file not found", so migration
+    would be blocked by its own validation.
     """
-    paths = _paths(tmp_path)  # 故意不 ensure_files()
+    paths = _paths(tmp_path)  # deliberately not ensure_files()
     platform = FakePlatform()
     state = _legacy_state(tmp_path)
     binary = tmp_path / "caddy"
@@ -1028,19 +1054,19 @@ def test_migrate_creates_import_targets_before_validation(tmp_path, monkeypatch)
                 if line.strip().startswith("import ")
             ]
             seen["missing"] = [t for t in targets if not Path(t).exists()]
-            return (1, "import 目标不存在") if seen["missing"] else (0, "")
+            return (1, "import target does not exist") if seen["missing"] else (0, "")
         return 0, ""
 
     monkeypatch.setattr(platform, "run", fake_run)
     _migrate(platform, paths, config, state, tmp_path)
-    assert seen.get("missing") == [], "校验时 import 目标必须已经存在"
+    assert seen.get("missing") == [], "import targets must already exist during validation"
 
 
-# -- storage 一次性解析 -------------------------------------------------------
+# -- One-shot storage resolution ----------------------------------------------
 
 
 def test_resolve_storage_details_returns_legacy_path(tmp_path):
-    """一次解析同时给出路径与提示 —— 调用方不必再读一遍遗留 Caddyfile。"""
+    """One parse gives both the path and the note -- the caller need not read the legacy Caddyfile again."""
     state = _legacy_state(
         tmp_path,
         caddyfile_text="{\n\tstorage file_system /legacy\n}\n\nlocalhost {\n}\n",
@@ -1062,34 +1088,34 @@ def test_resolve_storage_details_returns_path_when_already_same(tmp_path):
     assert note is None
 
 
-# -- 留档：原子写入与损坏告警 -------------------------------------------------
+# -- Archives: atomic writes and corruption warnings --------------------------
 
 
 def test_load_extra_env_fails_loudly_on_corrupt_archive(tmp_path):
-    """留档存在却解析不了 → 抛异常，绝不静默当成空（会丢 MINIKUBE_IP）。"""
+    """The archive exists but cannot be parsed -> raise, never silently treat it as empty (that would lose MINIKUBE_IP)."""
     from devproxy.core.caddy_env import CaddyEnvArchiveError
     from devproxy.core.caddy_env import load_extra_env
 
     paths = _paths(tmp_path)
     paths.ensure_files()
-    paths.caddy_env.write_text("{ 截断", encoding="utf-8")
+    paths.caddy_env.write_text("{ truncated", encoding="utf-8")
     with pytest.raises(CaddyEnvArchiveError) as ei:
         load_extra_env(paths)
     message = str(ei.value)
-    assert str(paths.caddy_env) in message, "必须点名是哪个文件"
-    assert "修复" in message and "删除" in message, "必须给出修复办法"
-    assert "MINIKUBE_IP" in message, "必须说明后果"
+    assert str(paths.caddy_env) in message, "must name which file"
+    assert "fix" in message and "delete" in message, "must give a way to fix it"
+    assert "MINIKUBE_IP" in message, "must explain the consequence"
 
 
 def test_load_extra_env_rejects_non_object_json(tmp_path):
-    """合法 JSON 但不是对象（如数组）同样是坏留档。"""
+    """Valid JSON that is not an object (e.g. an array) is equally a bad archive."""
     from devproxy.core.caddy_env import CaddyEnvArchiveError
     from devproxy.core.caddy_env import load_extra_env
 
     paths = _paths(tmp_path)
     paths.ensure_files()
     paths.caddy_env.write_text('["MINIKUBE_IP", "1.2.3.4"]', encoding="utf-8")
-    with pytest.raises(CaddyEnvArchiveError, match="JSON 对象"):
+    with pytest.raises(CaddyEnvArchiveError, match="not a JSON object"):
         load_extra_env(paths)
 
 
@@ -1114,13 +1140,13 @@ def test_load_extra_env_roundtrip(tmp_path):
 def test_load_legacy_storage_warns_on_corrupt_archive(tmp_path):
     paths = _paths(tmp_path)
     paths.ensure_files()
-    paths.caddy_storage.write_text("{ 截断", encoding="utf-8")
-    with pytest.warns(UserWarning, match="storage 留档"):
+    paths.caddy_storage.write_text("{ truncated", encoding="utf-8")
+    with pytest.warns(UserWarning, match="storage archive"):
         assert load_legacy_storage(paths) is None
 
 
 def test_save_extra_env_is_atomic_when_replace_fails(tmp_path, monkeypatch):
-    """写入失败时目标文件保持旧内容，且不留下临时文件。"""
+    """When the write fails the target file keeps its old content and no temp file is left behind."""
     import devproxy.core.paths as paths_mod
     from devproxy.core.caddy_env import save_extra_env
 
@@ -1129,14 +1155,14 @@ def test_save_extra_env_is_atomic_when_replace_fails(tmp_path, monkeypatch):
     before = paths.caddy_env.read_text(encoding="utf-8")
 
     def boom(src, dst):
-        raise OSError("磁盘已满")
+        raise OSError("disk full")
 
     monkeypatch.setattr(paths_mod.os, "replace", boom)
     with pytest.raises(OSError):
         save_extra_env(paths, {"A": "2"})
     assert paths.caddy_env.read_text(encoding="utf-8") == before
     leftovers = [p.name for p in paths.caddy_env.parent.iterdir() if p.name.startswith(".")]
-    assert leftovers == [], f"临时文件必须清理：{leftovers}"
+    assert leftovers == [], f"temporary files must be cleaned up: {leftovers}"
 
 
 def test_save_legacy_storage_is_atomic_when_replace_fails(tmp_path, monkeypatch):
@@ -1149,7 +1175,7 @@ def test_save_legacy_storage_is_atomic_when_replace_fails(tmp_path, monkeypatch)
     before = paths.caddy_storage.read_text(encoding="utf-8")
 
     def boom(src, dst):
-        raise OSError("磁盘已满")
+        raise OSError("disk full")
 
     monkeypatch.setattr(paths_mod.os, "replace", boom)
     with pytest.raises(OSError):
@@ -1157,7 +1183,7 @@ def test_save_legacy_storage_is_atomic_when_replace_fails(tmp_path, monkeypatch)
     assert paths.caddy_storage.read_text(encoding="utf-8") == before
 
 
-# -- 注解必须能解析（get_type_hints 不应抛 NameError）--------------------------
+# -- Annotations must resolve (get_type_hints must not raise NameError) -------
 
 
 def test_public_type_hints_resolve():

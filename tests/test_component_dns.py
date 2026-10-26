@@ -1,7 +1,7 @@
-"""DNS 路由组件测试：resolved / system 双后端。
+"""DNS route component tests: resolved / system backends.
 
-不写 /etc：apply 相关用例通过 monkeypatch 目标路径到 tmp_path，
-服务操作走 FakePlatform。
+Does not write /etc: apply-related cases redirect target paths to tmp_path via
+monkeypatch, and service operations go through FakePlatform.
 """
 
 import os
@@ -17,7 +17,8 @@ from devproxy.core.config import Config
 from devproxy.core.paths import Paths
 from devproxy.platform.fake import FakePlatform
 
-# 夹具生效之前先记下生产值 —— 守卫用例靠它断言"测试隔离没有把生产路径也改掉"。
+# Record the production values before the fixture takes effect -- the guard case uses them to
+# assert that test isolation did not also change the production paths.
 _REAL_RESOLVED_CONF = dns_module.RESOLVED_CONF
 _REAL_SYSTEM_DNSMASQ_CONF = dns_module.SYSTEM_DNSMASQ_CONF
 _REAL_RESOLVER_DIR = dns_module.RESOLVER_DIR
@@ -25,15 +26,18 @@ _REAL_RESOLVER_DIR = dns_module.RESOLVER_DIR
 
 @pytest.fixture(autouse=True)
 def isolated_dns_paths(tmp_path, monkeypatch):
-    """把三处解析器文件的绝对路径整体重定向到临时目录。
+    """Redirect the absolute paths of the three resolver files into a temp directory.
 
-    `plan()` 的就绪判据是**直接读**目标文件的内容，而这些路径都在 /etc 下 ——
-    conftest 的 `isolated_home` 夹具管不到它们（它只重定向 HOME/XDG_*）。
-    不隔离的话，一台**真跑过 `devproxy setup`** 的机器上，真实文件内容恰好
-    与渲染结果一致，`plan()` 返回空，所有断言"有动作"的用例集体变红，
-    而代码本身没有任何问题。这不是被测代码的缺陷，是测试没把宿主状态隔离掉。
+    `plan()`'s readiness criterion **directly reads** the target file contents, and
+    these paths all live under /etc -- conftest's `isolated_home` fixture does not
+    cover them (it only redirects HOME/XDG_*). Without isolation, on a machine that
+    has **really run `devproxy setup`**, the real file contents happen to match the
+    rendered result and `plan()` returns empty, so every case asserting "there are
+    actions" goes red together even though the code itself is fine. That is not a
+    defect in the code under test; the test simply failed to isolate host state.
 
-    单个用例仍可再用 monkeypatch 覆盖成自己的路径（后设置的生效）。
+    A single case can still override these with its own paths via monkeypatch
+    (the later setting wins).
     """
     monkeypatch.setattr(dns_module, "RESOLVED_CONF", tmp_path / "etc" / "devproxy.conf")
     monkeypatch.setattr(dns_module, "SYSTEM_DNSMASQ_CONF", tmp_path / "etc" / "dnsmasq.conf")
@@ -41,7 +45,7 @@ def isolated_dns_paths(tmp_path, monkeypatch):
 
 
 def test_production_paths_point_at_real_system_locations():
-    """隔离只作用于测试：生产上三个路径必须仍是 /etc 下那三处。"""
+    """Isolation applies only to tests: in production all three paths must still be those under /etc."""
     from pathlib import Path
 
     assert _REAL_RESOLVED_CONF == Path("/etc/systemd/resolved.conf.d/devproxy.conf")
@@ -50,10 +54,10 @@ def test_production_paths_point_at_real_system_locations():
 
 
 def test_dns_route_paths_have_a_single_source():
-    """三个路由路径只在 platform.base 定义；组件与平台实现引用同一对象。
+    """The three route paths are defined only in platform.base; the component and platform implementations reference the same objects.
 
-    任何一处重新写回字面量都会让 `is` 断言失败 —— 漂移的后果是
-    “setup 写 A、doctor 查 B、回滚备份 C”。
+    Rewriting any one of them back to a literal makes the `is` assertions fail --
+    the consequence of drift is "setup writes A, doctor checks B, rollback backs up C".
     """
     from devproxy.platform import base
     from devproxy.platform import linux
@@ -75,7 +79,7 @@ def test_render_resolved_conf_shape():
 
 
 def test_render_resolved_conf_domains_uses_space_separator_not_comma():
-    """systemd-resolved 的 Domains= 是空格分隔；逗号不是分隔符。"""
+    """systemd-resolved's Domains= is space-separated; a comma is not a separator."""
     out = render_resolved_conf(port=5353, suffix=".test")
     assert "Domains=~.test" in out
     assert "," not in out
@@ -96,7 +100,7 @@ def test_auto_backend_prefers_resolved(tmp_path):
 
 
 def test_auto_backend_picks_system_when_resolved_inactive(tmp_path):
-    """目录存在不代表 resolved 在跑 —— auto 必须探测进程状态。"""
+    """A directory existing does not mean resolved is running -- auto must probe process state."""
     paths = Paths(tmp_path / "c", tmp_path / "s", tmp_path / "d")
     platform = FakePlatform()
     platform.resolved_running = False
@@ -115,18 +119,18 @@ def test_check_reports_missing_route(tmp_path):
     comp = DnsComponent(FakePlatform(), paths, Config(), backend="resolved")
     status = comp.check()
     assert status.ok is False
-    assert "DNS" in status.detail or "解析" in status.detail
+    assert "DNS" in status.detail or "content" in status.detail
 
 
 def test_plan_writes_resolved_conf(tmp_path):
     paths = Paths(tmp_path / "c", tmp_path / "s", tmp_path / "d")
     comp = DnsComponent(FakePlatform(), paths, Config(), backend="resolved")
     actions = comp.plan()
-    assert any(a.privileged for a in actions), "写 /etc 需要提权"
+    assert any(a.privileged for a in actions), "writing /etc requires elevation"
     assert any(a.kind == "write" for a in actions)
 
 
-# -- 组件 ---------------------------------------------------------------
+# -- components ---------------------------------------------------------
 
 
 def _component(tmp_path, backend="resolved", suffix="test", platform=None):
@@ -139,7 +143,7 @@ def _component(tmp_path, backend="resolved", suffix="test", platform=None):
 
 
 class _FailingElevated:
-    """提权会话：写正常，跑命令失败 —— 模拟 systemctl restart 失败。"""
+    """Elevated session: writes succeed, commands fail -- simulating a failed systemctl restart."""
 
     def __init__(self, platform) -> None:
         self.platform = platform
@@ -234,7 +238,7 @@ def test_auto_falls_back_to_system_when_resolved_inactive(tmp_path):
 
 
 def test_auto_ignores_resolved_conf_dir_when_resolved_inactive(tmp_path):
-    """目录存在不是判据 —— 本机的目录就是手工创建的。"""
+    """A directory existing is not the criterion -- the directory on this machine was created by hand."""
     (tmp_path / "resolved.conf.d").mkdir()
     platform = FakePlatform()
     platform.resolved_running = False
@@ -242,7 +246,7 @@ def test_auto_ignores_resolved_conf_dir_when_resolved_inactive(tmp_path):
     assert comp.resolved_backend is False
 
 
-# -- setup 幂等：已就绪时 plan 必须为空（Important C） -------------------
+# -- setup idempotence: plan must be empty when already ready (Important C) ---
 
 
 def test_plan_empty_when_recorded_hash_matches(tmp_path, monkeypatch):
@@ -251,7 +255,7 @@ def test_plan_empty_when_recorded_hash_matches(tmp_path, monkeypatch):
     comp, _platform = _component(tmp_path, backend="resolved")
     assert comp.plan() != []
     comp.apply(comp.plan())
-    # 路由已按预期写入 → 再次 setup 必须是 no-op（不再要 sudo、不重启 resolved）
+    # Route written as expected -> a repeated setup must be a no-op (no more sudo, no resolved restart)
     assert comp.plan() == []
 
 
@@ -260,13 +264,13 @@ def test_plan_non_empty_when_recorded_hash_differs(tmp_path, monkeypatch):
     monkeypatch.setattr(dns_module, "RESOLVED_CONF", target)
     comp, _platform = _component(tmp_path, backend="resolved")
     comp.apply(comp.plan())
-    # 改了域名后缀 → 内容变了 → 必须重写
+    # Changed the domain suffix -> content changed -> must rewrite
     other, _p = _component(tmp_path, backend="resolved", suffix="dev")
     assert other.plan() != []
 
 
 def test_plan_empty_when_file_content_matches_without_state(tmp_path, monkeypatch):
-    """路由文件内容已是预期内容 —— 即使 state 文件丢了也不该重写。"""
+    """The route file content is already the expected content -- do not rewrite even if the state file is lost."""
     target = tmp_path / "etc" / "resolved.conf.d" / "devproxy.conf"
     monkeypatch.setattr(dns_module, "RESOLVED_CONF", target)
     comp, _platform = _component(tmp_path, backend="resolved")
@@ -276,9 +280,9 @@ def test_plan_empty_when_file_content_matches_without_state(tmp_path, monkeypatc
 
 
 def test_plan_uses_state_hash_when_file_unreadable(tmp_path, monkeypatch):
-    """/etc 下的文件读不到时（普通用户），退回 state 目录里的哈希。"""
+    """When the file under /etc is unreadable (regular user), fall back to the hash in the state directory."""
     if os.geteuid() == 0:
-        pytest.skip("root 能读任意文件")
+        pytest.skip("root can read any file")
     target = tmp_path / "etc" / "resolved.conf.d" / "devproxy.conf"
     monkeypatch.setattr(dns_module, "RESOLVED_CONF", target)
     comp, _platform = _component(tmp_path, backend="resolved")
@@ -291,7 +295,7 @@ def test_plan_uses_state_hash_when_file_unreadable(tmp_path, monkeypatch):
 
 
 def test_plan_non_empty_when_target_file_removed(tmp_path, monkeypatch):
-    """用户删掉 /etc 下的路由文件后，setup 不能还说“已就绪”。"""
+    """After the user deletes the route file under /etc, setup must not still claim "ready"."""
     target = tmp_path / "etc" / "resolved.conf.d" / "devproxy.conf"
     monkeypatch.setattr(dns_module, "RESOLVED_CONF", target)
     comp, _platform = _component(tmp_path, backend="resolved")
@@ -301,7 +305,7 @@ def test_plan_non_empty_when_target_file_removed(tmp_path, monkeypatch):
 
 
 def test_plan_non_empty_when_target_file_edited(tmp_path, monkeypatch):
-    """用户在 /etc 下改了路由文件 —— 状态哈希还指向旧内容，必须重写。"""
+    """The user edited the route file under /etc -- the state hash still points at the old content, so it must rewrite."""
     target = tmp_path / "etc" / "resolved.conf.d" / "devproxy.conf"
     monkeypatch.setattr(dns_module, "RESOLVED_CONF", target)
     comp, _platform = _component(tmp_path, backend="resolved")
@@ -311,7 +315,7 @@ def test_plan_non_empty_when_target_file_edited(tmp_path, monkeypatch):
 
 
 def test_state_not_recorded_when_reload_fails(tmp_path, monkeypatch):
-    """重载失败就不能记成“已就绪”——否则下次 plan 空列表，实际没生效。"""
+    """A failed reload must not be recorded as "ready" -- otherwise the next plan is empty while nothing took effect."""
     target = tmp_path / "etc" / "resolved.conf.d" / "devproxy.conf"
     monkeypatch.setattr(dns_module, "RESOLVED_CONF", target)
     comp, platform = _component(tmp_path, backend="resolved")
@@ -322,7 +326,7 @@ def test_state_not_recorded_when_reload_fails(tmp_path, monkeypatch):
 
 
 def test_state_not_recorded_for_other_write_paths(tmp_path):
-    """状态文件只描述路由本身 —— 别的写动作不得污染它。"""
+    """The state file describes only the route itself -- other write actions must not pollute it."""
     from devproxy.platform.base import Action
 
     comp, _platform = _component(tmp_path, backend="resolved")
@@ -330,7 +334,7 @@ def test_state_not_recorded_for_other_write_paths(tmp_path):
     comp.apply(
         [
             Action(
-                description="无关写入",
+                description="unrelated write",
                 kind="write",
                 path=other,
                 content="hello",
@@ -356,14 +360,14 @@ def test_apply_records_state_in_state_dir(tmp_path, monkeypatch):
     assert len(data["content_sha256"]) == 64
 
 
-# -- 提权纪律（两个 minor） -----------------------------------------------
+# -- elevation discipline (two minors) -------------------------------------
 
 
 def test_apply_without_privileged_actions_does_not_request_privilege(tmp_path, monkeypatch):
     comp, platform = _component(tmp_path, backend="resolved")
 
     def boom():
-        raise AssertionError("无提权动作时不应请求提权")
+        raise AssertionError("must not request elevation when there are no privileged actions")
 
     monkeypatch.setattr(platform, "privilege", boom)
     comp.apply([])
@@ -377,7 +381,7 @@ def test_non_privileged_write_uses_plain_filesystem(tmp_path):
     comp.apply(
         [
             Action(
-                description="普通写入",
+                description="plain write",
                 kind="write",
                 path=target,
                 content="hello",
@@ -397,24 +401,25 @@ def test_apply_unknown_action_raises(tmp_path):
         comp.apply([Action(description="?", kind="run", command=["bogus"])])
 
 
-# -- macOS：resolver 后端（每域解析器文件） ------------------------------
+# -- macOS: resolver backend (per-domain resolver files) -------------------
 
 
 class _MacPlatform(FakePlatform):
-    """macOS 平台：没有 systemd-resolved，走 /etc/resolver/<后缀>。"""
+    """macOS platform: no systemd-resolved, so use /etc/resolver/<suffix>."""
 
     name = "mac"
     dns_port = 5300
 
 
 def test_check_reports_not_ok_when_resolver_file_has_wrong_content(tmp_path, monkeypatch):
-    """macOS 上 /etc/resolver/<后缀> 已存在、但内容不是我们要的（缺 port）。
+    """On macOS /etc/resolver/<suffix> exists but the content is not what we want (missing port).
 
-    `dns_route_installed` 只按**存在性**回答 —— 只靠它，doctor 会谎报"已就绪"，
-    而 `*.test` 实际被送到 127.0.0.1:53（mDNSResponder），不是工具的 dnsmasq
-    （:5300）。真机上就有这种陈年文件（2022 年留下的 `nameserver 127.0.0.1`）。
+    `dns_route_installed` answers only by **existence** -- relying on it alone, doctor
+    would falsely report "ready", while `*.test` is actually sent to 127.0.0.1:53
+    (mDNSResponder), not the tool's dnsmasq (:5300). Real machines have such ancient
+    files (a `nameserver 127.0.0.1` left over from 2022).
 
-    check 必须与 plan 用同一套判据：内容不对就是没就绪。
+    check must use the same criterion as plan: wrong content means not ready.
     """
     resolver_dir = tmp_path / "etc" / "resolver"
     resolver_dir.mkdir(parents=True)
@@ -422,14 +427,14 @@ def test_check_reports_not_ok_when_resolver_file_has_wrong_content(tmp_path, mon
     monkeypatch.setattr(dns_module, "RESOLVER_DIR", resolver_dir)
 
     comp, platform = _component(tmp_path, backend="auto", platform=_MacPlatform())
-    platform.dns_backends = {"resolver"}  # 平台层"存在即已配置"
+    platform.dns_backends = {"resolver"}  # platform layer: "exists means configured"
     status = comp.check()
-    assert status.ok is False, "内容不对不能报就绪"
-    assert "resolved" in status.detail or "内容" in status.detail
+    assert status.ok is False, "wrong content must not be reported as ready"
+    assert "resolved" in status.detail or "content" in status.detail
 
 
 def test_check_ok_when_resolver_file_content_matches(tmp_path, monkeypatch):
-    """对照组：内容正确时 check 必须就绪 —— 否则上一条会退化成"永远报错"。"""
+    """Control group: check must be ready when the content is correct -- otherwise the previous case degenerates into "always errors"."""
     resolver_dir = tmp_path / "etc" / "resolver"
     resolver_dir.mkdir(parents=True)
     (resolver_dir / "test").write_text(render_resolver_file(5300), encoding="utf-8")
@@ -446,23 +451,23 @@ def test_macos_backend_key_is_resolver(tmp_path):
 
 
 def test_macos_explicit_resolved_backend_raises(tmp_path):
-    """macOS 没有 systemd-resolved —— 显式 resolved 必须报错，不能静默降级。"""
+    """macOS has no systemd-resolved -- an explicit resolved backend must error, not silently downgrade."""
     comp, _platform = _component(tmp_path, backend="resolved", platform=_MacPlatform())
-    with pytest.raises(RuntimeError, match="macOS 不支持 resolved"):
+    with pytest.raises(RuntimeError, match="macOS does not support the resolved backend"):
         _ = comp.resolved_backend
 
 
 def test_macos_explicit_resolved_backend_check_reports_config_error(tmp_path):
-    """check 永不抛异常：配置与平台不符时如实报 not ok。"""
+    """check never raises: when config and platform disagree, report not ok truthfully."""
     comp, _platform = _component(tmp_path, backend="resolved", platform=_MacPlatform())
     status = comp.check()
     assert status.ok is False
-    assert "macOS 不支持 resolved" in status.detail
+    assert "macOS does not support the resolved backend" in status.detail
     assert "auto" in status.hint
 
 
 def test_macos_auto_resolved_backend_stays_silent(tmp_path):
-    """auto 在 macOS 上静默走 resolver —— 只有显式 resolved 才报错。"""
+    """auto silently uses resolver on macOS -- only an explicit resolved errors."""
     comp, _platform = _component(tmp_path, backend="auto", platform=_MacPlatform())
     assert comp.resolved_backend is False
 
@@ -477,7 +482,9 @@ def test_macos_plan_writes_resolver_file_with_platform_port(tmp_path, monkeypatc
     monkeypatch.setattr(dns_module, "RESOLVER_DIR", tmp_path / "etc" / "resolver")
     comp, _platform = _component(tmp_path, backend="auto", platform=_MacPlatform())
     actions = comp.plan()
-    assert len(actions) == 1, "macOS 不需要重启系统解析器 —— mDNSResponder 自己重载"
+    assert len(actions) == 1, (
+        "macOS does not need a system resolver restart -- mDNSResponder reloads itself"
+    )
     action = actions[0]
     assert action.kind == "write"
     assert action.privileged is True
@@ -487,7 +494,7 @@ def test_macos_plan_writes_resolver_file_with_platform_port(tmp_path, monkeypatc
 
 
 def test_macos_plan_is_empty_when_resolver_file_in_place(tmp_path, monkeypatch):
-    """路由已就位时 plan 必须为空 —— 重复 setup 不该再要 sudo。"""
+    """plan must be empty when the route is in place -- a repeated setup must not ask for sudo again."""
     monkeypatch.setattr(dns_module, "RESOLVER_DIR", tmp_path / "etc" / "resolver")
     comp, _platform = _component(tmp_path, backend="auto", platform=_MacPlatform())
     assert comp.plan() != []
@@ -522,14 +529,14 @@ def test_macos_state_records_resolver_backend(tmp_path, monkeypatch):
 
 
 def test_linux_plan_still_restarts_resolved(tmp_path):
-    """Linux 路径不变：写 drop-in 之后仍要重启 systemd-resolved。"""
+    """The Linux path is unchanged: after writing the drop-in, systemd-resolved must still be restarted."""
     comp, _platform = _component(tmp_path, backend="resolved")
     reload_action = next(a for a in comp.plan() if a.kind == "run")
     assert reload_action.command == ["systemctl", "restart", "systemd-resolved"]
 
 
 def test_plan_computes_expected_content_once(tmp_path):
-    """plan 的两个分支只该共享同一份 content，不能各算一遍。"""
+    """The two branches of plan should share one content computation, not compute it twice."""
     comp, _platform = _component(tmp_path, backend="resolved")
     calls = []
     original = comp._expected_content
@@ -538,45 +545,46 @@ def test_plan_computes_expected_content_once(tmp_path):
     assert len(calls) == 1
 
 
-# -- 整机作用域的披露（Finding 8） -----------------------------------------
+# -- machine-wide scope disclosure (Finding 8) -----------------------------
 
 
 def test_global_scope_note_names_machine_wide_dns_and_fallback(tmp_path):
-    """resolved 的 DNS= / FallbackDNS= 改的是**整机** —— 必须写明。
+    """resolved's DNS= / FallbackDNS= change **the whole machine** -- this must be stated.
 
-    这两行写在 drop-in 的全局段里：DNS= 让这台机器全部域名的解析都先问
-    用户级 dnsmasq，FallbackDNS= 是整机兜底。用户点确认之前就该知道。
+    These two lines go in the global section of the drop-in: DNS= makes every domain
+    on this machine ask the user-scope dnsmasq first, and FallbackDNS= is the
+    machine-wide fallback. The user should know before confirming.
     """
     comp, _platform = _component(tmp_path, backend="resolved")
     note = comp.global_scope_note()
     assert note is not None
     assert "DNS=127.0.0.1:5353" in note
     assert "FallbackDNS=1.1.1.1 8.8.8.8" in note
-    assert "整机" in note
-    assert "dnsmasq 起不来" in note, "必须说清 dnsmasq 挂掉时的降级后果"
+    assert "machine-wide" in note
+    assert "dnsmasq cannot start" in note, "must spell out the degraded behavior when dnsmasq dies"
 
 
 def test_global_scope_note_none_for_system_backend(tmp_path):
-    """system 后端只写本后缀的 dnsmasq 片段 —— 不涉及整机，不披露。"""
+    """The system backend only writes a dnsmasq fragment for this suffix -- no machine-wide effect, so no disclosure."""
     comp, _platform = _component(tmp_path, backend="system")
     assert comp.global_scope_note() is None
 
 
 def test_global_scope_note_none_for_macos_resolver_backend(tmp_path):
-    """macOS 的每域解析器文件不影响其它域名 —— 不披露整机作用域。"""
+    """macOS's per-domain resolver file does not affect other domains -- do not disclose machine-wide scope."""
     comp, _platform = _component(tmp_path, backend="auto", platform=_MacPlatform())
     assert comp.global_scope_note() is None
 
 
 def test_resolved_plan_description_marks_global_scope(tmp_path):
-    """变更清单的表格里也要看得出这是整机作用域。"""
+    """The change-list table must also make the machine-wide scope visible."""
     comp, _platform = _component(tmp_path, backend="resolved")
     write_action = next(a for a in comp.plan() if a.kind == "write")
-    assert "整机" in write_action.description
+    assert "machine-wide" in write_action.description
 
 
 def test_fallback_dns_constant_matches_rendered_conf(tmp_path):
-    """披露文案里的 FallbackDNS 必须与真正写进配置的一致。"""
+    """The FallbackDNS in the disclosure text must match what is actually written to the config."""
     content = render_resolved_conf(port=5353, suffix="test")
     assert f"FallbackDNS={dns_module.FALLBACK_DNS}" in content
     assert dns_module.FALLBACK_DNS in dns_module.global_scope_disclosure(5353)
@@ -585,9 +593,10 @@ def test_fallback_dns_constant_matches_rendered_conf(tmp_path):
 def test_unreadable_route_with_platform_installed_is_in_place_for_check_and_plan(
     tmp_path, monkeypatch
 ):
-    """root:root 0600 + state 缺失：check 与 plan 必须给出同一结论。
+    """root:root 0600 + missing state: check and plan must reach the same conclusion.
 
-    平台能确认文件存在时，plan 不该再要 sudo 重写并重启整机解析器。
+    When the platform can confirm the file exists, plan must not ask for sudo to
+    rewrite it and restart the machine-wide resolver again.
     """
     from tests.support import UnreadablePath
 
@@ -599,11 +608,13 @@ def test_unreadable_route_with_platform_installed_is_in_place_for_check_and_plan
     comp, platform = _component(tmp_path, backend="resolved")
     platform.dns_backends.add("resolved")
     assert comp.check().ok is True
-    assert comp.plan() == [], "doctor 说就绪时 setup 不能又重写并重启 resolved"
+    assert comp.plan() == [], (
+        "when doctor says ready, setup must not rewrite and restart resolved again"
+    )
 
 
 def test_unreadable_route_without_platform_confirmation_is_not_in_place(tmp_path, monkeypatch):
-    """平台也无法确认时不能凭空报就绪 —— 否则会漏掉真正的缺失。"""
+    """Must not falsely report ready when the platform cannot confirm either -- otherwise a real absence is missed."""
     from tests.support import UnreadablePath
 
     target = tmp_path / "etc" / "devproxy.conf"

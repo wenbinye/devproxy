@@ -1,6 +1,7 @@
-"""devproxy init：生成 devproxy.toml。
+"""devproxy init: generate devproxy.toml.
 
-只测「文件被写成什么样」—— 真正起服务的路径由 tests/test_sync.py 覆盖。
+Only tests "what the file is written as" -- the path that actually starts services is
+covered by tests/test_sync.py.
 """
 
 from __future__ import annotations
@@ -24,11 +25,11 @@ def _invoke(args: list[str]):
     return CliRunner().invoke(app, args)
 
 
-# -- 脚手架逻辑 ---------------------------------------------------------
+# -- scaffolding logic --------------------------------------------------
 
 
 def test_detect_project_root_finds_git_root(tmp_path):
-    """项目文件要放在仓库根 —— 跟 pyproject.toml 一起。"""
+    """The project file must live at the repository root -- alongside pyproject.toml."""
     root = tmp_path / "repo"
     (root / ".git").mkdir(parents=True)
     nested = root / "a" / "b"
@@ -37,7 +38,7 @@ def test_detect_project_root_finds_git_root(tmp_path):
 
 
 def test_detect_project_root_without_git_is_cwd(tmp_path):
-    """没有 git 就用当前目录，不往上乱找。"""
+    """Without git, use the current directory and do not search upwards."""
     assert detect_project_root(tmp_path) == tmp_path.resolve()
 
 
@@ -56,9 +57,10 @@ def test_suggest_command_from_package_json(tmp_path):
         json.dumps({"scripts": {"dev": "vite"}}), encoding="utf-8"
     )
     argv, reason = suggest_command(tmp_path)
-    # 端口必须可控：应用不监听 $PORT，devproxy 的就绪判定永远过不了
+    # The port must be controllable: if the app does not listen on $PORT, devproxy's
+    # readiness check can never pass
     assert argv == ["sh", "-c", "npm run dev -- --port $PORT"]
-    assert "dev 脚本" in reason
+    assert "dev script" in reason
 
 
 def test_suggest_command_falls_back_to_start(tmp_path):
@@ -70,14 +72,14 @@ def test_suggest_command_falls_back_to_start(tmp_path):
 
 
 def test_suggest_command_without_evidence_returns_none(tmp_path):
-    """没证据就不猜 —— 猜错比不猜更糟。"""
+    """Do not guess without evidence -- a wrong guess is worse than none."""
     argv, reason = suggest_command(tmp_path)
     assert argv is None
     assert reason
 
 
 def test_suggest_command_survives_broken_package_json(tmp_path):
-    """package.json 坏了也不能抛 —— 那是用户文件，不是我们的。"""
+    """A broken package.json must not raise -- it is the user's file, not ours."""
     (tmp_path / "package.json").write_text("{ not json", encoding="utf-8")
     argv, _ = suggest_command(tmp_path)
     assert argv is None
@@ -92,16 +94,16 @@ def test_render_project_file_marks_expose():
     content = render_project_file([ProjectRoute(name="legacy", mode="expose", port=3000)])
     assert 'mode = "expose"' in content
     assert "port = 3000" in content
-    # 没有 command 行（不是靠全文找 "command" —— 头部注释里就有这个词）
+    # No command line (do not search the whole text for "command" -- the header comment contains that word)
     assert not any(line.strip().startswith("command") for line in content.splitlines())
 
 
-# -- 命令层 -------------------------------------------------------------
+# -- command layer ------------------------------------------------------
 
 
 @pytest.fixture
 def project(tmp_path, monkeypatch):
-    """一个 git 仓库根 + 切到里面。"""
+    """A git repository root + change into it."""
     (tmp_path / ".git").mkdir()
     monkeypatch.chdir(tmp_path)
     return tmp_path
@@ -129,17 +131,17 @@ def test_init_guesses_command_from_project_type(project):
 
 
 def test_init_refuses_to_overwrite_without_force(project):
-    (project / "devproxy.toml").write_text("# 已有内容\n", encoding="utf-8")
+    (project / "devproxy.toml").write_text("# existing content\n", encoding="utf-8")
     result = _invoke(["init", "--name", "web", "--command", "npm run dev"])
     assert result.exit_code == 2, result.output
-    assert (project / "devproxy.toml").read_text(encoding="utf-8") == "# 已有内容\n"
+    assert (project / "devproxy.toml").read_text(encoding="utf-8") == "# existing content\n"
 
 
 def test_init_force_overwrites(project):
-    (project / "devproxy.toml").write_text("# 旧内容\n", encoding="utf-8")
+    (project / "devproxy.toml").write_text("# old content\n", encoding="utf-8")
     result = _invoke(["init", "--name", "web", "--command", "npm run dev", "--force"])
     assert result.exit_code == 0, result.output
-    assert "旧内容" not in (project / "devproxy.toml").read_text(encoding="utf-8")
+    assert "old content" not in (project / "devproxy.toml").read_text(encoding="utf-8")
 
 
 def test_init_rejects_illegal_route_name(project):
@@ -156,7 +158,7 @@ def test_init_splits_command_with_quotes(project):
 
 
 def test_init_imports_command_from_existing_route(project, monkeypatch, tmp_path):
-    """--from：把已经在跑的路由的启动命令抄进声明。"""
+    """--from: copy the start command of an already running route into the declaration."""
     paths = tmp_path / "state"
     paths.mkdir()
     (paths / "routes.json").write_text(
@@ -216,18 +218,18 @@ def test_init_reports_unknown_route_for_from(project, monkeypatch, tmp_path):
 
 
 def test_init_generated_file_parses_back(project):
-    """生成的必须是**能被自己解析**的 —— 否则用户第一次 sync 就炸。"""
+    """The generated file must be **parseable by ourselves** -- otherwise the user's first sync explodes."""
     result = _invoke(["init", "--name", "web", "--command", "npm run dev"])
     assert result.exit_code == 0, result.output
     project_file = load_project_file(project / "devproxy.toml")
     assert project_file.routes[0].name == "web"
 
 
-# -- PHP 项目 ------------------------------------------------------------
+# -- PHP projects -------------------------------------------------------
 
 
 def test_suggest_command_laravel(tmp_path):
-    """有 artisan → Laravel 的官方起法，端口可控。"""
+    """An artisan file -> Laravel's official start command, with a controllable port."""
     (tmp_path / "composer.json").write_text("{}", encoding="utf-8")
     (tmp_path / "artisan").write_text("#!/usr/bin/env php\n", encoding="utf-8")
     argv, reason = suggest_command(tmp_path)
@@ -236,7 +238,7 @@ def test_suggest_command_laravel(tmp_path):
 
 
 def test_suggest_command_php_public_docroot(tmp_path):
-    """有 public/index.php → 内置服务器起在 public 下（Symfony 等）。"""
+    """public/index.php -> the built-in server under public (Symfony etc.)."""
     (tmp_path / "composer.json").write_text("{}", encoding="utf-8")
     (tmp_path / "public").mkdir()
     (tmp_path / "public" / "index.php").write_text("<?php\n", encoding="utf-8")
@@ -245,7 +247,7 @@ def test_suggest_command_php_public_docroot(tmp_path):
 
 
 def test_suggest_command_php_root_index(tmp_path):
-    """根目录有 index.php → 内置服务器起在项目根。"""
+    """index.php at the root -> the built-in server at the project root."""
     (tmp_path / "composer.json").write_text("{}", encoding="utf-8")
     (tmp_path / "index.php").write_text("<?php\n", encoding="utf-8")
     argv, _ = suggest_command(tmp_path)
@@ -253,17 +255,17 @@ def test_suggest_command_php_root_index(tmp_path):
 
 
 def test_suggest_command_php_composer_script(tmp_path):
-    """composer.json 里有 serve 脚本 → 给它，但明说端口不可控。"""
+    """A serve script in composer.json -> offer it, but say plainly that the port is not controllable."""
     (tmp_path / "composer.json").write_text(
         json.dumps({"scripts": {"serve": "php src/index.php start"}}), encoding="utf-8"
     )
     argv, reason = suggest_command(tmp_path)
     assert argv == ["sh", "-c", "composer serve"]
-    assert "端口不可控" in reason
+    assert "the port is not controllable" in reason
 
 
 def test_suggest_command_php_names_env_port_vars(tmp_path):
-    """.env 里的端口变量要点名 —— 用户得知道该改哪个。"""
+    """Port variables in .env must be named -- users need to know which one to change."""
     (tmp_path / "composer.json").write_text(
         json.dumps({"scripts": {"serve": "x"}}), encoding="utf-8"
     )
@@ -272,11 +274,13 @@ def test_suggest_command_php_names_env_port_vars(tmp_path):
     )
     _, reason = suggest_command(tmp_path)
     assert "APP_WEB_PORT" in reason
-    assert "DB_PORT" not in reason, "数据库端口跟 devproxy 无关，别添乱"
+    assert "DB_PORT" not in reason, (
+        "database ports have nothing to do with devproxy; do not add noise"
+    )
 
 
 def test_suggest_command_php_unknown_does_not_guess(tmp_path):
-    """认不出来的 PHP 项目不猜 —— 只给提示。"""
+    """An unrecognized PHP project is not guessed -- only a hint is given."""
     (tmp_path / "composer.json").write_text("{}", encoding="utf-8")
     argv, reason = suggest_command(tmp_path)
     assert argv is None
@@ -284,7 +288,7 @@ def test_suggest_command_php_unknown_does_not_guess(tmp_path):
 
 
 def test_suggest_command_makefile_requires_real_target(tmp_path):
-    """Makefile 里真要有 dev 目标才猜（原来只看文件存在 → 猜错）。"""
+    """Only guess when the Makefile really has a dev target (it used to check only file existence -> wrong guesses)."""
     (tmp_path / "Makefile").write_text("build:\n\techo hi\n", encoding="utf-8")
     argv, reason = suggest_command(tmp_path)
     assert argv is None
@@ -296,7 +300,7 @@ def test_suggest_command_makefile_requires_real_target(tmp_path):
 
 
 def test_suggest_command_php_wins_over_makefile(tmp_path):
-    """既有 composer.json 又有 Makefile —— 按 PHP 处理。"""
+    """Both composer.json and a Makefile -- treat it as PHP."""
     (tmp_path / "composer.json").write_text("{}", encoding="utf-8")
     (tmp_path / "Makefile").write_text("dev:\n\techo hi\n", encoding="utf-8")
     argv, reason = suggest_command(tmp_path)

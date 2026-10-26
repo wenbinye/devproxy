@@ -1,4 +1,4 @@
-"""平台能力协议。组件层只依赖这些能力，不直接调用系统命令。"""
+"""Platform capability protocol. The component layer depends only on these capabilities and never invokes system commands directly."""
 
 from __future__ import annotations
 
@@ -12,33 +12,37 @@ from pathlib import Path
 from typing import Protocol
 from typing import runtime_checkable
 
-# 证书信任的全局约定：组件与平台实现共用同一份，避免两边对不上。
+# Global convention for certificate trust: components and platform
+# implementations share this single copy so the two sides cannot drift apart.
 CA_NICKNAME = "devproxy Local CA"
 SYSTEM_CA_DEST = Path("/usr/local/share/ca-certificates/devproxy-local.crt")
 SYSTEM_TRUST_DIR = Path("/etc/ssl/certs")
 
-# NSS 库默认位置的**模板**：`~` 未展开（pathlib 不认波浪号）。
-# 新代码请用 `nss_db_dir()`；`NSS_DIR` 仅为兼容既有导入保留，任何消费方
-# 都必须自己 expanduser()，否则会去查「当前目录下的 ~/.pki/nssdb」。
+# **Template** for the default NSS database location: `~` is left unexpanded
+# (pathlib does not understand the tilde). New code should use `nss_db_dir()`;
+# `NSS_DIR` is kept only for compatibility with existing imports, and any
+# consumer must call expanduser() itself, or it will look up
+# "~/.pki/nssdb under the current directory".
 NSS_DIR_TEMPLATE = "~/.pki/nssdb"
 NSS_DIR = Path(NSS_DIR_TEMPLATE)
 
 
 def nss_db_dir(home: Path | None = None) -> Path:
-    """NSS 库的默认路径（已展开，绝对路径）。
+    """Default NSS database path (expanded, absolute).
 
-    每次调用时才展开 `~` / 读取 `home` —— 测试重定向 HOME 后必须生效，
-    所以不能做成导入期常量。
+    `~` is expanded / `home` is read on every call — a test that redirects HOME
+    must take effect, so this cannot be an import-time constant.
     """
     base = Path(home) if home is not None else Path.home()
     return base / ".pki" / "nssdb"
 
 
 def _pem_der_blocks(text: str) -> list[bytes]:
-    """从 PEM 文本里取出全部证书的 DER 字节。
+    """Extract the DER bytes of every certificate in a PEM text.
 
-    只做 base64 解码，不做 X.509 解析 —— CA 信任/卸载的判据都是
-    "同一份字节"，解析证书结构反而会引入额外的失败点。
+    Only base64 decoding, no X.509 parsing — the criterion for trusting or
+    untrusting the CA is "the same bytes"; parsing the certificate structure
+    would only add extra failure points.
     """
     blocks: list[bytes] = []
     buf: list[str] = []
@@ -63,17 +67,17 @@ def _pem_der_blocks(text: str) -> list[bytes]:
 
 
 def cert_fingerprint(der: bytes) -> str:
-    """证书指纹：DER 的 sha256（与 `openssl x509 -fingerprint -sha256` 同义）。"""
+    """Certificate fingerprint: SHA-256 of the DER (same meaning as `openssl x509 -fingerprint -sha256`)."""
     return hashlib.sha256(der).hexdigest().upper()
 
 
 def pem_fingerprints(text: str) -> set[str]:
-    """PEM 文本里全部证书的 SHA-256 指纹集合。"""
+    """Set of SHA-256 fingerprints of every certificate in a PEM text."""
     return {cert_fingerprint(der) for der in _pem_der_blocks(text)}
 
 
 def file_fingerprints(path: Path) -> set[str] | None:
-    """读文件并返回其中证书的指纹集合；读不了 / 不是 PEM 返回 None。"""
+    """Read a file and return the fingerprints of the certificates in it; None if it cannot be read or is not PEM."""
     try:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
@@ -81,13 +85,17 @@ def file_fingerprints(path: Path) -> set[str] | None:
     return pem_fingerprints(text)
 
 
-# macOS 的对应物：CA 进系统钥匙串（Safari/Chrome 都认它），
-# DNS 路由走每域解析器文件（/etc/resolver/<后缀>），不动 /etc/resolv.conf。
+# The macOS counterpart: the CA goes into the system keychain (both Safari and
+# Chrome honor it), while DNS routing uses per-domain resolver files
+# (/etc/resolver/<suffix>) and leaves /etc/resolv.conf untouched.
 SYSTEM_KEYCHAIN = "/Library/Keychains/System.keychain"
 
-# DNS 路由文件的**单一来源**：组件写入、平台探测、迁移备份都必须引用这里。
-# 三处各写一份字面量迟早会漂移 —— 组件写到 A、平台查 B、迁移备份 C，
-# 表现就是 setup 说成功、doctor 说缺失、回滚删不掉真正被改的文件。
+# **Single source of truth** for DNS routing files: the component writes them,
+# the platform probes them, and migration backups all must reference this.
+# Writing a separate literal in each of the three places is bound to drift
+# eventually — the component writes to A, the platform checks B, the migration
+# backs up C, which shows up as setup saying success, doctor saying missing,
+# and rollback being unable to delete the file that was actually changed.
 RESOLVER_DIR = Path("/etc/resolver")
 RESOLVED_CONF_DIR = Path("/etc/systemd/resolved.conf.d")
 RESOLVED_CONF = RESOLVED_CONF_DIR / "devproxy.conf"
@@ -96,7 +104,7 @@ SYSTEM_DNSMASQ_CONF = Path("/etc/dnsmasq.d/devproxy.conf")
 
 @dataclass
 class Status:
-    """组件检查结果。ok=False 时 detail 说明现状，hint 给出可执行的修复命令。"""
+    """Result of a component check. When ok=False, detail describes the current state and hint gives a runnable repair command."""
 
     ok: bool
     detail: str = ""
@@ -104,28 +112,31 @@ class Status:
 
 
 def render_resolver_file(port: int) -> str:
-    """/etc/resolver/<后缀> 的内容（macOS 的每域解析器格式）。
+    """/etc/resolver/<suffix> contents (macOS's per-domain resolver format).
 
-    macOS 原生支持每域解析器，不必改 /etc/resolv.conf。
-    放在这里是因为组件层（DNS 组件）也要用它 —— 组件不直接依赖某个平台实现。
+    macOS natively supports per-domain resolvers; there is no need to touch
+    /etc/resolv.conf. This lives here because the component layer (the DNS
+    component) also uses it — components do not depend directly on a platform
+    implementation.
     """
     return f"nameserver 127.0.0.1\nport {port}\n"
 
 
 def unit_exec_argv(text: str) -> list[str] | None:
-    """从服务单元文本里解析出启动命令行。
+    """Parse the launch command line from service unit text.
 
-    两种格式都要认：
-    - systemd：``ExecStart=/path/caddy run --config /path/Caddyfile``
-    - launchd plist：``ProgramArguments`` 数组
+    Both formats must be recognized:
+    - systemd: ``ExecStart=/path/caddy run --config /path/Caddyfile``
+    - launchd plist: the ``ProgramArguments`` array
 
-    组件判断"单元是不是当前的"靠它 —— 只做子串匹配会把顺序与参数配对
-    都放过（"run --config" 和 "--config … run" 都能蒙混过关），单元
-    指向别的 Caddyfile 时就判不出来了。
+    This is how the component decides whether "the unit is the current one" —
+    plain substring matching would miss both wrong ordering and wrong argument
+    pairing ("run --config" and "--config … run" would both pass), and it could
+    not tell when the unit points at a different Caddyfile.
     """
     try:
         data = plistlib.loads(text.encode("utf-8"))
-    except Exception:  # noqa: BLE001 —— 不是 plist 就当 systemd 单元看
+    except Exception:  # noqa: BLE001 — not a plist, treat it as a systemd unit
         data = None
     if isinstance(data, dict):
         argv = data.get("ProgramArguments")
@@ -143,10 +154,10 @@ def unit_exec_argv(text: str) -> list[str] | None:
 
 @dataclass
 class Action:
-    """一条待执行动作。"""
+    """A pending action to execute."""
 
     description: str
-    # run：执行 command；write：写 path/content；delete：删除 path
+    # run: execute command; write: write path/content; delete: delete path
     kind: str = "run"  # "run" | "write" | "delete"
     command: list[str] = field(default_factory=list)
     path: Path | None = None
@@ -156,7 +167,7 @@ class Action:
 
 @runtime_checkable
 class ElevatedSession(Protocol):
-    """一次提权会话：一次密码验证，后续操作复用同一会话。"""
+    """An elevated session: one password verification, subsequent operations reuse the same session."""
 
     def run(self, argv: list[str]) -> tuple[int, str]: ...
 
@@ -190,14 +201,17 @@ class Platform(Protocol):
         env: dict[str, str],
         description: str = "",
     ) -> None:
-        """安装并注册一个服务。单元格式由平台自己决定（systemd / launchd）。
+        """Install and register a service. The unit format is up to the platform (systemd / launchd).
 
-        组件层只给"跑什么、带什么环境变量"，不碰单元格式 ——
-        否则 systemd 与 launchd 的差异会渗进组件里。
+        The component layer only says "what to run and which environment
+        variables to carry" and never touches the unit format — otherwise the
+        differences between systemd and launchd would leak into components.
 
-        `exec_reload` / `exec_stop` 是**可选能力**：平台可以忽略。
-        launchd 没有对应的 plist 字段，`MacOSPlatform` 即刻意丢弃这两个值
-        （见其实现注释），调用方不应假设所有平台都支持。
+        `exec_reload` / `exec_stop` are **optional capabilities**: a platform may
+        ignore them. launchd has no corresponding plist fields, so
+        `MacOSPlatform` deliberately discards these two values (see the comment
+        in its implementation); callers must not assume every platform supports
+        them.
         """
 
     def enable_service(self, name: str) -> None: ...
@@ -205,9 +219,10 @@ class Platform(Protocol):
     def restart_service(self, name: str) -> None: ...
 
     def remove_service(self, name: str) -> None:
-        """停止并移除服务单元（systemd unit / launchd plist）。
+        """Stop and remove the service unit (systemd unit / launchd plist).
 
-        必须幂等：服务与单元都不存在时静默成功，不抛异常。
+        Must be idempotent: succeed silently and raise no exception when
+        neither the service nor the unit exists.
         """
 
     def service_unit_path(self, name: str) -> Path: ...
@@ -215,47 +230,52 @@ class Platform(Protocol):
     def tail_service_log(self, name: str) -> None: ...
 
     def open_in_editor(self, path: Path, editor: str) -> int:
-        """用编辑器打开文件，返回编辑器的退出码。
+        """Open a file in the editor and return the editor's exit code.
 
-        编辑器要**继承 stdio**（它得接管终端）—— 与 tail_service_log 同一路子。
-        `editor` 是命令字符串（可能带参数，如 "code -w"），由调用方拼词。
-        编辑器不存在时抛 FileNotFoundError。
+        The editor must **inherit stdio** (it needs to take over the terminal) —
+        same approach as tail_service_log. `editor` is a command string
+        (possibly with arguments, e.g. "code -w"), which the caller splits into
+        words. Raise FileNotFoundError when the editor does not exist.
         """
 
     def enable_linger(self) -> tuple[int, str]:
-        """`loginctl enable-linger <user>`：让 user unit 开机自启、无需登录。"""
+        """`loginctl enable-linger <user>`: make user units start at boot without requiring a login."""
 
     def linger_enabled(self) -> bool:
-        """当前用户是否已启用 linger（只读探测）。"""
+        """Whether the current user has linger enabled (read-only probe)."""
 
     def resolved_active(self) -> bool:
-        """systemd-resolved 是否真的在运行（auto DNS 后端的判据）。"""
+        """Whether systemd-resolved is actually running (the criterion for the auto DNS backend)."""
 
     def dns_query(self, name: str) -> str | None:
-        """按工具预期的路径解析域名，返回首个 A/AAAA 答案；失败返回 None。"""
+        """Resolve a domain via the path the tool expects, returning the first A/AAAA answer; None on failure."""
 
     def http_ok(self, url: str) -> bool:
-        """有超时上限的本地 HTTP(S) 探测；成功（2xx/3xx）返回 True。"""
+        """Local HTTP(S) probe with an upper timeout bound; returns True on success (2xx/3xx)."""
 
     def ca_trusted(self, ca: Path) -> bool: ...
 
     def privilege_read(self, path: Path) -> str | None:
-        """**非交互地**读取特权文件；读不到返回 None。
+        """Read a privileged file **non-interactively**; return None if unreadable.
 
-        只读命令（doctor）必须无副作用：绝不弹密码框。普通用户读不到
-        特权文件时，宁可"读不到"也不要向用户索要密码。
+        Read-only commands (doctor) must have no side effects: never pop up a
+        password prompt. When a regular user cannot read a privileged file,
+        prefer "cannot read" over asking the user for a password.
         """
 
     def nss_trusted(self, ca: Path) -> bool:
-        """NSS 库（Chrome/Chromium 的信任库）里存的证书**内容**是否就是该 CA。
+        """Whether the certificate **content** stored in the NSS database (Chrome/Chromium's trust store) is this CA.
 
-        注意：这是内容比对，不是“同名条目是否存在”—— Caddy 重新生成 CA 后
-        旧条目仍在，只按 nickname 判定会误报“已信任”。
+        Note: this is a content comparison, not "does an entry with the same
+        name exist" — after Caddy regenerates the CA the old entry is still
+        there, and deciding by nickname alone would falsely report "already
+        trusted".
         """
 
     def dns_route_installed(self, backend: str, suffix: str) -> bool:
-        """DNS 路由是否已配置。backend 取 "resolved" / "system" / "resolver"。
+        """Whether the DNS route is already configured. backend is one of "resolved" / "system" / "resolver".
 
-        suffix 是域名后缀：macOS 的解析器文件按后缀命名（/etc/resolver/<suffix>），
-        Linux 的两个后端不关心它，但接口保持一致。
+        suffix is the domain suffix: macOS's resolver file is named by suffix
+        (/etc/resolver/<suffix>), while Linux's two backends do not care about
+        it, but the interface stays consistent.
         """

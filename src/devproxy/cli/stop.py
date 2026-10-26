@@ -1,7 +1,8 @@
-"""stop 命令：停掉本项目（devproxy.toml）声明的所有应用。
+"""The stop command: stop every app declared in this project (devproxy.toml).
 
-是 `devproxy up` 的逆操作：up 起来的，一条命令全停。
-只动本项目声明的路由 —— 手工 up 的、别的项目的都不碰。
+The inverse of `devproxy up`: whatever up started, one command stops.
+Only routes declared by this file are touched -- manually started routes and routes
+belonging to other projects are left alone.
 """
 
 from __future__ import annotations
@@ -18,11 +19,12 @@ from devproxy.gateway.store import RouteStoreError
 
 
 def stop_project_apps() -> None:
-    """停掉本项目（devproxy.toml）声明的所有应用。重新启动：devproxy up"""
+    """Stop every app declared in this project (devproxy.toml). Restart with: devproxy up"""
     found = s.find_project_file()
     if found is None:
         s.fail(
-            "当前目录不在项目里（找不到 devproxy.toml）。停单条路由用 devproxy down <名字>",
+            "Not inside a project (no devproxy.toml found). "
+            "To stop a single route use devproxy down <name>",
             EXIT_USAGE,
         )
     try:
@@ -47,15 +49,16 @@ def stop_project_apps() -> None:
         s.fail(str(e))
 
     if not stopped:
-        s.console.print("没有在跑的应用。")
+        s.console.print("No running apps.")
         raise typer.Exit(EXIT_OK)
 
     for name, pid, proc_start in stopped:
         if pid:
-            # 带上注册时的进程身份 —— pid 可能已被复用，身份不符不杀
+            # Pass the process identity recorded at registration time -- the pid may have
+            # been reused by now, in which case the identity will not match and nothing is killed
             s.kill_pid_group(pid, proc_start)
-        s.console.print(f"✔ 已停止 {name}")
+        s.console.print(f"✔ Stopped {name}")
 
     s.console.print("")
-    s.console.print(f"全部停止（{len(stopped)} 个应用）。重新启动：devproxy up")
+    s.console.print(f"All stopped ({len(stopped)} apps). Restart with: devproxy up")
     raise typer.Exit(EXIT_OK)

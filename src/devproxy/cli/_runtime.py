@@ -1,6 +1,7 @@
-"""CLI 运行时：Rich 控制台、退出码与统一错误出口。
+"""CLI runtime: the Rich consoles, exit codes, and the single error exit.
 
-这些是**所有**命令模块共享的进程级设施，与配置、组件、渲染无关。
+These are process-level facilities shared by **every** command module. They know
+nothing about configuration, components, or rendering.
 """
 
 from __future__ import annotations
@@ -16,8 +17,9 @@ console = Console()
 
 err_console = Console(stderr=True)
 
-# 退出码语义（全项目一致）：
-#   0 成功 / 1 运行失败 / 2 参数错误 / 3 前置条件不满足 / 4 需要人工交互或提权
+# Exit-code semantics (the same everywhere in this project):
+#   0 success / 1 runtime failure / 2 usage error / 3 precondition unmet
+#   4 needs a human (interactive prompt or elevation)
 EXIT_OK = 0
 
 EXIT_FAIL = 1
@@ -32,22 +34,24 @@ EXIT_DECLINED = 4
 
 
 def fail(msg: str, code: int = EXIT_FAIL) -> NoReturn:
-    """以统一形态输出错误并退出（Rich 渲染的一行错误，而非 traceback）。
+    """Print an error in the unified shape and exit (one Rich line, no traceback).
 
-    标成 NoReturn 而不是 None：它永远抛 typer.Exit，类型检查器据此
-    知道"这行之后不会继续" —— 否则每个 `s.fail(...)` 之后的代码都会被
-    误报成"可能未绑定变量"。
+    Annotated NoReturn rather than None: it always raises typer.Exit, and type
+    checkers use that to learn "nothing after this line runs" — otherwise every
+    line following an `s.fail(...)` would be reported as a possibly-unbound
+    variable.
     """
-    # escape：错误消息里可能带 [a-z0-9-] 这类字符集或用户输入，
-    # 不转义会被 Rich 当成标记吞掉
+    # escape: error messages may contain character classes like [a-z0-9-] or user
+    # input; without escaping, Rich would swallow them as markup
     err_console.print(f"devproxy: {escape(msg)}")
     raise typer.Exit(code)
 
 
 def _interactive() -> bool:
-    """是否有可交互的终端。
+    """Whether there is an interactive terminal.
 
-    命令模块必须经 `_shared._interactive()` 在调用时查找 —— 测试对
-    `_shared._interactive` 打桩才能覆盖所有分支。
+    Command modules must look this up at call time through
+    `_shared._interactive()`, so that patching `_shared._interactive` in tests
+    covers every branch.
     """
     return sys.stdin.isatty()

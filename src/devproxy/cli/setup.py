@@ -1,4 +1,4 @@
-"""setup 命令：只做顺序编排，具体动作拆给下面的小函数。"""
+"""The setup command: only sequences the steps; the individual actions live in the helpers below."""
 
 from __future__ import annotations
 
@@ -26,19 +26,20 @@ from devproxy.lifecycle.migrate import detect_legacy
 
 
 def _handle_rollback(raw: str | None) -> bool:
-    """处理 --rollback；返回是否已进入回滚分支。
+    """Handle --rollback; return whether the rollback branch was taken.
 
-    回滚只依赖备份目录与平台，**不能先加载 config.toml** —— 配置损坏
-    恰恰是最需要回滚的时刻，恢复路径不能依赖它要恢复的系统。
-
-    空字符串不是“未提供”：脚本里变量未设置时 `--rollback "$DIR"` 会传
-    空串，落到完整部署会写 /etc、重启服务，而用户以为自己在下发只读
-    的回滚指令。按参数错误拒绝。
+    Rollback needs only the backup directory and the platform, so it **must not load
+    config.toml first** -- a corrupt config is exactly when a rollback is most needed,
+    and the recovery path cannot depend on the thing it is recovering.
+    An empty string is not "not provided": scripts pass `--rollback "$DIR"` with the
+    variable unset, and that would fall through to a full deploy that writes /etc and
+    restarts services while the user believes they sent a read-only rollback. Reject it
+    as a usage error.
     """
     if raw is None:
         return False
     if not raw.strip():
-        s.fail("--rollback 需要一个备份目录路径（收到空字符串）", EXIT_USAGE)
+        s.fail("--rollback needs a backup directory path (got an empty string)", EXIT_USAGE)
     _do_rollback(Path(raw))
     return True
 
@@ -46,13 +47,13 @@ def _handle_rollback(raw: str | None) -> bool:
 def _apply_cli_overrides(
     config: Config, dns_backend: str | None, domain_suffix: str | None
 ) -> tuple[Config, str]:
-    """把 CLI 覆盖折进配置并校验；返回 (配置, 生效的 DNS 后端)。"""
+    """Fold the CLI overrides into the config and validate it; return (config, effective backend)."""
     backend = s._dns_backend(dns_backend, config)
     if domain_suffix is not None:
         config = replace(config, domain_suffix=domain_suffix)
         try:
-            # --domain-suffix 会直通 Caddyfile 与 /etc 下的 DNS 配置，
-            # 与 config.toml 同等对待：必须过校验，不能绕过
+            # --domain-suffix feeds straight into the Caddyfile and the DNS config under
+            # /etc, so it is treated like config.toml: it must be validated, not bypassed
             validate_config(config)
         except ConfigError as e:
             s.fail(str(e), EXIT_USAGE)
@@ -60,14 +61,16 @@ def _apply_cli_overrides(
 
 
 def _maybe_migrate(platform, paths, config, backend: str, yes: bool):
-    """检测并迁移遗留环境；迁移必须先于组件流程。
+    """Detect and migrate a legacy environment; the migration must precede the components.
 
-    组件会读迁移留下的状态（单元环境变量、storage）。backend 先折进
-    config，迁移与后续组件拿到的就是同一个后端。
+    Components read state the migration leaves behind (unit environment variables,
+    storage). The backend is folded into the config first, so the migration and the
+    following components see the same one.
 
-    遗留 Caddyfile 只在迁移内部读一次：storage 连续性与提示都由
-    `run_migration` 一次解析完成，生效配置从 `MigrationOutcome.config`
-    取回。这里若先调 `resolve_storage_details` 预读，同一文件就会被读两遍。
+    The legacy Caddyfile is read exactly once, inside the migration: storage continuity
+    and the notes are resolved in one pass by `run_migration`, and the effective config
+    comes back as `MigrationOutcome.config`. Reading it up front here (with
+    `resolve_storage_details`) would parse the same file twice.
     """
     config = replace(config, dns_backend=backend)
     state = detect_legacy(platform, paths)
@@ -86,37 +89,42 @@ def _maybe_migrate(platform, paths, config, backend: str, yes: bool):
 
 
 def _confirm_or_exit(plan, yes: bool) -> None:
-    """提权披露、非交互拒绝与交互确认。"""
+    """Disclose elevation, refuse when non-interactive, and confirm interactively."""
     if plan.needs_sudo:
-        s.console.print(f"[yellow]以下步骤需要 sudo（共 {len(plan.needs_sudo)} 项）：[/yellow]")
+        s.console.print(
+            f"[yellow]The following steps need sudo ({len(plan.needs_sudo)} total):[/yellow]"
+        )
         for a in plan.needs_sudo:
             s.console.print(f"  · {escape(a.description)}")
         if not yes and not s._interactive():
-            s.err_console.print("非交互环境且未指定 --yes，拒绝执行需要提权的步骤。")
+            s.err_console.print(
+                "Non-interactive environment without --yes; refusing to run steps that "
+                "need elevation."
+            )
             raise typer.Exit(EXIT_SUDO)
 
-    # 交互模式下的最后确认（§6.1）；--yes 或非交互环境直接跳过。
+    # Final confirmation in interactive mode; --yes or a non-interactive environment skips it.
     if not yes and s._interactive():
         prompt = (
-            f"以上 {len(plan.needs_sudo)} 项需要 sudo，继续？"
+            f"The {len(plan.needs_sudo)} step(s) above need sudo. Continue?"
             if plan.needs_sudo
-            else "即将执行以上变更，继续？"
+            else "About to apply the changes above. Continue?"
         )
         if not typer.confirm(prompt, default=True):
-            s.console.print("已取消：什么都没改（未执行任何变更）。")
+            s.console.print("Cancelled: nothing was changed (no changes were applied).")
             raise typer.Exit(EXIT_DECLINED)
 
 
 def _report_noop(plan, paths, config) -> None:
-    """没有变更时：全就绪则提示信任状态，否则如实报不健康。"""
+    """Nothing to change: report the trust state if all is ready, otherwise report honestly."""
     unhealthy = [r for r in plan.reports if not r.status.ok]
     if not unhealthy:
-        s.console.print("所有组件已就绪，无需变更。")
-        # 只有 CA 已生成且尚未完全信任时才提示 trust；--no-trust 的
-        # 场景下 CA 若已存在也会如实提示（用户本次显式跳过了信任）
+        s.console.print("All components are ready; nothing to change.")
+        # The trust hint only shows when the CA exists and is not fully trusted; with
+        # --no-trust an existing CA is still reported (the user explicitly skipped trust here)
         s._print_trust_hint_if_needed(paths, config)
         raise typer.Exit(EXIT_OK)
-    # 没有可执行的动作、但组件本身不健康 —— 不能谎报"已就绪"
+    # No actions to run but the components are unhealthy -- never claim "ready"
     s.print_noop_unhealthy(unhealthy)
     raise typer.Exit(EXIT_PRECONDITION)
 
@@ -125,11 +133,13 @@ def _report_noop(plan, paths, config) -> None:
 def setup(
     dns_backend: str = typer.Option(None, "--dns-backend", help="auto|resolved|system"),
     domain_suffix: str = typer.Option(None, "--domain-suffix"),
-    no_trust: bool = typer.Option(False, "--no-trust", help="跳过证书信任"),
-    yes: bool = typer.Option(False, "--yes", help="非交互模式，不询问"),
-    rollback_dir: str = typer.Option(None, "--rollback", help="从指定备份目录回滚"),
+    no_trust: bool = typer.Option(False, "--no-trust", help="Skip CA trust"),
+    yes: bool = typer.Option(False, "--yes", help="Non-interactive mode; do not ask"),
+    rollback_dir: str = typer.Option(
+        None, "--rollback", help="Roll back from the given backup directory"
+    ),
 ) -> None:
-    """部署本地开发环境（Caddy + dnsmasq + DNS 路由 + 证书信任 + 自启）。"""
+    """Deploy the local dev environment (Caddy + dnsmasq + DNS route + CA trust + autostart)."""
     if _handle_rollback(rollback_dir):
         return
 
@@ -138,20 +148,22 @@ def setup(
     config, backend = _apply_cli_overrides(config, dns_backend, domain_suffix)
     platform = s._platform()
     s.ensure_backend_supported(backend, platform)
-    # 参数都校验通过后才产生写副作用：部署分支需要目录与 import 目标，
-    # 只读命令不再依赖 build_context 建文件（I1）
+    # Write side effects only start once every argument has been validated: the deploy
+    # branch needs the directories and the import target, while read-only commands no
+    # longer rely on build_context creating files
     paths.ensure_files()
     config = _maybe_migrate(platform, paths, config, backend, yes)
 
     components = s._components(paths, config, backend, platform, include_cert=not no_trust)
-    # 记录 apply 阶段被 apply_plan 吞掉的 PermissionError，退出码才能区分
-    # “需要提权”（4）与普通失败（1）
+    # Record the PermissionError that apply_plan swallows during apply, so the exit code
+    # can tell "elevation needed" (4) from an ordinary failure (1)
     components, elevation_errors = s.track_elevation_errors(components)
 
     plan = s.build_plan(components)
     s.render_plan(plan)
-    # 整机作用域的披露：DNS= 与 FallbackDNS= 改的是**整台机器**的解析路径，
-    # 表格里放不下也看不清 —— 单独打一遍，用户点确认之前就该看到。
+    # Machine-wide scope disclosure: DNS= and FallbackDNS= change the resolution path of
+    # the **whole machine**, which neither fits nor reads well in the table -- print it
+    # separately, before the user is asked to confirm.
     s.print_scope_notes(plan)
 
     if plan.is_noop:
@@ -162,5 +174,5 @@ def setup(
     results = s.apply_plan(plan)
     if not s.print_apply_results(results):
         s.fail_for_apply_errors(elevation_errors)
-    s.console.print(f"完成。试试: {UP_EXAMPLE}")
+    s.console.print(f"Done. Try: {UP_EXAMPLE}")
     s._print_trust_hint_if_needed(paths, config)

@@ -1,4 +1,5 @@
-"""与 Caddy 交互：Admin API 客户端、配置校验、热加载、主 Caddyfile 生成。"""
+"""Interact with Caddy: Admin API client, config validation, hot reload, and
+main Caddyfile generation."""
 
 from __future__ import annotations
 
@@ -12,18 +13,18 @@ from pathlib import Path
 
 
 class CaddyError(RuntimeError):
-    """Caddy 交互失败：不可达、配置非法或 reload 失败。"""
+    """Caddy interaction failed: unreachable, invalid config, or reload failure."""
 
 
 @dataclass
 class CaddyAdmin:
-    """Caddy Admin API 客户端。"""
+    """Caddy Admin API client."""
 
     base: str = "http://127.0.0.1:2019"
     timeout: float = 5.0
 
     def api(self, method: str, path: str, body: object | None = None) -> tuple[int, object]:
-        """HTTP 错误返回 (code, None)；连接失败返回 (0, None)。"""
+        """HTTP errors return (code, None); connection failures return (0, None)."""
         url = self.base.rstrip("/") + path
         data = json.dumps(body).encode() if body is not None else None
         headers = {"Content-Type": "application/json"} if data else {}
@@ -35,14 +36,16 @@ class CaddyAdmin:
         except urllib.error.HTTPError as e:
             return e.code, None
         except (OSError, http.client.HTTPException):
-            # URLError 是 OSError 的子类；HTTPException（BadStatusLine /
-            # IncompleteRead 等）不是 —— admin 端口被非 HTTP 服务占用时
-            # 必须同样返回 (0, None)，不能穿出 api() 的「不抛异常」契约
+            # URLError is a subclass of OSError; HTTPException (BadStatusLine /
+            # IncompleteRead, etc.) is not -- when the admin port is occupied
+            # by a non-HTTP service we must likewise return (0, None) and not
+            # violate api()'s "never raises" contract
             return 0, None
         try:
             return status, (json.loads(raw) if raw else None)
         except (json.JSONDecodeError, UnicodeDecodeError):
-            # 200 但响应体不是 JSON —— 契约是 (code, body)，不能裸抛
+            # 200 but the response body is not JSON -- the contract is
+            # (code, body), so we cannot raise raw
             return status, None
 
     def is_alive(self) -> bool:
@@ -52,24 +55,27 @@ class CaddyAdmin:
 
 @dataclass
 class CaddyConfig:
-    """主 Caddyfile 的校验与热加载。"""
+    """Validation and hot reload for the main Caddyfile."""
 
     caddy_bin: Path
     caddyfile: Path
     admin_addr: str = "127.0.0.1:2019"
 
     def validate(self, caddyfile: Path | None = None, timeout: float = 30.0) -> tuple[bool, str]:
-        """校验配置；二进制缺失/不可执行或超时同样返回 (False, 说明)，不抛异常。"""
+        """Validate the config; a missing/non-executable binary or a timeout
+        also returns (False, message) instead of raising."""
         return self._run("validate", caddyfile or self.caddyfile, False, timeout)
 
     def reload(self, timeout: float = 30.0) -> tuple[bool, str]:
-        """热加载配置；二进制缺失/不可执行或超时同样返回 (False, 说明)，不抛异常。"""
+        """Hot reload the config; a missing/non-executable binary or a timeout
+        also returns (False, message) instead of raising."""
         return self._run("reload", self.caddyfile, True, timeout)
 
     def _run(
         self, subcommand: str, path: Path, with_address: bool, timeout: float
     ) -> tuple[bool, str]:
-        """validate / reload 的共同实现：拼参数、执行、把失败映射成 (False, 说明)。"""
+        """Shared implementation for validate / reload: build argv, run, and
+        map failures to (False, message)."""
         argv = [str(self.caddy_bin), subcommand, "--config", str(path)]
         if with_address:
             argv += ["--address", self.admin_addr]
@@ -81,21 +87,25 @@ class CaddyConfig:
                 timeout=timeout,
             )
         except OSError as e:
-            # 文件缺失 / 不可执行 / 格式不对（Exec format error）都归到这里
-            return False, f"caddy 二进制不存在或不可执行: {self.caddy_bin}（{e}）"
+            # Missing file / not executable / bad format (Exec format error)
+            # all land here
+            return False, f"caddy binary is missing or not executable: {self.caddy_bin} ({e})"
         except subprocess.TimeoutExpired:
-            return False, f"caddy {subcommand} 超时（{timeout}s）"
+            return False, f"caddy {subcommand} timed out ({timeout}s)"
         return proc.returncode == 0, (proc.stderr or proc.stdout).strip()
 
 
 def _caddy_token(value: str) -> str:
-    """把值渲染成 Caddyfile 的单个 token。
+    """Render a value as a single Caddyfile token.
 
-    路径/地址会直接进入 Caddyfile 这种配置语言：含空白时若不引用，会被
-    拆成多个 token（`/Volumes/My Disk`）；含换行时甚至能注入额外的配置行。
-    简单 token 原样输出（保持既有生成结果逐字节不变），其余用 JSON 字符串
-    引用 —— JSON 会把引号与换行转义，Caddy 的词法器只把 `\\"` 当转义，
-    未知转义留在 token 内，因此换行永远不会变成真正的行分隔符。
+    Paths/addresses go straight into the Caddyfile configuration language: if
+    whitespace-containing values are not quoted they are split into multiple
+    tokens (`/Volumes/My Disk`); with newlines they can even inject extra
+    config lines. Simple tokens are emitted as-is (keeping existing output
+    byte-for-byte identical); everything else is quoted as a JSON string --
+    JSON escapes quotes and newlines, and Caddy's lexer only treats `\\"` as an
+    escape, leaving unknown escapes inside the token, so a newline can never
+    become a real line separator.
     """
     safe = value and all(
         not ch.isspace() and ch not in '"`{}#' and 0x20 <= ord(ch) < 0x7F for ch in value
@@ -105,10 +115,11 @@ def _caddy_token(value: str) -> str:
 
 @dataclass(frozen=True)
 class MainCaddyfileSpec:
-    """生成主 Caddyfile 所需的全部输入。
+    """All inputs needed to generate the main Caddyfile.
 
-    参数收敛成一个值对象：调用点不会再把两个同类型的路径传反，
-    新增字段也只需改这里。
+    The parameters are consolidated into one value object: call sites can no
+    longer swap two paths of the same type, and new fields only need
+    changing here.
     """
 
     admin_addr: str
@@ -120,13 +131,15 @@ class MainCaddyfileSpec:
 
 
 def build_main_caddyfile(spec: MainCaddyfileSpec) -> str:
-    """生成主 Caddyfile：唯一全局块 + 两个 import。
+    """Generate the main Caddyfile: a single global block plus two imports.
 
-    被 import 的文件不能含全局块 —— 全局块只能有一个。
+    Imported files must not contain a global block -- only one global block
+    is allowed.
 
-    http_port / https_port 是 Caddy 的全局选项，写在这里才真正生效；
-    不写就永远是 Caddy 的默认 80/443，配置里的这两个键形同虚设。
-    默认值就是 80/443，所以生成结果与旧行为一致。
+    http_port / https_port are Caddy global options and only take effect when
+    written here; otherwise Caddy always uses its default 80/443 and those
+    two config keys are effectively dead. The defaults are 80/443, so the
+    generated output matches the previous behavior.
     """
     return (
         "{\n"

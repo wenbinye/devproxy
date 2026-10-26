@@ -9,7 +9,7 @@ from devproxy.cli._shared import EXIT_FAIL
 
 @app.command()
 def selftest() -> None:
-    """隔离 Caddy 实例端到端自检（不碰生产 443/2019）。"""
+    """End-to-end self-check against an isolated Caddy instance (leaves 443/2019 alone)."""
     from devproxy.gateway.selftest import run_selftest
 
     _, config, _, _ = s.build_context()
@@ -17,6 +17,6 @@ def selftest() -> None:
     for desc, ok in result.checks:
         s.console.print(f"  {'✅' if ok else '❌'} {desc}")
     if result.failed:
-        s.err_console.print(f"devproxy: selftest 失败 {len(result.failed)} 项")
+        s.err_console.print(f"devproxy: selftest failed {len(result.failed)} check(s)")
         raise typer.Exit(EXIT_FAIL)
-    s.console.print(f"selftest 全部通过 ✅（{len(result.checks)} 项）")
+    s.console.print(f"selftest passed ✅ ({len(result.checks)} checks)")

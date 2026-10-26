@@ -22,7 +22,9 @@ def test_ensure_creates_config_and_state_only(tmp_path):
     p.ensure()
     assert p.config_dir.is_dir()
     assert p.state_dir.is_dir()
-    assert not p.data_dir.exists(), "data_dir 由 Caddy 自行创建，工具不预建"
+    assert not p.data_dir.exists(), (
+        "data_dir is created by Caddy itself; the tool never pre-creates it"
+    )
 
 
 def test_ensure_files_creates_import_targets(tmp_path):
@@ -44,19 +46,19 @@ def test_default_paths_honours_env(tmp_path, monkeypatch):
 
 
 def test_default_paths_stay_inside_isolated_home():
-    """家目录被夹具指向临时目录后，默认路径绝不能落在真实 HOME 里。
+    """With HOME pointed at a temp dir by the fixture, no default path may land in the real HOME.
 
-    否则一次 ensure_files() 就会在用户真实的 ~/.config/devproxy 与
-    ~/.local/state/devproxy 里凭空造出文件。
+    Otherwise one ensure_files() would conjure files inside the user's real
+    ~/.config/devproxy and ~/.local/state/devproxy.
     """
     home = Path.home()
     p = default_paths()
     for path in (p.config_dir, p.state_dir, p.data_dir):
-        assert str(path).startswith(str(home)), f"{path} 跑到了 HOME 之外"
+        assert str(path).startswith(str(home)), f"{path} escaped HOME"
 
 
 def test_default_state_dir_is_the_single_source_of_truth(tmp_path, monkeypatch):
-    """状态目录只有一个来源 —— 平台层不许自己拼路径。"""
+    """The state directory has exactly one source -- the platform layer must not build its own path."""
     monkeypatch.setenv("DEVPROXY_STATE_DIR", str(tmp_path / "st"))
     assert default_state_dir() == tmp_path / "st"
     assert default_paths().state_dir == tmp_path / "st"

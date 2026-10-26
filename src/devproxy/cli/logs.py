@@ -25,10 +25,10 @@ _SERVICE_LOGS = ("caddy", "dnsmasq")
 
 
 def _route_log_files() -> list[Path]:
-    """有哪些路由日志文件（按名字排序）。"""
+    """The route log files that exist (sorted by name)."""
     try:
         paths, _, _, _ = s.build_context()
-    except Exception:  # noqa: BLE001 —— 读不到就当没有，不该因此报错
+    except Exception:  # noqa: BLE001 -- unreadable means none; this must not raise
         return []
     log_dir = paths.log_dir / "routes"
     if not log_dir.is_dir():
@@ -37,7 +37,7 @@ def _route_log_files() -> list[Path]:
 
 
 def _known_route_logs() -> list[str]:
-    """有哪些路由日志可看（只给名字）。"""
+    """The route logs that can be viewed (names only)."""
     return [path.stem for path in _route_log_files()]
 
 
@@ -50,10 +50,11 @@ def _format_size(size: int) -> str:
 
 
 def _declared_route_names() -> tuple[set[str] | None, Path | None]:
-    """当前项目（devproxy.toml）声明了哪些路由。
+    """Which routes this project (devproxy.toml) declares.
 
-    返回 (名字集合, 项目文件路径)。不在项目里返回 (None, None)；
-    项目文件坏了返回 (None, 路径) —— 调用方提示后按"无项目"处理。
+    Returns (name set, project file path). Outside a project it returns (None, None);
+    a broken project file returns (None, path) -- the caller shows a note and then
+    behaves as if there were no project.
     """
     found = find_project_file()
     if found is None:
@@ -61,7 +62,7 @@ def _declared_route_names() -> tuple[set[str] | None, Path | None]:
     try:
         project = load_project_file(found)
     except ProjectFileError as e:
-        s.err_console.print(f"⚠️  {escape(str(e))} —— 按全部路由列出")
+        s.err_console.print(f"⚠️  {escape(str(e))} -- listing every route instead")
         return None, found
     return {route.name for route in project.routes}, found
 
@@ -70,7 +71,7 @@ def _log_line(path: Path) -> str:
     try:
         size = _format_size(path.stat().st_size)
     except OSError:
-        return f"{path.stem:<20} （还没有日志）"
+        return f"{path.stem:<20} (no log yet)"
     return f"{path.stem:<20} {size:>8}"
 
 
@@ -89,24 +90,25 @@ _PALETTE = (
 
 
 def _follow_project(project_path: Path, names: list[str]) -> None:
-    """跟随本项目所有应用的日志。一个就是 tail -f；多个带彩色标签。"""
+    """Follow the logs of every app in this project. One is tail -f; several get coloured tags."""
     paths, _, _, _ = s.build_context()
     targets: list[tuple[str, Path]] = []
     missing: list[str] = []
     for name in names:
         path = route_log_path(paths, name)
         if path.exists():
-            targets.append((name, path))  # 标签就是应用名
+            targets.append((name, path))  # the tag is the app name
         else:
             missing.append(name)
 
     if not targets:
         s.err_console.print(
-            f"devproxy: 本项目声明了 {'、'.join(names)}，但还没有日志 —— 跑一次 devproxy up"
+            f"devproxy: this project declares {', '.join(names)}, but there are no logs yet "
+            "-- run devproxy up"
         )
         raise typer.Exit(EXIT_USAGE)
     if missing:
-        s.err_console.print(f"   已声明但还没有日志（跳过）：{'、'.join(missing)}")
+        s.err_console.print(f"   declared but no logs yet (skipped): {', '.join(missing)}")
 
     try:
         if len(targets) == 1:
@@ -114,52 +116,54 @@ def _follow_project(project_path: Path, names: list[str]) -> None:
         else:
             colors = {tag: _PALETTE[i % len(_PALETTE)] for i, (tag, _) in enumerate(targets)}
             width = max(len(tag) for tag, _ in targets)
-            s.console.print("跟随中（Ctrl-C 退出）：")
+            s.console.print("Following (Ctrl-C to exit):")
             for tag, _ in targets:
-                # 名字必须转义：rich 会把方括号内容当标记解析。
-                # 不带路径 —— 长路径会被折行，且名字本身就是身份
+                # The name must be escaped: rich parses anything in brackets as markup.
+                # No path -- long paths wrap, and the name is the identity
                 s.console.print(f"  {escape(f'[{tag}]')}", style=colors[tag])
             for tag, line in follow_many(targets):
                 text = Text()
-                # 名字补齐到同一宽度，几行日志能纵向对齐
+                # Pad the name to one width so consecutive lines line up vertically
                 text.append(f"[{tag}]".ljust(width + 2) + " ", style=colors[tag])
                 text.append(line.rstrip("\n"))
                 s.console.print(text)
     except KeyboardInterrupt:
-        # Ctrl-C：正常退出方式，不是错误
+        # Ctrl-C is a normal way to exit, not an error
         raise typer.Exit(0) from None
 
 
 def _print_one(service: str) -> None:
-    """`logs <名字> --list`：只看这一个目标的信息。"""
+    """`logs <name> --list`: show the information for this one target."""
     if service in _SERVICE_LOGS:
-        s.console.print(f"服务日志：{service}（用 devproxy logs {service} 跟随）")
+        s.console.print(f"Service log: {service} (follow it with devproxy logs {service})")
         return
     known = _known_route_logs()
     paths, _, _, _ = s.build_context()
     path = route_log_path(paths, service)
     if service in known:
-        s.console.print(f"路由日志：{_log_line(path)}")
-        s.console.print(f"  完整路径：{path}")
-        s.console.print(f"  跟随：devproxy logs {service}")
+        s.console.print(f"Route log: {_log_line(path)}")
+        s.console.print(f"  Full path: {path}")
+        s.console.print(f"  Follow: devproxy logs {service}")
         return
     s.err_console.print(
-        f"devproxy: 没有叫 {service} 的日志（可选：{' / '.join(_SERVICE_LOGS)}，或路由名）"
+        f"devproxy: there is no log named {service} "
+        f"(choose from: {' / '.join(_SERVICE_LOGS)}, or a route name)"
     )
     if known:
-        s.err_console.print(f"   可用的路由日志：{'、'.join(known)}")
+        s.err_console.print(f"   available route logs: {', '.join(known)}")
     raise typer.Exit(EXIT_USAGE)
 
 
-# 找不到 EDITOR 时的候选：按顺序探测 PATH，用第一个存在的
+# Candidates when EDITOR is unset: probe PATH in order and use the first one present
 _EDITOR_CANDIDATES = ("vim", "vi", "nano")
 
 
 def _resolve_editor() -> str:
-    """用哪个编辑器：$EDITOR 优先，其次 $VISUAL，都没有就找 vim / vi / nano。
+    """Which editor to use: $EDITOR first, then $VISUAL, then look for vim / vi / nano.
 
-    候选是**探测**出来的（which），不是硬塞 —— 硬塞一个用户机器上根本没装的
-    编辑器，只会换来一句 "command not found"。三个都没有才报错退出 2。
+    The candidates are **probed** (which), never forced -- forcing an editor the user's
+    machine does not have just earns a "command not found". Only when all three are
+    missing does this error out with exit 2.
     """
     editor = (os.environ.get("EDITOR") or os.environ.get("VISUAL") or "").strip()
     if editor:
@@ -168,29 +172,30 @@ def _resolve_editor() -> str:
         if which(candidate):
             return candidate
     s.err_console.print(
-        "devproxy: 不知道用哪个编辑器打开日志 —— 没有设置 EDITOR（或 VISUAL），"
-        "PATH 里也没有 vim / vi / nano。\n"
-        "   例：export EDITOR=vim   然后重跑 devproxy logs <名字> --edit"
+        "devproxy: do not know which editor to open the log with -- neither EDITOR nor "
+        "VISUAL is set and vim / vi / nano are not on PATH.\n"
+        "   e.g.: export EDITOR=vim   then rerun devproxy logs <name> --edit"
     )
     raise typer.Exit(EXIT_USAGE)
 
 
 def _edit_log(service: str) -> None:
-    """`logs <名字> --edit`：用 $EDITOR 打开日志文件。"""
+    """`logs <name> --edit`: open the log file with $EDITOR."""
     if service in _SERVICE_LOGS:
         s.err_console.print(
-            f"devproxy: {service} 是服务日志，不是文件，编辑器打不开"
-            f"（用 devproxy logs {service} 跟随）"
+            f"devproxy: {service} is a service log rather than a file, so an editor cannot "
+            f"open it (use devproxy logs {service} to follow it)"
         )
         raise typer.Exit(EXIT_USAGE)
 
     known = _known_route_logs()
     if service not in known:
         s.err_console.print(
-            f"devproxy: 没有叫 {service} 的日志（可选：{' / '.join(_SERVICE_LOGS)}，或路由名）"
+            f"devproxy: there is no log named {service} "
+            f"(choose from: {' / '.join(_SERVICE_LOGS)}, or a route name)"
         )
         if known:
-            s.err_console.print(f"   可用的路由日志：{'、'.join(known)}")
+            s.err_console.print(f"   available route logs: {', '.join(known)}")
         raise typer.Exit(EXIT_USAGE)
 
     editor = _resolve_editor()
@@ -199,24 +204,25 @@ def _edit_log(service: str) -> None:
     try:
         code = s._platform().open_in_editor(path, editor)
     except FileNotFoundError as e:
-        s.err_console.print(f"devproxy: 打不开编辑器 {editor}：{escape(str(e))}")
+        s.err_console.print(f"devproxy: cannot open the editor {editor}: {escape(str(e))}")
         raise typer.Exit(EXIT_FAIL) from e
     except OSError as e:
-        s.err_console.print(f"devproxy: 打开日志失败：{escape(str(e))}")
+        s.err_console.print(f"devproxy: failed to open the log: {escape(str(e))}")
         raise typer.Exit(EXIT_FAIL) from e
     if code != 0:
-        s.err_console.print(f"devproxy: 编辑器 {editor} 退出码 {code}")
+        s.err_console.print(f"devproxy: the editor {editor} exited with code {code}")
         raise typer.Exit(EXIT_FAIL)
 
 
 def _print_list(project_names: set[str] | None, project_path: Path | None) -> None:
-    """列出能跟的日志目标。
+    """List the log targets that can be followed.
 
-    在项目里（devproxy.toml 存在）只列**本项目声明**的路由 —— 机器上的
-    路由表是全局的，别的项目的日志混进来只会碍事。
+    Inside a project (a devproxy.toml exists) only the routes **this project declares**
+    are listed -- the machine's route table is global, and other projects' logs only
+    get in the way.
     """
     in_project = project_names is not None
-    s.console.print("服务日志：")
+    s.console.print("Service logs:")
     for name in _SERVICE_LOGS:
         s.console.print(f"  {name}")
 
@@ -227,63 +233,68 @@ def _print_list(project_names: set[str] | None, project_path: Path | None) -> No
     if not files:
         if in_project:
             s.console.print(
-                "路由日志：（本项目声明了 "
-                f"{'、'.join(sorted(project_names or ()))}，但还没有日志 —— 跑一次 devproxy up）"
+                "Route logs: (this project declares "
+                f"{', '.join(sorted(project_names or ()))}, but there are no logs yet "
+                "-- run devproxy up)"
             )
         else:
-            s.console.print("路由日志：（没有 —— 跑一次 devproxy up 就会有）")
+            s.console.print("Route logs: (none -- run devproxy up and they will appear)")
         s.console.print("")
-        s.console.print("用 devproxy logs <名字> 跟随。")
+        s.console.print("Follow one with devproxy logs <name>.")
         return
 
-    # 标题行不带长路径（Rich 80 列会折行，名字与大小就对不齐）；
-    # 每个日志的完整路径单独成行 —— 折了也不影响上面对齐，
-    # 用户要复制路径（喂给编辑器、tail、grep）时也不用自己拼
+    # The heading carries no long path (Rich wraps at 80 columns and the names would no
+    # longer line up with the sizes); each log's full path goes on its own line -- a wrap
+    # there does not disturb the alignment above, and users who want to copy the path
+    # (into an editor, tail, grep) need not assemble it themselves
     if in_project:
-        s.console.print(f"本项目（devproxy.toml：{project_path}）：", soft_wrap=True)
+        s.console.print(f"This project (devproxy.toml: {project_path}):", soft_wrap=True)
     else:
-        s.console.print("路由日志：")
+        s.console.print("Route logs:")
     for path in files:
         try:
             size = _format_size(path.stat().st_size)
         except OSError:
             size = "?"
         s.console.print(f"  {path.stem:<20} {size:>8}")
-        # soft_wrap：不折行。路径被 Rich 折成两行就没法复制了（终端自己会软换行，
-        # 但流里仍是一整行）
+        # soft_wrap: do not wrap. A path split across two lines cannot be copied (the
+        # terminal soft-wraps on its own, but the stream still holds one line)
         s.console.print(f"    {path}", soft_wrap=True)
 
-    # 项目里声明了、但还没起过（没有日志文件）的路由也提示一下
+    # Also mention routes this project declares that have never run (no log file yet)
     if in_project:
         have = {f.stem for f in files}
         missing = sorted((project_names or set()) - have)
         if missing:
-            s.console.print(f"  已声明但还没有日志：{'、'.join(missing)}（跑一次 devproxy up）")
+            s.console.print(f"  declared but no logs yet: {', '.join(missing)} (run devproxy up)")
 
     s.console.print("")
-    s.console.print("用 devproxy logs <名字> 跟随。")
+    s.console.print("Follow one with devproxy logs <name>.")
 
 
 @app.command()
 def logs(
     service: str = typer.Argument(
         None,
-        help="caddy|dnsmasq|<路由名>（默认 caddy）",
+        help="caddy|dnsmasq|<route name> (caddy by default)",
         autocompletion=_completion.log_targets,
     ),
     list_all: bool = typer.Option(
-        False, "--list", help="列出能跟的日志目标（项目里只列本项目的），不跟随"
+        False,
+        "--list",
+        help="List the log targets that can be followed (only this project's when inside one); do not follow",
     ),
     edit: bool = typer.Option(
         False,
         "--edit",
         "-e",
-        help="用 $EDITOR 打开日志文件（只对路由日志有效；没设 EDITOR 就依次找 vim / vi / nano）",
+        help="Open the log file with $EDITOR (route logs only; falls back to vim / vi / nano "
+        "when EDITOR is unset)",
     ),
 ) -> None:
-    """跟踪日志：服务（caddy / dnsmasq）或路由（sync 起的应用）。"""
+    """Follow logs: a service (caddy / dnsmasq) or a route (an app started by up)."""
     if list_all and edit:
-        s.err_console.print("devproxy: --list 与 --edit 不能同时用")
+        s.err_console.print("devproxy: --list and --edit cannot be used together")
         raise typer.Exit(EXIT_USAGE)
 
     if list_all:
@@ -297,20 +308,21 @@ def logs(
     if edit:
         if not service:
             s.err_console.print(
-                "devproxy: --edit 要指定打开哪个日志（devproxy logs <名字> --edit）"
+                "devproxy: --edit needs to know which log to open (devproxy logs <name> --edit)"
             )
             raise typer.Exit(EXIT_USAGE)
         _edit_log(service)
         raise typer.Exit(0)
 
     if service is None:
-        # 裸 `devproxy logs`：项目里跟本项目的**所有应用**；项目外跟 caddy（老行为）
+        # Bare `devproxy logs`: inside a project follow **every app** in it; outside one,
+        # follow caddy (the old behaviour)
         found = find_project_file()
         if found is not None:
             try:
                 project = load_project_file(found)
             except ProjectFileError as e:
-                s.err_console.print(f"⚠️  {escape(str(e))} —— 改为跟随 caddy")
+                s.err_console.print(f"⚠️  {escape(str(e))} -- following caddy instead")
             else:
                 names = [route.name for route in project.routes]
                 _follow_project(found, names)
@@ -319,28 +331,33 @@ def logs(
 
     if service in _SERVICE_LOGS:
         try:
-            # 只读命令：不碰 build_context（它会加载配置并解析 storage 留档）
+            # Read-only command: skip build_context (it loads the config and resolves the
+            # storage archive)
             s._platform().tail_service_log(service)
         except PermissionError as e:
             s.err_console.print(f"devproxy: {escape(str(e))}")
             raise typer.Exit(EXIT_SUDO) from e
         except OSError as e:
-            # journalctl 不存在等：干净报错，不要把 FileNotFoundError 漏成 traceback
-            s.err_console.print(f"devproxy: 无法读取 {service} 日志: {escape(str(e))}")
+            # journalctl missing, etc.: fail cleanly, never leak a FileNotFoundError as a
+            # traceback
+            s.err_console.print(f"devproxy: cannot read the {service} log: {escape(str(e))}")
             raise typer.Exit(EXIT_FAIL) from e
         return
 
-    # 路由日志：~/.local/state/devproxy/logs/routes/<名字>.log
+    # Route logs: ~/.local/state/devproxy/logs/routes/<name>.log
     known = _known_route_logs()
     if service not in known:
-        # 参数错误按全局约定退出 2（§9.1），而不是运行失败 1
+        # A usage error exits 2 by global convention, not the runtime-failure 1
         s.err_console.print(
-            f"devproxy: 未知服务 {service}（可选：{' / '.join(_SERVICE_LOGS)}，或路由名）"
+            f"devproxy: unknown service {service} "
+            f"(choose from: {' / '.join(_SERVICE_LOGS)}, or a route name)"
         )
         if known:
-            s.err_console.print(f"   可用的路由日志：{'、'.join(known)}")
+            s.err_console.print(f"   available route logs: {', '.join(known)}")
         else:
-            s.err_console.print("   （当前没有路由日志 —— 跑一次 devproxy up 就会有）")
+            s.err_console.print(
+                "   (no route logs right now -- run devproxy up and they will appear)"
+            )
         raise typer.Exit(EXIT_USAGE)
 
     paths, _, _, _ = s.build_context()
@@ -350,5 +367,5 @@ def logs(
     except KeyboardInterrupt:
         raise typer.Exit(0) from None
     except FileNotFoundError:
-        s.err_console.print(f"devproxy: 日志文件不存在: {path}")
+        s.err_console.print(f"devproxy: log file not found: {path}")
         raise typer.Exit(EXIT_FAIL) from None

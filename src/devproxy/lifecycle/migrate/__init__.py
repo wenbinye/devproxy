@@ -1,13 +1,17 @@
-"""遗留环境检测与迁移。
+"""Legacy environment detection and migration.
 
-迁移的铁律：先备份，再动手。任何一步失败都能按备份还原。
+The iron rule of migration: back up first, then act. Any failed step can be
+restored from the backup.
 
-被迁移的是用户**手工维护**的环境：自己写的 caddy.service、自己写的 Caddyfile、
-自己写的 dnsmasq 配置。工具接管它们之前必须先把原件完整备份下来 ——
-备份失败就一步都不动。
+What gets migrated is the user's **hand-maintained** environment: their own
+caddy.service, their own Caddyfile, their own dnsmasq config. Before taking
+them over, the tool must back up the originals in full -- if the backup fails,
+nothing is touched.
 
-实现分散在同包的几个模块里（caddyfile / legacy / install / rollback），
-这里只做编排，并把公共名字转出，供包外按 `devproxy.lifecycle.migrate.<名字>` 使用。
+The implementation is spread across several modules in this package
+(caddyfile / legacy / install / rollback); this module only orchestrates and
+re-exports the public names so code outside the package can use them via
+`devproxy.lifecycle.migrate.<name>`.
 """
 
 from __future__ import annotations
@@ -70,10 +74,11 @@ __all__ = [
 
 @dataclass(frozen=True)
 class MigrationRequest:
-    """一次遗留环境迁移的完整输入。
+    """Complete input for one legacy environment migration.
 
-    参数收敛在一个对象里，调用点不会再把 `dnsmasq_conf` / `dns_route`
-    两个同类型的可选路径传反；`config` 里已经折进生效的 DNS 后端。
+    Parameters are gathered into a single object so call sites can no longer swap
+    the two same-typed optional paths `dnsmasq_conf` / `dns_route`; `config`
+    already folds in the effective DNS backend.
     """
 
     platform: Platform
@@ -87,15 +92,16 @@ class MigrationRequest:
 
 @dataclass
 class MigrationOutcome:
-    """迁移的结果：备份对象 + 生效配置 + 需要告诉用户的提示。
+    """Result of a migration: backup object + effective config + notes for the user.
 
-    `notes` 是返回值的一部分，不再是调用方传进来、被就地修改的
-    可变输出参数（CQS）。
+    `notes` is now part of the return value, no longer a mutable output parameter
+    that the caller passes in and that gets modified in place (CQS).
 
-    `config` 是 storage 连续性处理后的**生效配置**：调用方（setup）
-    必须用它继续组件流程，否则会在主 Caddyfile 里写回旧 storage，
-    让 Caddy 重新生成 CA。把它放进返回值，调用方就不必在迁移前
-    先读一遍遗留 Caddyfile（那是重复读取）。
+    `config` is the **effective config** after storage continuity handling: the
+    caller (setup) must continue the component flow with it, otherwise it would
+    write the old storage back into the main Caddyfile and make Caddy regenerate
+    the CA. Returning it means the caller no longer has to read the legacy
+    Caddyfile before migrating (that would be a duplicate read).
     """
 
     backup: Backup
@@ -106,14 +112,15 @@ class MigrationOutcome:
 def default_dns_route(
     platform: Platform, paths: Paths, config: Config, backend: str | None = None
 ) -> Path:
-    """本次迁移要备份的 DNS 路由文件（/etc 下的 drop-in）。
+    """DNS route file to back up for this migration (the drop-in under /etc).
 
-    与 DnsComponent 写的是同一个文件 —— 迁移后的 setup 会改写它，
-    所以必须在迁移前备份。
+    It is the same file DnsComponent writes -- the setup after migration will
+    rewrite it, so it must be backed up before migration.
 
-    backend 必须与组件流程实际使用的后端一致：用户显式指定
-    `--dns-backend system` 时，组件写的是 /etc/dnsmasq.d/devproxy.conf，
-    备份的却是 resolved 那个文件 —— 被改动的文件不在备份里，回滚删不掉。
+    backend must match the backend the component flow actually uses: when the
+    user explicitly passes `--dns-backend system`, the component writes
+    /etc/dnsmasq.d/devproxy.conf, but the backup would be of the resolved file --
+    the modified file would not be in the backup and rollback could not delete it.
     """
     from devproxy.components.dns import DnsComponent
 
@@ -128,10 +135,11 @@ def _default_dnsmasq_conf() -> Path:
 
 
 def run_migration(request: MigrationRequest) -> MigrationOutcome:
-    """执行迁移，返回备份与提示。调用方可据此回滚。
+    """Run the migration, returning the backup and notes. The caller can roll back with them.
 
-    顺序是铁律：先备份，再动手。备份失败 → 一个文件都不改；改写失败或
-    被 Ctrl-C 中断 → 按备份还原后再抛。
+    The order is an iron rule: back up first, then act. Backup fails -> not a
+    single file is changed; rewrite fails or is interrupted by Ctrl-C -> restore
+    from the backup, then re-raise.
     """
     platform = request.platform
     paths = request.paths
@@ -139,11 +147,13 @@ def run_migration(request: MigrationRequest) -> MigrationOutcome:
     config = request.config
     if state.error:
         raise MigrationError(
-            f"{state.error}。为避免在没有备份的情况下覆盖用户手工维护的单元，"
-            f"迁移已中止（未改动任何文件）"
+            f"{state.error}; to avoid overwriting a hand-maintained unit without a backup, "
+            f"migration was aborted (no files changed)"
         )
     if state.config_path is None:
-        raise MigrationError("遗留 Caddyfile 路径未知，迁移已中止（未改动任何文件）")
+        raise MigrationError(
+            "legacy Caddyfile path is unknown; migration aborted (no files changed)"
+        )
     notes: list[str] = []
     conf = request.dnsmasq_conf if request.dnsmasq_conf is not None else _default_dnsmasq_conf()
     route = (
@@ -151,38 +161,42 @@ def run_migration(request: MigrationRequest) -> MigrationOutcome:
         if request.dns_route is not None
         else default_dns_route(platform, paths, config, request.backend)
     )
-    # storage 连续性：沿用遗留 Caddyfile 的 storage —— CA 不能换地方。
-    # 一次解析同时拿到路径与提示，不再重复读文件、也不再做恒真比较。
+    # Storage continuity: keep the legacy Caddyfile's storage -- the CA must not move.
+    # A single parse yields both the path and the note: no repeated file reads and
+    # no always-true comparison.
     config, legacy_storage, storage_note = resolve_storage_details(config, state)
     if storage_note:
         notes.append(storage_note)
     targets = [
-        state.unit_path,  # 会被改写
-        state.config_path,  # 旧 Caddyfile —— 留存副本，回滚要用
-        paths.caddyfile,  # 工具的主 Caddyfile
-        paths.sites_caddy,  # 个人站点
-        conf,  # 用户的 dnsmasq 配置（后续 setup 会合并改写）
-        platform.service_unit_path("dnsmasq"),  # 后续 setup 会重装这个单元
-        route,  # /etc 下的 DNS 路由 drop-in
-        paths.caddy_env,  # 迁移留下的单元环境变量留档
-        paths.caddy_storage,  # 迁移留下的 storage 留档
+        state.unit_path,  # gets rewritten
+        state.config_path,  # old Caddyfile -- keep a copy, rollback needs it
+        paths.caddyfile,  # the tool's main Caddyfile
+        paths.sites_caddy,  # personal sites
+        conf,  # the user's dnsmasq config (later setup merges and rewrites it)
+        platform.service_unit_path("dnsmasq"),  # later setup reinstalls this unit
+        route,  # DNS route drop-in under /etc
+        paths.caddy_env,  # archive of unit environment variables left by migration
+        paths.caddy_storage,  # archive of the storage left by migration
     ]
     backup = _create_backup(platform, paths, targets)
     try:
-        # 主 Caddyfile 会 import 这两个文件 —— 校验之前必须先在，
-        # 否则 caddy 只会报 "file not found"，迁移被自己的校验拦死。
+        # The main Caddyfile imports these two files -- they must exist before
+        # validation, otherwise caddy only reports "file not found" and migration
+        # gets blocked by its own validation.
         paths.ensure_files()
         notes.extend(_write_sites_caddy(paths, state, config))
         notes.extend(_validate_caddyfile(platform, paths, config, state))
         _write_main_caddyfile(paths, config)
         notes.extend(_install_caddy_unit(platform, paths, config, state))
-        # 生效的 storage 就是遗留的 storage 时必须留档：之后的 setup
-        # 换了位置，Caddy 会重新生成 CA。
+        # When the effective storage is the legacy storage it must be archived:
+        # later setup moves it, and Caddy would regenerate the CA.
         if legacy_storage is not None:
             save_legacy_storage(paths, legacy_storage)
-        # 重启也在同一条失败路径里：普通失败由 _restart_caddy 自己降级成
-        # 提示；Ctrl-C 仍按“中断”整体还原，绝不会让用户只看到 traceback。
+        # Restart is on the same failure path too: ordinary failures are
+        # downgraded to a note by _restart_caddy itself; Ctrl-C still restores
+        # everything as an "interruption" and never leaves the user with just a
+        # traceback.
         notes.extend(_restart_caddy(platform))
-    except BaseException as exc:  # noqa: BLE001 —— 含 KeyboardInterrupt，必须还原
+    except BaseException as exc:  # noqa: BLE001 -- includes KeyboardInterrupt, must restore
         _restore_after_failure(platform, backup, exc, notes=notes)
     return MigrationOutcome(backup=backup, config=config, notes=notes)

@@ -1,4 +1,4 @@
-"""uninstall 的行为测试：平台能力、计划顺序、CA 规则、幂等与 CLI。"""
+"""Behavior tests for uninstall: platform capabilities, plan order, CA rules, idempotency, and CLI."""
 
 from __future__ import annotations
 
@@ -27,12 +27,12 @@ from devproxy.platform.linux import LinuxPlatform
 from devproxy.platform.macos import MacOSPlatform
 
 # ---------------------------------------------------------------------------
-# 测试夹具与小工具
+# Test fixtures and small helpers
 # ---------------------------------------------------------------------------
 
 
 def cert_pem(seed: str) -> str:
-    """造一个 PEM 证书块：指纹判据只关心 DER 字节，不需要真的 X.509。"""
+    """Build a PEM certificate block: fingerprint checks only care about DER bytes, so it need not be real X.509."""
     payload = base64.b64encode(seed.encode("utf-8")).decode("ascii")
     return f"-----BEGIN CERTIFICATE-----\n{payload}\n-----END CERTIFICATE-----\n"
 
@@ -45,7 +45,7 @@ def make_config(paths: Paths) -> Config:
 
 
 def make_targets(tmp_path: Path) -> UninstallTargets:
-    """把所有系统路径指到 tmp_path —— 永不碰真实 /etc 与钥匙串。"""
+    """Point every system path at tmp_path -- never touch the real /etc or keychain."""
     return UninstallTargets(
         resolved_conf=tmp_path / "etc" / "systemd" / "resolved.conf.d" / "devproxy.conf",
         system_dnsmasq_conf=tmp_path / "etc" / "dnsmasq.d" / "devproxy.conf",
@@ -109,7 +109,7 @@ def seed_service(platform: FakePlatform, name: str) -> None:
 def seed_state(paths: Paths, *, include_storage_archive: bool = False) -> None:
     paths.config_dir.mkdir(parents=True, exist_ok=True)
     paths.state_dir.mkdir(parents=True, exist_ok=True)
-    (paths.config_dir / "sites.caddy").write_text("# 我的站点\n", encoding="utf-8")
+    (paths.config_dir / "sites.caddy").write_text("# my sites\n", encoding="utf-8")
     (paths.config_dir / "config.toml").write_text("", encoding="utf-8")
     targets = {
         paths.caddyfile: "# main\n",
@@ -162,7 +162,9 @@ def test_linux_remove_service_is_idempotent(tmp_path, monkeypatch):
     assert ["systemctl", "--user", "daemon-reload"] in calls
 
     calls.clear()
-    platform.remove_service("caddy")  # 第二次：单元已不存在，仍须成功
+    platform.remove_service(
+        "caddy"
+    )  # Second time: the unit is already gone, but it must still succeed
     assert calls == [
         ["systemctl", "--user", "disable", "--now", "caddy"],
         ["systemctl", "--user", "daemon-reload"],
@@ -181,7 +183,7 @@ def test_linux_remove_service_ignores_missing_service(tmp_path, monkeypatch):
 
     monkeypatch.setattr(linux_mod, "_run", fake_run)
     platform = LinuxPlatform(user_home=tmp_path)
-    platform.remove_service("caddy")  # 不抛异常
+    platform.remove_service("caddy")  # Must not raise
     assert not platform.service_unit_path("caddy").exists()
 
 
@@ -269,7 +271,7 @@ def test_fake_platform_remove_service_clears_state():
     assert not platform.service_unit_path("caddy").exists()
     assert ["remove-service", "caddy"] in platform.commands
 
-    platform.remove_service("caddy")  # 幂等
+    platform.remove_service("caddy")  # Idempotent
 
 
 def test_platform_protocol_includes_remove_service(tmp_path):
@@ -279,7 +281,7 @@ def test_platform_protocol_includes_remove_service(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# build_plan：顺序与内容
+# build_plan: order and content
 # ---------------------------------------------------------------------------
 
 
@@ -303,7 +305,7 @@ def test_plan_order_kill_services_dns_ca_state(paths, tmp_path):
     targets.system_dnsmasq_conf.write_text("dns\n", encoding="utf-8")
     ca = write_ca(config)
     platform.trusted.add(ca)
-    platform.nss_entries_db[(platform.nss_db, "任意昵称")] = (ca, "C,,")
+    platform.nss_entries_db[(platform.nss_db, "arbitrary nickname")] = (ca, "C,,")
     seed_state(paths)
 
     plan = build_plan(platform, paths, config, purge=False, remove_ca=False, targets=targets)
@@ -318,7 +320,7 @@ def test_plan_order_kill_services_dns_ca_state(paths, tmp_path):
     assert any(c[:1] == ["remove-nss-ca"] for c in executed)
     assert any(c[:1] == ["remove-linux-system-ca"] for c in executed)
 
-    # 顺序：进程 → 服务 → DNS → CA → 状态文件
+    # Order: processes -> services -> DNS -> CA -> state files
     def index_of(predicate):
         return next(i for i, action in enumerate(plan.actions) if predicate(action))
 
@@ -414,7 +416,7 @@ def test_plan_dnsmasq_without_backup_keeps_file(paths, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# CA 的两条规则
+# The two CA rules
 # ---------------------------------------------------------------------------
 
 
@@ -431,8 +433,8 @@ def test_plan_keeps_migrated_ca_by_default(paths, tmp_path):
         c[:1] in (["remove-nss-ca"], ["remove-linux-system-ca"], ["remove-macos-ca"])
         for c in commands(plan)
     )
-    assert any("storage 留档" in note for note in plan.notes)
-    assert any("CA 根证书" in item for item in plan.kept)
+    assert any("storage archive" in note for note in plan.notes)
+    assert any("CA root certificate" in item for item in plan.kept)
 
 
 def test_plan_remove_ca_forces_migrated_ca_removal(paths, tmp_path):
@@ -446,7 +448,7 @@ def test_plan_remove_ca_forces_migrated_ca_removal(paths, tmp_path):
 
     plan = build_plan(platform, paths, config, purge=False, remove_ca=True, targets=targets)
     assert any(c[:1] == ["remove-linux-system-ca"] for c in commands(plan))
-    assert any("迁移前就存在" in note for note in plan.notes)
+    assert any("existed before migration" in note for note in plan.notes)
 
 
 def test_plan_ca_matches_fingerprint_not_nickname(paths, tmp_path):
@@ -458,16 +460,16 @@ def test_plan_ca_matches_fingerprint_not_nickname(paths, tmp_path):
     other = tmp_path / "other.crt"
     other.write_text(cert_pem("someone-else"), encoding="utf-8")
     platform.nss_entries_db[(platform.nss_db, "devproxy Local CA")] = (other, "C,,")
-    platform.nss_entries_db[(platform.nss_db, "用户自己的别名")] = (ca, "C,,")
+    platform.nss_entries_db[(platform.nss_db, "user's own nickname")] = (ca, "C,,")
 
     plan = build_plan(platform, paths, config, purge=False, remove_ca=False, targets=targets)
     nss_actions = [c for c in commands(plan) if c[:1] == ["remove-nss-ca"]]
-    assert nss_actions == [["remove-nss-ca", str(ca), str(targets.nss_dir), "用户自己的别名"]]
+    assert nss_actions == [["remove-nss-ca", str(ca), str(targets.nss_dir), "user's own nickname"]]
 
     results = apply_plan(plan)
     assert all(result.ok for result in results), [r for r in results if not r.ok]
     assert (platform.nss_db, "devproxy Local CA") in platform.nss_entries_db
-    assert (platform.nss_db, "用户自己的别名") not in platform.nss_entries_db
+    assert (platform.nss_db, "user's own nickname") not in platform.nss_entries_db
 
 
 def test_apply_system_ca_only_removes_matching_fingerprint(paths, tmp_path):
@@ -484,7 +486,7 @@ def test_apply_system_ca_only_removes_matching_fingerprint(paths, tmp_path):
     assert all(result.ok for result in results), [r for r in results if not r.ok]
     assert targets.system_ca_dest.exists()
     assert not any(c[:1] == ["rm"] for c in platform.commands)
-    assert any("指纹不匹配" in result.detail for result in results)
+    assert any("does not match the current CA fingerprint" in result.detail for result in results)
 
 
 def test_macos_plan_removes_ca_by_sha1_fingerprint(paths, tmp_path, monkeypatch):
@@ -527,7 +529,7 @@ def test_macos_ca_not_found_is_idempotent(paths, tmp_path, monkeypatch):
         lambda argv: (1, "security: The specified item could not be found."),
     )
     detail = uninstall_mod._remove_macos_ca(platform, ca, str(tmp_path / "System.keychain"))
-    assert "未找到" in detail
+    assert "CA not found" in detail
 
 
 def test_apply_system_ca_removes_matching_fingerprint(paths, tmp_path):
@@ -548,7 +550,7 @@ def test_apply_system_ca_removes_matching_fingerprint(paths, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# --purge / 保留项 / dry-run
+# --purge / kept items / dry-run
 # ---------------------------------------------------------------------------
 
 
@@ -607,7 +609,7 @@ def test_plan_dry_run_never_probes_or_runs_commands(paths, tmp_path, monkeypatch
     seed_state(paths)
 
     def boom(*args, **kwargs):
-        raise AssertionError("dry-run 不允许起子进程 / 探测服务")
+        raise AssertionError("dry-run must not spawn subprocesses or probe services")
 
     monkeypatch.setattr(platform, "run", boom)
     monkeypatch.setattr(platform, "service_active", boom)
@@ -663,11 +665,11 @@ def test_plan_purge_warns_migration_backup_deleted(paths, tmp_path):
         targets=make_targets(tmp_path),
     )
     assert plan.migration_backup is None
-    assert any("无法再用" in note for note in plan.notes)
+    assert any("can no longer restore" in note for note in plan.notes)
 
 
 # ---------------------------------------------------------------------------
-# apply_plan：真实文件操作与失败语义
+# apply_plan: real file operations and failure semantics
 # ---------------------------------------------------------------------------
 
 
@@ -710,20 +712,20 @@ def test_apply_full_flow_removes_tool_state_and_keeps_user_files(paths, tmp_path
     assert all(result.ok for result in results), [r for r in results if not r.ok]
     assert killed == [(4242, "start-1")]
 
-    # 服务
+    # Services
     assert "caddy" not in platform.active and "dnsmasq" not in platform.active
     assert not platform.service_unit_path("caddy").exists()
     assert not platform.service_unit_path("dnsmasq").exists()
 
-    # DNS 路由与 dnsmasq 配置
+    # DNS route and dnsmasq config
     assert not targets.resolved_conf.exists()
     assert targets.dnsmasq_conf.read_text(encoding="utf-8") == "original\n"
 
-    # CA：NSS 条目与系统信任库文件按指纹移除
+    # CA: NSS entries and the system trust store file are removed by fingerprint
     assert (platform.nss_db, "devproxy Local CA") not in platform.nss_entries_db
     assert not targets.system_ca_dest.exists()
 
-    # 工具状态文件删除，用户资产保留
+    # Tool state files are deleted; user assets are kept
     for gone in (
         paths.caddyfile,
         paths.routes_json,
@@ -736,7 +738,7 @@ def test_apply_full_flow_removes_tool_state_and_keeps_user_files(paths, tmp_path
         assert not gone.exists(), gone
     assert paths.sites_caddy.exists()
     assert paths.config_toml.exists()
-    assert config.storage_path.exists()  # 非 --purge 保留 Caddy 存储
+    assert config.storage_path.exists()  # Without --purge, Caddy storage is kept
 
 
 def test_apply_continues_after_one_step_fails(paths, tmp_path, monkeypatch):
@@ -750,7 +752,7 @@ def test_apply_continues_after_one_step_fails(paths, tmp_path, monkeypatch):
     results = apply_plan(plan)
     assert any(not result.ok for result in results)
     assert any("service boom" in result.detail for result in results if not result.ok)
-    # 单步失败不阻断后续：状态文件仍被删掉
+    # A single step failing does not block later ones: state files are still deleted
     assert not paths.caddyfile.exists()
 
 
@@ -760,7 +762,7 @@ def test_apply_is_idempotent_second_plan_is_noop(paths, tmp_path, monkeypatch):
     results = apply_plan(plan)
     assert all(result.ok for result in results)
 
-    # 模拟系统信任库真的不再包含该 CA（假平台不解析 update-ca-certificates）
+    # Simulate the system trust store really no longer containing this CA (the fake platform does not parse update-ca-certificates)
     platform.trusted.discard(ca)
     second = build_plan(platform, paths, config, purge=False, remove_ca=False, targets=targets)
     assert second.is_noop, [a.description for a in second.actions]
@@ -811,8 +813,8 @@ def test_cli_dry_run_has_no_side_effects(paths, tmp_path, monkeypatch, isolated_
 
     result = CliRunner().invoke(app, ["uninstall", "--dry-run"])
     assert result.exit_code == 0, result.output
-    assert "预览" in result.output
-    assert "以下内容将保留（不会删除）" in result.output
+    assert "preview" in result.output
+    assert "The following is kept (nothing is deleted)" in result.output
     assert paths.caddyfile.exists()
     assert isolated_cli_platform.service_unit_path("caddy").exists()
     assert isolated_cli_platform.commands == []
@@ -830,7 +832,7 @@ def test_cli_refuses_noninteractive_without_yes(
 
     result = CliRunner().invoke(app, ["uninstall"])
     assert result.exit_code == 4, result.output
-    assert "非交互环境" in result.output
+    assert "Non-interactive environment" in result.output
     assert paths.caddyfile.exists()
     assert not isolated_cli_platform.commands
 
@@ -846,7 +848,7 @@ def test_cli_declined_confirmation_exits_4(paths, tmp_path, monkeypatch, isolate
 
     result = CliRunner().invoke(app, ["uninstall"])
     assert result.exit_code == 4, result.output
-    assert "已取消" in result.output
+    assert "Cancelled" in result.output
     assert paths.caddyfile.exists()
     assert not isolated_cli_platform.commands
 
@@ -861,7 +863,7 @@ def test_cli_yes_uninstalls_and_prints_kept(paths, tmp_path, monkeypatch, isolat
     result = CliRunner().invoke(app, ["uninstall", "--yes"])
     assert result.exit_code == 0, result.output
     assert "✔" in result.output
-    assert "以下内容已保留" in result.output
+    assert "The following was kept (not deleted)" in result.output
     assert not paths.caddyfile.exists()
     assert not isolated_cli_platform.service_unit_path("caddy").exists()
     assert paths.sites_caddy.exists()
@@ -883,7 +885,7 @@ def test_cli_second_run_says_nothing_to_uninstall(
     isolated_cli_platform.commands.clear()
     second = CliRunner().invoke(app, ["uninstall", "--yes"])
     assert second.exit_code == 0, second.output
-    assert "没有可卸载的东西" in second.output
+    assert "Nothing to uninstall" in second.output
     assert not isolated_cli_platform.commands
 
 
@@ -923,15 +925,15 @@ def test_cli_purge_deletes_storage_backups_and_binary(
     assert not config.caddy_bin_path.exists()
 
 
-# -- 交互式逐项提问：flag 给了就跳过，没给就问 -----------------------------
+# -- Interactive per-item questions: skip when the flag is given, ask when it is not --
 
 
 def test_cli_interactive_asks_purge_and_redraws_plan(
     paths, tmp_path, monkeypatch, isolated_cli_platform
 ):
-    """没给 --purge 时交互提问；答「是」后**重建计划并重画**，但最终确认仍是否决。
+    """Without --purge, ask interactively; answering yes rebuilds and redraws the plan, but the final confirmation can still decline.
 
-    用户不必先记住 `--purge` 才能删干净 —— 这是这次交互化的目的。
+    Users should not have to remember `--purge` to delete everything -- that is the point of this interactive flow.
     """
     config = make_config(paths)
     targets = make_targets(tmp_path)
@@ -942,7 +944,7 @@ def test_cli_interactive_asks_purge_and_redraws_plan(
     monkeypatch.setattr("devproxy.cli._shared._interactive", lambda: True)
 
     asked: list[str] = []
-    answers = iter([True, False])  # ① 连存储一起删？是  ② 最终确认？否
+    answers = iter([True, False])  # 1) delete storage too? yes  2) final confirmation? no
 
     def fake_confirm(message, **kwargs):
         asked.append(str(message))
@@ -953,16 +955,18 @@ def test_cli_interactive_asks_purge_and_redraws_plan(
     result = CliRunner().invoke(app, ["uninstall"])
     assert result.exit_code == 4, result.output
     assert len(asked) == 2
-    assert "Caddy 存储" in asked[0], "第一问问的就是存储/备份"
-    assert "删除 Caddy 存储" in result.output, "答是之后要重画包含该步骤的计划"
-    assert paths.caddyfile.exists(), "最终否决 → 什么都没执行"
+    assert "Caddy storage" in asked[0], "the first question is about storage/backups"
+    assert "delete Caddy storage" in result.output, (
+        "after yes, the plan must be redrawn with that step"
+    )
+    assert paths.caddyfile.exists(), "final decline -> nothing executed"
     assert not isolated_cli_platform.commands
 
 
 def test_cli_interactive_declining_purge_keeps_conservative_plan(
     paths, tmp_path, monkeypatch, isolated_cli_platform
 ):
-    """第一问答「否」→ 不重建计划，最终确认只问一次。"""
+    """Answering no to the first question -> do not rebuild the plan; ask the final confirmation only once."""
     config = make_config(paths)
     targets = make_targets(tmp_path)
     seed_service(isolated_cli_platform, "caddy")
@@ -980,16 +984,16 @@ def test_cli_interactive_declining_purge_keeps_conservative_plan(
     result = CliRunner().invoke(app, ["uninstall"])
     assert result.exit_code == 4, result.output
     assert len(asked) == 2
-    assert "Caddy 存储" in asked[0]
-    assert "继续" in asked[1]
-    assert "删除 Caddy 存储" not in result.output
+    assert "Caddy storage" in asked[0]
+    assert "Continue?" in asked[1]
+    assert "delete Caddy storage" not in result.output
     assert paths.caddyfile.exists()
 
 
 def test_cli_explicit_purge_skips_that_question(
     paths, tmp_path, monkeypatch, isolated_cli_platform
 ):
-    """显式给了 --purge 就不再问它 —— 脚本化用法保持原样。"""
+    """An explicit --purge skips that question -- scripting usage stays unchanged."""
     config = make_config(paths)
     targets = make_targets(tmp_path)
     seed_service(isolated_cli_platform, "caddy")
@@ -1006,16 +1010,16 @@ def test_cli_explicit_purge_skips_that_question(
 
     result = CliRunner().invoke(app, ["uninstall", "--purge"])
     assert result.exit_code == 4, result.output
-    assert len(asked) == 1, "只应剩最后的总体确认"
-    assert "继续" in asked[0]
-    assert "删除 Caddy 存储" in result.output, "计划里本来就该有这一步"
+    assert len(asked) == 1, "only the final overall confirmation should remain"
+    assert "Continue?" in asked[0]
+    assert "delete Caddy storage" in result.output, "that step should already be in the plan"
     assert paths.caddyfile.exists()
 
 
 def test_cli_interactive_asks_about_migrated_ca(
     paths, tmp_path, monkeypatch, isolated_cli_platform
 ):
-    """迁移来的 CA（有 storage 留档）默认保留，但要给用户一个“卸掉”的机会。"""
+    """A migrated-in CA (with a storage archive) is kept by default, but the user gets a chance to remove it."""
     config = make_config(paths)
     targets = make_targets(tmp_path)
     seed_service(isolated_cli_platform, "caddy")
@@ -1023,14 +1027,15 @@ def test_cli_interactive_asks_about_migrated_ca(
     ca = config.storage_path / "pki" / "authorities" / "local" / "root.crt"
     ca.parent.mkdir(parents=True, exist_ok=True)
     ca.write_text("-----BEGIN CERTIFICATE-----\n", encoding="utf-8")
-    # 让假平台认为这张 CA 真的在信任库里 —— 否则"无可移除"是正确行为，
-    # 测不到"用户答是之后计划里多出一步"。
+    # Make the fake platform believe this CA is really in the trust store -- otherwise
+    # "nothing to remove" is the correct behavior and the test cannot observe the extra
+    # step added after the user answers yes.
     isolated_cli_platform.trusted.add(ca)
     _patch_cli(monkeypatch, paths, config, targets, isolated_cli_platform)
     monkeypatch.setattr("devproxy.cli._shared._interactive", lambda: True)
 
     asked: list[str] = []
-    answers = iter([False, True, False])  # 存储？否  卸 CA？是  最终确认？否
+    answers = iter([False, True, False])  # storage? no  remove CA? yes  final confirmation? no
 
     def fake_confirm(message, **kwargs):
         asked.append(str(message))
@@ -1042,5 +1047,5 @@ def test_cli_interactive_asks_about_migrated_ca(
     assert result.exit_code == 4, result.output
     assert len(asked) == 3
     assert "CA" in asked[1]
-    assert "移除 CA" in result.output or "卸载 CA" in result.output
-    assert not isolated_cli_platform.commands, "最终否决 → 未执行"
+    assert "remove the CA" in result.output
+    assert not isolated_cli_platform.commands, "final decline -> nothing executed"

@@ -28,7 +28,7 @@ def _paths(tmp_path):
 
 
 def _fake_downloader(dest: Path) -> None:
-    """假下载器：只落一个可执行占位文件，绝不触网。"""
+    """Fake downloader: only writes an executable placeholder file and never touches the network."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text("#!/bin/sh\n")
     dest.chmod(0o755)
@@ -43,11 +43,11 @@ def _component(tmp_path, platform=None, downloader=None):
 
 
 def test_corrupt_extra_env_archive_fails_at_construction(tmp_path):
-    """构造期必须中断：坏留档被当成空会静默丢掉 MINIKUBE_IP。"""
+    """Construction must fail: treating a corrupt archive as empty silently drops MINIKUBE_IP."""
     paths = _paths(tmp_path)
     paths.ensure_files()
-    paths.caddy_env.write_text("{ 截断", encoding="utf-8")
-    with pytest.raises(CaddyEnvArchiveError, match="环境变量留档"):
+    paths.caddy_env.write_text("{ truncated", encoding="utf-8")
+    with pytest.raises(CaddyEnvArchiveError, match="environment variable archive"):
         CaddyComponent(
             FakePlatform(),
             paths,
@@ -57,7 +57,7 @@ def test_corrupt_extra_env_archive_fails_at_construction(tmp_path):
 
 
 def test_missing_extra_env_archive_is_normal(tmp_path):
-    """文件不存在是正常情况（没有迁移留档），构造不该报错。"""
+    """A missing file is normal (no migration archive); construction must not fail."""
     paths = _paths(tmp_path)
     paths.ensure_files()
     comp = CaddyComponent(
@@ -67,7 +67,7 @@ def test_missing_extra_env_archive_is_normal(tmp_path):
 
 
 def _make_ready(comp, platform, cfg) -> None:
-    """把二进制、主 Caddyfile、单元、服务、linger 全部置为就绪。"""
+    """Put the binary, main Caddyfile, unit, service, and linger all into the ready state."""
     binary = Path(cfg.caddy_bin)
     binary.parent.mkdir(parents=True, exist_ok=True)
     binary.write_text("#!/bin/sh\n")
@@ -148,7 +148,7 @@ def test_check_ok_when_binary_and_service_ready(tmp_path):
 
 
 def test_check_not_ok_when_caddyfile_missing(tmp_path):
-    """二进制/服务都对，但主 Caddyfile 不存在 —— 不能报“已就绪”。"""
+    """The binary/service are fine but the main Caddyfile is missing -- must not report "ready"."""
     comp, paths, cfg = _component(tmp_path)
     platform = FakePlatform()
     comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
@@ -160,7 +160,7 @@ def test_check_not_ok_when_caddyfile_missing(tmp_path):
     assert status.hint
     actions = comp.plan()
     assert any(a.kind == "write" and a.path == paths.caddyfile for a in actions), (
-        "Caddyfile 缺失时 plan 必须包含生成动作"
+        "plan must include a generate action when the Caddyfile is missing"
     )
 
 
@@ -169,13 +169,13 @@ def test_check_not_ok_when_caddyfile_stale(tmp_path):
     platform = FakePlatform()
     comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
     _make_ready(comp, platform, cfg)
-    paths.caddyfile.write_text("旧的配置\n", encoding="utf-8")
+    paths.caddyfile.write_text("stale config\n", encoding="utf-8")
     assert comp.check().ok is False
     assert any(a.kind == "write" and a.path == paths.caddyfile for a in comp.plan())
 
 
 def test_plan_reinstalls_unit_when_execstart_points_elsewhere(tmp_path):
-    """运维遗留：单元还指向旧 Caddyfile，服务却是 active。"""
+    """Operational leftover: the unit still points at the old Caddyfile while the service is active."""
     comp, paths, cfg = _component(tmp_path)
     platform = FakePlatform()
     comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
@@ -208,15 +208,15 @@ def test_check_missing_binary_reports_hint(tmp_path):
     status = comp.check()
     assert status.ok is False
     assert "caddy" in status.detail.lower()
-    assert status.hint, "缺失时必须给出修复提示"
+    assert status.hint, "must provide a fix hint when missing"
 
 
 def test_plan_includes_download_when_binary_missing(tmp_path):
     comp, paths, cfg = _component(tmp_path)
     actions = comp.plan()
     kinds = [a.description for a in actions]
-    assert any("下载" in d for d in kinds)
-    assert any(a.privileged for a in actions), "setcap 需要提权"
+    assert any("download" in d for d in kinds)
+    assert any(a.privileged for a in actions), "setcap requires elevation"
 
 
 def test_apply_writes_unit_and_enables_service(tmp_path):
@@ -241,7 +241,7 @@ def test_apply_creates_main_caddyfile(tmp_path):
 
 
 def test_sites_caddy_is_not_overwritten(tmp_path):
-    """sites.caddy 是用户的，工具只 import 不覆盖。"""
+    """sites.caddy belongs to the user; the tool only imports it and never overwrites it."""
     comp, paths, cfg = _component(tmp_path)
     paths.sites_caddy.write_text('localhost { respond "hi" }\n')
     comp.apply(comp.plan())
@@ -253,18 +253,18 @@ def test_verify_fails_when_service_inactive(tmp_path):
     platform = FakePlatform()
     comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
     comp.apply(comp.plan())
-    # 服务装上了却没起来（setcap 被拒、端口被占等）—— active 里没有 caddy
+    # The service was installed but did not come up (setcap declined, port taken, etc.) -- caddy is not active
     platform.active.discard("caddy")
     status = comp.verify()
     assert status.ok is False
     assert "systemctl" in status.hint
 
 
-# -- 下载归属组件 apply ----------------------------------------------------
+# -- downloads belong to the component apply -------------------------------
 
 
 def test_default_downloader_is_the_real_download_caddy(tmp_path):
-    """默认走真实下载器；注入只用于测试离线运行。"""
+    """The default uses the real downloader; injection is only for offline test runs."""
     paths = _paths(tmp_path)
     paths.ensure_files()
     cfg = Config(storage=str(paths.data_dir), caddy_bin=str(tmp_path / "bin" / "caddy"))
@@ -290,7 +290,7 @@ def test_apply_propagates_download_failure_and_skips_service_install(tmp_path):
     comp, paths, cfg = _component(tmp_path)
 
     def boom(dest: Path) -> None:
-        raise RuntimeError("caddy 包校验失败")
+        raise RuntimeError("caddy package verification failed")
 
     platform = FakePlatform()
     comp = CaddyComponent(platform, paths, cfg, boom)
@@ -299,11 +299,11 @@ def test_apply_propagates_download_failure_and_skips_service_install(tmp_path):
     assert "caddy" not in platform.services
 
 
-# -- setcap 自愈 ------------------------------------------------------------
+# -- setcap self-healing ----------------------------------------------------
 
 
 def test_plan_replans_setcap_when_binary_present_but_service_inactive(tmp_path):
-    """二进制已就位但服务没跑：上次 setcap 可能失败过，需要重新授权。"""
+    """The binary is in place but the service is not running: the previous setcap may have failed, so re-authorize."""
     comp, paths, cfg = _component(tmp_path)
     platform = FakePlatform()
     comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
@@ -318,7 +318,7 @@ def test_plan_replans_setcap_when_binary_present_but_service_inactive(tmp_path):
     assert any(a.command[:1] == ["install-service"] for a in actions)
 
 
-# -- 单元、平台、下载的下限校验 ---------------------------------------------
+# -- lower-bound checks for unit, platform, and download --------------------
 
 
 def test_current_platform_key_rejects_unknown_arch(monkeypatch):
@@ -326,7 +326,7 @@ def test_current_platform_key_rejects_unknown_arch(monkeypatch):
 
     monkeypatch.setattr(caddy_mod._platform, "system", lambda: "Linux")
     monkeypatch.setattr(caddy_mod._platform, "machine", lambda: "ppc64le")
-    with pytest.raises(RuntimeError, match="不支持的平台"):
+    with pytest.raises(RuntimeError, match="unsupported platform"):
         current_platform_key()
 
 
@@ -335,7 +335,7 @@ def test_current_platform_key_rejects_unknown_os(monkeypatch):
 
     monkeypatch.setattr(caddy_mod._platform, "system", lambda: "Windows")
     monkeypatch.setattr(caddy_mod._platform, "machine", lambda: "AMD64")
-    with pytest.raises(RuntimeError, match="不支持的平台"):
+    with pytest.raises(RuntimeError, match="unsupported platform"):
         current_platform_key()
 
 
@@ -354,7 +354,7 @@ def test_binary_version_empty_when_binary_not_executable(tmp_path):
 
 
 class _FakeTar:
-    """最小可用的 tar 上下文：只提供 getmember / extractfile。"""
+    """Minimal usable tar context: provides only getmember / extractfile."""
 
     def __init__(self, payload: bytes):
         self.payload = payload
@@ -388,17 +388,17 @@ def test_download_caddy_verifies_binary_version_and_replaces_atomically(tmp_path
     dest = tmp_path / "bin" / "caddy"
     download_caddy(dest)
     assert dest.exists()
-    assert dest.stat().st_mode & 0o111, "二进制必须可执行"
-    # 同目录临时文件不得残留
+    assert dest.stat().st_mode & 0o111, "the binary must be executable"
+    # No temp file may be left behind in the same directory
     assert list(dest.parent.glob(".caddy-download-*")) == []
 
 
 def test_download_caddy_rejects_wrong_binary_version(tmp_path, monkeypatch):
     _patch_download(monkeypatch, b'#!/bin/sh\necho "v0.0.1"\n')
     dest = tmp_path / "bin" / "caddy"
-    with pytest.raises(RuntimeError, match="版本不符"):
+    with pytest.raises(RuntimeError, match="version mismatch"):
         download_caddy(dest)
-    assert not dest.exists(), "版本不符时不能留下目标文件"
+    assert not dest.exists(), "a version mismatch must not leave the target file behind"
     assert list(dest.parent.glob(".caddy-download-*")) == []
 
 
@@ -471,22 +471,22 @@ def test_verify_fails_when_tls_probe_fails(tmp_path):
 
 
 def test_verify_skips_tls_probe_when_no_site_configured(tmp_path):
-    """干净机器上还没有任何站点 —— TLS 不可执行，保持 ok + 提示。"""
+    """A clean machine has no sites yet -- TLS is not executable, so stay ok + hint."""
     comp, paths, cfg = _component(tmp_path)
     platform = FakePlatform()
     comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
     _make_ready(comp, platform, cfg)
     status = comp.verify()
     assert status.ok is True
-    assert "尚无站点" in status.detail
+    assert "no sites yet" in status.detail
     assert platform.http_probes == []
 
 
-# -- N1: 探测目标不能硬编码 localhost ---------------------------------------
+# -- N1: the probe target must not be hardcoded to localhost ----------------
 
 
 def test_verify_probes_first_route_domain(tmp_path):
-    """只有 *.test 站点的机器上没有 localhost 站点 —— 探 localhost 会假失败。"""
+    """A machine with only *.test sites has no localhost site -- probing localhost would fail falsely."""
     comp, paths, cfg = _component(tmp_path)
     platform = FakePlatform()
     comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
@@ -517,7 +517,7 @@ def test_verify_probes_first_route_domain(tmp_path):
 
 
 def test_verify_without_route_and_without_localhost_site_is_ok(tmp_path):
-    """既没有注册路由、也没有 localhost 站点 —— 无从探测，返回 ok + 提示。"""
+    """Neither a registered route nor a localhost site -- nothing to probe, return ok + hint."""
     comp, paths, cfg = _component(tmp_path)
     platform = FakePlatform()
     comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
@@ -528,18 +528,18 @@ def test_verify_without_route_and_without_localhost_site_is_ok(tmp_path):
     assert platform.http_probes == []
 
 
-# -- N5: check 与 plan 的版本判据必须一致 ----------------------------------
+# -- N5: check and plan must use the same version criterion ----------------
 
 
 def test_check_and_plan_agree_when_version_unreadable(tmp_path):
-    """版本读不出来时，不能一个说"已就绪"、另一个说"要下载"。"""
+    """When the version is unreadable, one must not say "ready" while the other says "download"."""
     comp, paths, cfg = _component(tmp_path)
     platform = FakePlatform()
     comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
     _make_ready(comp, platform, cfg)
     platform.binary_version = lambda binary: ""
-    assert comp.check().ok is False, "版本读不出来不能判就绪"
-    assert any("下载" in a.description for a in comp.plan())
+    assert comp.check().ok is False, "an unreadable version must not be judged ready"
+    assert any("download" in a.description for a in comp.plan())
 
 
 def test_check_and_plan_agree_when_version_matches(tmp_path):
@@ -548,14 +548,15 @@ def test_check_and_plan_agree_when_version_matches(tmp_path):
     comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
     _make_ready(comp, platform, cfg)
     assert comp.check().ok is True
-    assert not any("下载" in a.description for a in comp.plan())
+    assert not any("download" in a.description for a in comp.plan())
 
 
 def test_plan_restarts_service_when_only_main_caddyfile_changed(tmp_path):
-    """只改主 Caddyfile（如 https_port）时单元与服务都没变 —— 也必须重启。
+    """Changing only the main Caddyfile (e.g. https_port) leaves unit and service unchanged -- still must restart.
 
-    只写文件等于什么都没生效：运行中的 Caddy 仍持有旧配置，而后续
-    `devproxy up` 会按新配置连 admin API，报一个完全无关的错误。
+    Writing the file alone changes nothing: the running Caddy still holds the old
+    config, and a later `devproxy up` connects to the admin API using the new config
+    and reports a completely unrelated error.
     """
     from dataclasses import replace
 
@@ -576,11 +577,11 @@ def test_plan_restarts_service_when_only_main_caddyfile_changed(tmp_path):
     idx_restart = next(
         i for i, a in enumerate(actions) if a.command[:2] == ["restart-service", "caddy"]
     )
-    assert idx_write < idx_restart, "必须先写文件再重启"
+    assert idx_write < idx_restart, "must write the file before restarting"
 
 
 def test_apply_restarts_service_for_caddyfile_only_change(tmp_path):
-    """Caddyfile-only 场景的 restart-service 动作必须真的重启。"""
+    """The restart-service action in the Caddyfile-only scenario must really restart."""
     from dataclasses import replace
 
     comp, paths, cfg = _component(tmp_path)
@@ -595,7 +596,7 @@ def test_apply_restarts_service_for_caddyfile_only_change(tmp_path):
 
 
 def test_check_not_ok_when_linger_disabled(tmp_path):
-    """没开 linger 时用户服务不会开机自启 —— check 与 plan 判据必须一致。"""
+    """With linger disabled the user service does not start at boot -- check and plan must agree."""
     comp, paths, cfg = _component(tmp_path)
     platform = FakePlatform()
     comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
@@ -609,7 +610,7 @@ def test_check_not_ok_when_linger_disabled(tmp_path):
 
 
 def test_plan_probes_binary_version_and_service_only_once(tmp_path):
-    """一次 plan 只该探测一次版本与一次服务状态（避免同轮自相矛盾）。"""
+    """One plan should probe the version once and the service state once (avoid self-contradiction within a round)."""
     comp, paths, cfg = _component(tmp_path)
     platform = FakePlatform()
     comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
@@ -627,7 +628,7 @@ def test_plan_probes_binary_version_and_service_only_once(tmp_path):
 
 
 def test_unit_current_checks_exec_reload_address(tmp_path):
-    """admin_addr 变了但 ExecStart 不变时，旧单元里的 --address 已过期。"""
+    """When admin_addr changed but ExecStart did not, the old unit's --address is stale."""
     from dataclasses import replace
 
     comp, paths, cfg = _component(tmp_path)
@@ -643,17 +644,17 @@ def test_unit_current_checks_exec_reload_address(tmp_path):
 
 
 def test_plan_restarts_service_when_binary_is_replaced(tmp_path):
-    """换了二进制却不重启 —— 跑着的还是旧版本，"已固定版本"只在下次重启兑现。"""
+    """Replacing the binary without restarting leaves the old version running; "version pinned" only takes effect on the next restart."""
     comp, paths, cfg = _component(tmp_path)
     platform = FakePlatform()
     comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
     _make_ready(comp, platform, cfg)
-    # 版本不符（但路径没变、单元也没变）→ 只换二进制
+    # Version mismatch (but path and unit unchanged) -> only replace the binary
     platform.binary_version = lambda binary: "v2.10.0"
     actions = comp.plan()
     assert any(a.command[:1] == ["download-caddy"] for a in actions)
     assert any(a.command[:2] == ["restart-service", "caddy"] for a in actions), actions
-    # 重启必须排在 setcap 之后 —— 否则重启后绑不上 80/443
+    # The restart must come after setcap -- otherwise the restarted process cannot bind 80/443
     idx_cap = next(i for i, a in enumerate(actions) if a.command[:1] == ["setcap"])
     idx_restart = next(
         i for i, a in enumerate(actions) if a.command[:2] == ["restart-service", "caddy"]
@@ -662,7 +663,7 @@ def test_plan_restarts_service_when_binary_is_replaced(tmp_path):
 
 
 def test_apply_restarts_service_after_replacing_binary(tmp_path):
-    """重启动作必须真的重启服务。"""
+    """The restart action must really restart the service."""
     comp, paths, cfg = _component(tmp_path)
     platform = FakePlatform()
     comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
@@ -675,11 +676,11 @@ def test_apply_restarts_service_after_replacing_binary(tmp_path):
     assert "caddy" in restarted
 
 
-# -- N6: 单元判据要看 ExecStart 里的二进制路径 -----------------------------
+# -- N6: the unit criterion must look at the binary path in ExecStart -------
 
 
 def test_plan_reinstalls_unit_when_binary_path_changed(tmp_path):
-    """改了配置里的 caddy_bin 后，已装单元仍指旧二进制 —— 必须判为单元过期。"""
+    """After changing caddy_bin in the config, the installed unit still points at the old binary -- must be judged stale."""
     comp, paths, cfg = _component(tmp_path)
     platform = FakePlatform()
     comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
@@ -694,17 +695,17 @@ def test_plan_reinstalls_unit_when_binary_path_changed(tmp_path):
     assert any(a.command[:1] == ["install-service"] for a in actions)
 
 
-# -- macOS：没有 setcap，单元是 launchd plist ------------------------------
+# -- macOS: no setcap; the unit is a launchd plist --------------------------
 
 
 class _MacPlatform(FakePlatform):
-    """macOS 平台：单元是 launchd plist（ProgramArguments 是数组）。"""
+    """macOS platform: the unit is a launchd plist (ProgramArguments is an array)."""
 
     name = "mac"
     dns_port = 5300
 
     def linger_enabled(self) -> bool:
-        """macOS 没有 systemd-linger —— 恒为"无需启用"。"""
+        """macOS has no systemd-linger -- always "no need to enable"."""
         return True
 
     def install_service(
@@ -727,7 +728,7 @@ class _MacPlatform(FakePlatform):
 
 
 def test_macos_plan_has_no_setcap(tmp_path):
-    """macOS 没有 setcap —— 绑 80/443 靠 root 的 LaunchDaemon。"""
+    """macOS has no setcap -- binding 80/443 relies on a root LaunchDaemon."""
     comp, paths, cfg = _component(tmp_path)
     platform = _MacPlatform()
     comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
@@ -736,36 +737,39 @@ def test_macos_plan_has_no_setcap(tmp_path):
 
 
 def test_macos_install_service_action_is_privileged(tmp_path):
-    """macOS 的 caddy 是 /Library/LaunchDaemons 下的 root 守护进程。
+    """On macOS caddy is a root daemon under /Library/LaunchDaemons.
 
-    动作的 `privileged` 决定两件事：sudo 清单要不要点名它、非交互环境下
-    要不要因此拒绝执行。漏标会让 setup 谎报"需要 sudo 共 1 项"，并在
-    只剩这一步时**绕过非交互护栏**（`plan.needs_sudo` 为空），然后中途
-    弹密码框 —— 在无 TTY 的场景下就是直接失败。
+    An action's `privileged` flag determines two things: whether the sudo list
+    names it and whether a non-interactive environment refuses to run because of
+    it. Omitting the flag makes setup falsely claim "1 item needs sudo" and, when
+    only this step remains, **bypass the non-interactive guard**
+    (`plan.needs_sudo` is empty), then pop a password prompt midway -- which in a
+    no-TTY scenario is a direct failure.
     """
     comp, paths, cfg = _component(tmp_path)
     platform = _MacPlatform()
     comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
     installs = [a for a in comp.plan() if a.command[:1] == ["install-service"]]
-    assert installs, "计划里应有安装 LaunchDaemon 的动作"
+    assert installs, "the plan should include an action to install the LaunchDaemon"
     assert all(a.privileged for a in installs)
 
 
 def test_linux_install_service_action_is_not_privileged(tmp_path):
-    """Linux 的 caddy 是 **user** unit（~/.config/systemd/user）—— 不需要 root。
+    """On Linux caddy is a **user** unit (~/.config/systemd/user) -- no root needed.
 
-    与上一条成对：把 macOS 的修法写死成"永远提权"会让 Linux 的 sudo 清单
-    凭空多一项，非交互环境还会因此误退 4。
+    Paired with the previous case: hardcoding the macOS fix as "always elevate"
+    would add a phantom item to the Linux sudo list and make non-interactive
+    environments exit 4 incorrectly.
     """
     comp, paths, cfg = _component(tmp_path)
     comp = CaddyComponent(FakePlatform(), paths, cfg, _fake_downloader)
     installs = [a for a in comp.plan() if a.command[:1] == ["install-service"]]
-    assert installs, "计划里应有安装 user unit 的动作"
+    assert installs, "the plan should include an action to install the user unit"
     assert not any(a.privileged for a in installs)
 
 
 def test_macos_plan_has_no_linger_action(tmp_path):
-    """macOS 无 systemd-linger —— 平台报"已启用"，不该计划任何 linger 动作。"""
+    """macOS has no systemd-linger -- the platform reports "enabled", so no linger action may be planned."""
     comp, paths, cfg = _component(tmp_path)
     platform = _MacPlatform()
     comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
@@ -774,7 +778,7 @@ def test_macos_plan_has_no_linger_action(tmp_path):
 
 
 def test_macos_unit_current_accepts_plist(tmp_path):
-    """launchd plist 里 ProgramArguments 是数组 —— 单元判据必须认它。"""
+    """In a launchd plist ProgramArguments is an array -- the unit criterion must understand it."""
     comp, paths, cfg = _component(tmp_path)
     platform = _MacPlatform()
     comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
@@ -796,28 +800,28 @@ def test_macos_unit_current_detects_stale_plist(tmp_path):
     assert comp._unit_current() is False
 
 
-# ---------- 单元读不到 ≠ 单元过期 ----------
+# ---------- an unreadable unit is not a stale unit ----------
 
 
 class _UnreadableUnitPlatform(_MacPlatform):
-    """单元文件普通用户读不了（macOS system scope 的 0600 root 情形）。"""
+    """The unit file is unreadable to a regular user (macOS system-scope 0600 root case)."""
 
     def service_unit_path(self, name):
         return UnreadablePath(str(super().service_unit_path(name)))
 
     def privilege(self):
-        raise AssertionError("读单元只能走非交互的 privilege_read")
+        raise AssertionError("reading the unit may only use non-interactive privilege_read")
 
     def privilege_read(self, path):
         return ElevatedReader(self).read(path)
 
 
 def test_unit_current_survives_permission_denied_read(tmp_path):
-    """读不到单元，绝不等于"单元过期"。
+    """An unreadable unit never means "stale unit".
 
-    macOS 的 system scope 单元在 /Library/LaunchDaemons —— 权限或归属
-    不对时普通用户读不了。这时若判成"过期"，doctor 会永远报红，
-    每次 setup 都要重装单元并再要一次密码。
+    macOS system-scope units live in /Library/LaunchDaemons -- with wrong permissions
+    or ownership a regular user cannot read them. If judged "stale", doctor would
+    stay red forever and every setup would reinstall the unit and ask for a password again.
     """
     comp, paths, cfg = _component(tmp_path)
     platform = _UnreadableUnitPlatform()
@@ -829,32 +833,32 @@ def test_unit_current_survives_permission_denied_read(tmp_path):
 
 
 class _NoPromptPlatform(_UnreadableUnitPlatform):
-    """一旦有人要提权会话就炸 —— doctor 绝不能弹密码框。"""
+    """Explode as soon as anyone requests an elevated session -- doctor must never pop a password prompt."""
 
     def privilege(self):
-        raise AssertionError("doctor 不得触发提权（会弹密码框）")
+        raise AssertionError("doctor must not trigger elevation (it pops a password prompt)")
 
     def privilege_read(self, path):
         return None
 
 
 def test_doctor_never_asks_for_password(tmp_path):
-    """doctor 承诺只读：单元读不到时也不许索要密码。
+    """doctor promises to be read-only: it must not ask for a password even when the unit is unreadable.
 
-    提权会话的构造会跑 `sudo -v` —— 那会把密码框弹到用户脸上，
-    既违反 doctor 的"只读"承诺，也会让脚本里跑的 doctor 卡住。
+    Constructing an elevated session runs `sudo -v` -- that pops a password prompt in
+    the user's face, violating doctor's "read-only" promise and hanging doctor in scripts.
     """
     comp, paths, cfg = _component(tmp_path)
     platform = _NoPromptPlatform()
     comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
     _make_ready(comp, platform, cfg)
-    # 不抛异常即通过：_NoPromptPlatform.privilege() 会直接 AssertionError
+    # Passing means no exception: _NoPromptPlatform.privilege() raises AssertionError directly
     assert comp._unit_current() is True
     comp.check()
 
 
 def test_unit_current_is_false_when_argv_does_not_match(tmp_path):
-    """判据是整条命令行 —— 参数缺失或顺序不对都算过期。"""
+    """The criterion is the whole command line -- a missing argument or wrong order counts as stale."""
     comp, paths, cfg = _component(tmp_path)
     platform = FakePlatform()
     comp = CaddyComponent(platform, paths, cfg, _fake_downloader)
@@ -868,11 +872,11 @@ def test_unit_current_is_false_when_argv_does_not_match(tmp_path):
         ],
         env={},
     )
-    assert comp._unit_current() is False, "少了 run 就算不是当前单元"
+    assert comp._unit_current() is False, "missing run means it is not the current unit"
 
 
 def test_unit_current_is_false_when_unit_missing(tmp_path):
-    """单元压根没装 → 当然是过期。"""
+    """The unit was never installed -> of course it is stale."""
     comp, paths, cfg = _component(tmp_path)
     platform = FakePlatform()
     comp = CaddyComponent(platform, paths, cfg, _fake_downloader)

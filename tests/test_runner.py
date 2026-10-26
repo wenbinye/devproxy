@@ -25,12 +25,12 @@ from devproxy.gateway.store import RouteStore
 
 from .support import wait_until
 
-# 信号测试要在独立 python 子进程里 import devproxy —— 告诉它源码在哪
+# Signal tests must import devproxy in a separate python subprocess -- tell it where the source is
 SRC_DIR = str(Path(devproxy.__file__).resolve().parent.parent)
 
 
 class FakeCaddy:
-    """假 Caddy：validate/reload 恒成功，并记录 reload 次数。"""
+    """Fake Caddy: validate/reload always succeed, and reload count is recorded."""
 
     def __init__(self):
         self.reloads = 0
@@ -44,7 +44,7 @@ class FakeCaddy:
 
 
 class FakeAdmin:
-    """假 Admin API 客户端。config_payload 模拟 Caddy 当前配置。"""
+    """Fake Admin API client. config_payload simulates Caddy's current config."""
 
     def __init__(self, alive=True):
         self.alive = alive
@@ -63,7 +63,7 @@ def _runner(paths, alive=True):
     return UpRunner(store, cfg, FakeAdmin(alive=alive))
 
 
-# 起一个真正监听 $PORT 的子进程，并在 0.5s 后退出 —— 同时验证 PORT 注入
+# Start a child that really listens on $PORT and exits after 0.5s -- this also verifies PORT injection
 _LISTEN_AND_EXIT = (
     "import http.server,os,threading,time;"
     "s=http.server.HTTPServer(('127.0.0.1',int(os.environ['PORT'])),"
@@ -74,22 +74,23 @@ _LISTEN_AND_EXIT = (
 
 
 def _process_running(pid: int) -> bool:
-    """僵尸进程不算活着。/proc 不存在时（macOS）退回 kill(pid,0) 探测。
+    """A zombie process does not count as alive. When /proc is absent (macOS), fall back to kill(pid, 0).
 
-    两个分支必须合在一条 `except OSError` 里：`FileNotFoundError` 是
-    `OSError` 的子类，单列一条并 `return False` 会让 **macOS 上恒返回 False**
-    —— 因为 macOS 根本没有 /proc。后果不只是两条用例变红：
-    `wait_until(lambda: not _process_running(...))` 这类断言会立刻成立，
-    变成永远为真的空断言，清理逻辑回归时也发现不了。
+    Both branches must be combined in one `except OSError`: `FileNotFoundError` is
+    a subclass of `OSError`, so listing it separately with `return False` would make
+    this **always return False on macOS** -- because macOS has no /proc at all. The
+    consequence is not just two failing test cases: assertions like
+    `wait_until(lambda: not _process_running(...))` would become true immediately,
+    turning into always-true no-op assertions that cannot catch cleanup regressions.
     """
     try:
         with open(f"/proc/{pid}/stat") as f:
             return f.read().split(") ", 1)[1][0] != "Z"
     except OSError:
-        # 没有 /proc（macOS）、或读不了 —— 用 ps 探活。
-        # 不能用 os.kill(pid, 0)：它只回答"这个 pid 还在不在"，
-        # 而**僵尸进程**也还在（只是没人回收），Linux 靠 /proc 的 Z 状态
-        # 识别僵尸，macOS 必须靠 ps 的 stat 首字母。
+        # No /proc (macOS), or unreadable -- use ps to probe liveness.
+        # Do not use os.kill(pid, 0): it only answers "does this pid still exist",
+        # and a **zombie process** still exists (just unreaped). Linux identifies
+        # zombies via the Z state in /proc; macOS must use the first letter of ps stat.
         try:
             out = subprocess.run(
                 ["ps", "-o", "stat=", "-p", str(pid)],
@@ -124,16 +125,20 @@ def test_reachable_true_and_false():
 
 
 def test_stop_process_group_kills_grandchildren(tmp_path):
-    """子进程 fork 出孙进程后，stop_process_group 必须按组清理干净。"""
+    """After a child forks a grandchild, stop_process_group must clean up the whole group."""
     marker = tmp_path / "grandchild.pid"
     script = tmp_path / "spawn.sh"
     script.write_text(f"#!/bin/sh\n(sleep 60 & echo $! > {marker})\nsleep 60\n")
     script.chmod(0o755)
     proc = subprocess.Popen([str(script)], start_new_session=True, stdout=subprocess.DEVNULL)
-    assert wait_until(lambda: marker.exists() and marker.read_text().strip()), "孙进程 pid 未写出"
+    assert wait_until(lambda: marker.exists() and marker.read_text().strip()), (
+        "grandchild pid was not written"
+    )
     gpid = int(marker.read_text().strip())
     stop_process_group(proc, proc.pid)
-    assert wait_until(lambda: not _process_running(gpid)), "孙进程应已被按组清理"
+    assert wait_until(lambda: not _process_running(gpid)), (
+        "grandchild should have been cleaned up by group"
+    )
 
 
 def test_run_requires_caddy_alive(paths):
@@ -145,13 +150,13 @@ def test_run_requires_caddy_alive(paths):
 
 
 def test_run_caddy_not_running_raises_precondition(paths):
-    """Caddy 未运行是前置条件不满足 —— 必须是 PreconditionError（CLI 映射为退出码 3）。"""
+    """Caddy not running is an unmet precondition -- must be PreconditionError (CLI maps it to exit code 3)."""
     paths.ensure_files()
     runner = _runner(paths, alive=False)
     with pytest.raises(PreconditionError) as cm:
         runner.run("codeup", [sys.executable, "-c", "import time; time.sleep(1)"])
-    assert "Caddy 未运行" in str(cm.value)
-    assert "devproxy setup" in str(cm.value), "报错要告诉用户下一步做什么"
+    assert "Caddy is not running" in str(cm.value)
+    assert "devproxy setup" in str(cm.value), "the error must tell the user what to do next"
 
 
 def test_run_rejects_occupied_explicit_port(paths):
@@ -164,7 +169,7 @@ def test_run_rejects_occupied_explicit_port(paths):
     try:
         with pytest.raises(UpError) as cm:
             runner.run("codeup", [sys.executable, "-c", "pass"], port=port)
-        assert "已被占用" in str(cm.value)
+        assert "already in use" in str(cm.value)
     finally:
         s.close()
 
@@ -184,12 +189,12 @@ def test_run_rejects_invalid_port(paths):
 
 
 def test_run_injects_port_and_registers_route(paths):
-    """子进程应拿到 PORT 环境变量；就绪后注册路由。"""
+    """The child should receive the PORT environment variable; the route is registered once ready."""
     paths.ensure_files()
     runner = _runner(paths)
     ready = []
-    # 子进程 0.5s 后退出，run() 返回前路由会被注销；
-    # 因此在 on_ready（注册刚落盘）时刻抓路由表快照来断言注册结果
+    # The child exits after 0.5s and the route is deregistered before run() returns;
+    # so snapshot the route table at on_ready (right after registration is written to disk) to assert it
     snapshots = []
 
     def on_ready(domain, port):
@@ -211,16 +216,16 @@ def test_run_injects_port_and_registers_route(paths):
 
 
 def test_run_cleans_up_route_when_child_exits(paths):
-    """子进程退出后路由必须被注销。"""
+    """The route must be deregistered after the child exits."""
     paths.ensure_files()
     runner = _runner(paths)
     runner.run("codeup", [sys.executable, "-c", _LISTEN_AND_EXIT])
     table = json.loads(paths.routes_json.read_text())
-    assert table["routes"] == [], "子进程退出后路由必须注销"
+    assert table["routes"] == [], "the route must be deregistered after the child exits"
 
 
 def test_run_kills_process_on_ready_timeout(paths, tmp_path):
-    """就绪超时 → 杀整个子进程组（含孙进程）→ 不注册路由。"""
+    """Ready timeout -> kill the whole child process group (including grandchildren) -> do not register the route."""
     paths.ensure_files()
     runner = _runner(paths)
     marker = tmp_path / "timeout.pids"
@@ -236,19 +241,19 @@ def test_run_kills_process_on_ready_timeout(paths, tmp_path):
             [sys.executable, "-c", child_code],
             ready_timeout=1,
         )
-    assert "就绪超时" in str(cm.value)
-    assert not paths.routes_json.exists(), "超时不得留下路由"
+    assert "ready timeout" in str(cm.value)
+    assert not paths.routes_json.exists(), "a timeout must not leave a route behind"
     assert wait_until(lambda: marker.exists() and marker.read_text().strip()), (
-        "子进程没写出 pid 标记"
+        "the child did not write the pid marker"
     )
     child_pid, grandchild_pid = (int(x) for x in marker.read_text().split())
     assert wait_until(
         lambda: not _process_running(child_pid) and not _process_running(grandchild_pid)
-    ), "超时后子进程与孙进程必须被杀（子进程按组清理）"
+    ), "after a timeout the child and grandchild must be killed (child cleanup by group)"
 
 
 def test_watch_re_registers_when_route_lost_from_caddy(paths):
-    """Caddy 里路由丢了、但路由表里还在 → 自检应重新注册。"""
+    """The route is lost from Caddy but still in the route table -> the watchdog should re-register it."""
     import threading
 
     paths.ensure_files()
@@ -263,18 +268,18 @@ def test_watch_re_registers_when_route_lost_from_caddy(paths):
     store.mutate(lambda t: t.upsert(route))
     before = caddy.reloads
 
-    admin.config_payload = {}  # Caddy 当前配置里没有它
+    admin.config_payload = {}  # It is not in Caddy's current config
     stop = threading.Event()
     t = threading.Thread(target=runner._watch, args=(route, stop), daemon=True)
     t.start()
-    # 事件驱动：等到自检真的重新注册了为止，而不是「睡 0.5 秒就当它发生了」
-    assert wait_until(lambda: caddy.reloads > before), "路由丢失时应触发重新注册"
+    # Event-driven: wait until the watchdog really re-registers, rather than "sleep 0.5s and assume it happened"
+    assert wait_until(lambda: caddy.reloads > before), "a lost route should trigger re-registration"
     stop.set()
     t.join(timeout=10)
 
 
 def test_watch_does_not_revive_removed_route(paths):
-    """路由表里已经没有它（用户主动 down 过）→ 自检不得复活。"""
+    """It is no longer in the route table (the user explicitly ran down) -> the watchdog must not revive it."""
     import threading
 
     paths.ensure_files()
@@ -294,16 +299,16 @@ def test_watch_does_not_revive_removed_route(paths):
     stop = threading.Event()
     t = threading.Thread(target=runner._watch, args=(route, stop), daemon=True)
     t.start()
-    # 给自检至少跑一轮的机会（heartbeat_interval=0.1）—— 这里必须留够余量：
-    # 负载高时守护线程的第一轮可能晚到，睡太短会误判成「没复活」
+    # Give the watchdog at least one chance to run (heartbeat_interval=0.1) -- leave enough margin here:
+    # under load the first daemon round may be late, and sleeping too briefly would misjudge it as "not revived"
     time.sleep(1.0)
     stop.set()
     t.join(timeout=10)
-    assert caddy.reloads == before, "用户已注销的路由不应被复活"
+    assert caddy.reloads == before, "a route the user deregistered must not be revived"
 
 
 def test_watch_re_registers_when_only_prefixed_domain_remains(paths):
-    """Caddy 里只剩 ax.test 时，路由 x.test 不得被裸子串匹配误判为存活。"""
+    """When only ax.test remains in Caddy, route x.test must not be misjudged alive by a bare substring match."""
     import threading
 
     paths.ensure_files()
@@ -318,31 +323,35 @@ def test_watch_re_registers_when_only_prefixed_domain_remains(paths):
     store.mutate(lambda t: t.upsert(route))
     before = caddy.reloads
 
-    # 只含另一条路由 ax.test —— 裸子串 "x.test" in '"ax.test"' 会命中
+    # Contains only another route, ax.test -- the bare substring "x.test" in '"ax.test"' would match
     admin.config_payload = {
         "apps": {"http": {"servers": {"srv0": {"routes": [{"match": [{"host": ["ax.test"]}]}]}}}}
     }
     stop = threading.Event()
     t = threading.Thread(target=runner._watch, args=(route, stop), daemon=True)
     t.start()
-    assert wait_until(lambda: caddy.reloads > before), "前缀域名（ax.test）不得让 x.test 伪装成存活"
+    assert wait_until(lambda: caddy.reloads > before), (
+        "a prefixed domain (ax.test) must not make x.test look alive"
+    )
     stop.set()
     t.join(timeout=10)
 
 
 def test_run_deregisters_when_signal_lands_during_registration(paths):
-    """SIGTERM 恰好落在注册事务（validate+reload 窗口）内 → 路由也必须被注销。
+    """SIGTERM lands exactly inside the registration transaction (validate+reload window) -> the route must still be deregistered.
 
-    第一次 reload 即注册事务：在其中向本进程发 SIGTERM，信号处理程序
-    raise SystemExit 从 mutate 内部抛出（无回滚），由 run() 的 finally 兜底注销。
-    第二次 reload 落在 finally 的注销事务里 —— 此时的第二个信号必须被忽略
-    （stop 已置位），否则注销事务被打断、路由残留指向已死的子进程。
+    The first reload is the registration transaction: send SIGTERM to this process
+    inside it; the signal handler raises SystemExit from inside mutate (no rollback),
+    and run()'s finally block deregisters as a fallback. The second reload falls in
+    the deregistration transaction in finally -- the second signal at that point must
+    be ignored (stop is already set), otherwise the deregistration transaction is
+    interrupted and the route is left pointing at a dead child.
     """
     paths.ensure_files()
     cfg = Config(storage=str(paths.data_dir))
 
     class SignalingCaddy(FakeCaddy):
-        """每次 reload 都向本进程发 SIGTERM —— 分别命中注册与注销两个窗口。"""
+        """Send SIGTERM to this process on every reload -- hitting the registration and deregistration windows respectively."""
 
         def reload(self, caddyfile=None):
             ok = super().reload(caddyfile)
@@ -356,15 +365,19 @@ def test_run_deregisters_when_signal_lands_during_registration(paths):
         runner.run("codeup", [sys.executable, "-c", _LISTEN_AND_EXIT])
     assert cm.value.code == 143
     table = json.loads(paths.routes_json.read_text())
-    assert table["routes"] == [], "信号中断注册后不得留下指向死端口的路由"
-    assert caddy.reloads == 2, "注册一次 + 注销一次；第二个信号不得打断注销"
+    assert table["routes"] == [], (
+        "a signal-interrupted registration must not leave a route pointing at a dead port"
+    )
+    assert caddy.reloads == 2, (
+        "one registration + one deregistration; the second signal must not interrupt deregistration"
+    )
 
 
 def test_run_signal_forwards_to_group_and_deregisters(paths, tmp_path):
-    """SIGTERM → 按组转发子进程、注销路由、runner 以 128+15=143 退出。
+    """SIGTERM -> forward to the whole child group, deregister the route, runner exits with 128+15=143.
 
-    在独立 python 子进程里跑 UpRunner.run（否则信号会打到测试进程本身），
-    路由表通过 DEVPROXY_*_DIR 指向 tmp_path 供本测试检查。
+    Run UpRunner.run in a separate python subprocess (otherwise the signal would hit
+    the test process itself); point the route table at tmp_path via DEVPROXY_*_DIR for this test to inspect.
     """
     probe = socket.socket()
     probe.bind(("127.0.0.1", 0))
@@ -433,46 +446,46 @@ def test_run_signal_forwards_to_group_and_deregisters(paths, tmp_path):
     proc = subprocess.Popen(
         [sys.executable, str(runner_main)],
         env=env,
-        start_new_session=True,  # 独立会话：SIGTERM 只打到 runner 本身
+        start_new_session=True,  # Separate session: SIGTERM only reaches the runner itself
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
     child_pid = None
     try:
-        # 等注册完成（拿到子进程 pid）且孙进程 pid 已写出
-        # 超时给到 60s：负载高的机器上 python 子进程启动本身就要好几秒
+        # Wait for registration (child pid acquired) and the grandchild pid file to be written.
+        # Timeout is 60s: on a loaded machine even starting a python subprocess takes several seconds
         deadline = time.time() + 60
         table = None
         while time.time() < deadline and (table is None or not grandchild_pid_file.exists()):
-            assert proc.poll() is None, f"runner 提前退出 rc={proc.returncode}"
+            assert proc.poll() is None, f"runner exited early rc={proc.returncode}"
             if paths.routes_json.exists():
                 loaded = json.loads(paths.routes_json.read_text())
                 if loaded.get("routes"):
                     table = loaded
             time.sleep(0.1)
-        assert table is not None, "60s 内路由未注册"
+        assert table is not None, "route was not registered within 60s"
         child_pid = table["routes"][0]["pid"]
         grandchild_pid = int(grandchild_pid_file.read_text())
 
         proc.send_signal(signal.SIGTERM)
         rc = proc.wait(timeout=60)
-        assert rc == 143, f"被 SIGTERM 杀死应以 128+15 退出，实际 {rc}"
+        assert rc == 143, f"killed by SIGTERM should exit with 128+15, got {rc}"
 
         table = json.loads(paths.routes_json.read_text())
-        assert table["routes"] == [], "信号退出后路由必须注销"
+        assert table["routes"] == [], "the route must be deregistered after a signal exit"
         assert wait_until(
             lambda: not _process_running(child_pid) and not _process_running(grandchild_pid)
-        ), "子进程与孙进程应被按组清理"
+        ), "the child and grandchild should be cleaned up by group"
     finally:
         if proc.poll() is None:
             proc.kill()
             proc.wait(timeout=5)
         if child_pid is not None and _process_running(child_pid):
-            # 测试自己的兜底清理：此刻读到的身份必然匹配，可直接杀
+            # Test's own fallback cleanup: the identity read at this point necessarily matches, so kill directly
             kill_pid_group(child_pid, proc_start_time(child_pid))
 
 
-# ------------------------------------------- I-3: pid 复用防护（进程身份校验）
+# ------------------------------------------- I-3: pid reuse protection (process identity check)
 
 
 def _spawn_sleeper() -> subprocess.Popen:
@@ -482,7 +495,7 @@ def _spawn_sleeper() -> subprocess.Popen:
 
 
 def test_proc_start_time_is_stable_and_missing_for_dead_pid():
-    """同一进程两次读取身份一致；不存在的 pid 返回 None。"""
+    """Reading the identity twice for the same process is consistent; a nonexistent pid returns None."""
     a = proc_start_time(os.getpid())
     b = proc_start_time(os.getpid())
     assert a is not None and a == b
@@ -493,30 +506,36 @@ def test_kill_pid_group_kills_when_identity_matches():
     proc = _spawn_sleeper()
     try:
         assert kill_pid_group(proc.pid, proc_start_time(proc.pid)) is True
-        assert wait_until(lambda: not _process_running(proc.pid)), "进程组应已被杀"
+        assert wait_until(lambda: not _process_running(proc.pid)), (
+            "the process group should have been killed"
+        )
     finally:
         stop_process_group(proc, proc.pid)
 
 
 def test_kill_pid_group_skips_reused_pid():
-    """记录的启动时刻与当前进程对不上（pid 被复用）→ 绝不误杀。"""
+    """The recorded start time no longer matches the current process (pid was reused) -> never kill the wrong process."""
     proc = _spawn_sleeper()
     try:
         forged = (proc_start_time(proc.pid) or "0") + "-forged"
         assert kill_pid_group(proc.pid, forged) is False
         time.sleep(0.3)
-        assert _process_running(proc.pid), "身份不符时不得杀掉无辜进程"
+        assert _process_running(proc.pid), (
+            "an innocent process must not be killed when the identity does not match"
+        )
     finally:
         stop_process_group(proc, proc.pid)
 
 
 def test_kill_pid_group_skips_when_identity_unknown():
-    """老版本路由表没有 proc_start —— 无法核实身份时宁可留下残留进程。"""
+    """Old route tables have no proc_start -- when identity cannot be verified, prefer leaving the stray process."""
     proc = _spawn_sleeper()
     try:
         assert kill_pid_group(proc.pid, None) is False
         time.sleep(0.3)
-        assert _process_running(proc.pid), "无法核实身份时不得杀掉进程"
+        assert _process_running(proc.pid), (
+            "must not kill the process when identity cannot be verified"
+        )
     finally:
         stop_process_group(proc, proc.pid)
 
@@ -530,7 +549,7 @@ def test_kill_pid_group_on_dead_pid_is_noop():
 
 
 def test_run_persists_proc_start_with_pid(paths):
-    """注册路由时把进程身份一并固化，供 down 时防 pid 复用。"""
+    """Persist the process identity together with the pid at registration, so down can guard against pid reuse."""
     paths.ensure_files()
     runner = _runner(paths)
     snapshots = []
@@ -540,15 +559,15 @@ def test_run_persists_proc_start_with_pid(paths):
 
     runner.run("codeup", [sys.executable, "-c", _LISTEN_AND_EXIT], on_ready=on_ready)
     entry = snapshots[0]["routes"][0]
-    assert entry["pid"], "pid 必须记录"
-    assert entry.get("proc_start"), "proc_start 必须记录"
+    assert entry["pid"], "pid must be recorded"
+    assert entry.get("proc_start"), "proc_start must be recorded"
 
 
-# --------------------------------------------- I-4: 心跳不得复活已注销的路由
+# --------------------------------------------- I-4: heartbeat must not revive a deregistered route
 
 
 def test_watch_does_not_resurrect_route_removed_between_check_and_write(paths, monkeypatch):
-    """down 恰好落在心跳的「查表」与「写回」之间 → 不得复活（检查必须持锁）。"""
+    """down lands exactly between the heartbeat's "read table" and "write back" -> must not revive (the check must hold the lock)."""
     import threading
 
     paths.ensure_files()
@@ -561,7 +580,7 @@ def test_watch_does_not_resurrect_route_removed_between_check_and_write(paths, m
 
     route = Route(name="x", domain="x.test", port=1, mode="up", upstream="127.0.0.1:1")
     store.mutate(lambda t: t.upsert(route))
-    admin.config_payload = {}  # Caddy 当前配置里没有它
+    admin.config_payload = {}  # It is not in Caddy's current config
 
     real_mutate = store.mutate
     armed = {"hit": False}
@@ -570,7 +589,7 @@ def test_watch_does_not_resurrect_route_removed_between_check_and_write(paths, m
         if armed["hit"]:
             return real_mutate(fn, *args, **kwargs)
         armed["hit"] = True
-        # 用户恰在此刻完成了一次 down（落在无锁检查与写回之间）
+        # The user completes a down at exactly this moment (between the unlocked check and the write-back)
         real_mutate(lambda t: t.remove("x"))
         return real_mutate(fn, *args, **kwargs)
 
@@ -579,40 +598,43 @@ def test_watch_does_not_resurrect_route_removed_between_check_and_write(paths, m
     stop = threading.Event()
     t = threading.Thread(target=runner._watch, args=(route, stop), daemon=True)
     t.start()
-    # 守护线程必须自己结束（路由没了就该退出）—— 给足超时，负载高时
-    # 第一轮心跳可能晚到
+    # The daemon thread must end by itself (the route is gone, so it should exit) -- allow ample timeout;
+    # under load the first heartbeat round may be late
     t.join(timeout=30)
     stop.set()
-    assert not t.is_alive(), "路由已不存在，守护线程应结束"
+    assert not t.is_alive(), "the watchdog should exit once the route no longer exists"
     table = json.loads(paths.routes_json.read_text())
-    assert table["routes"] == [], "被 down 的路由不得被心跳复活"
+    assert table["routes"] == [], "a route removed by down must not be revived by the heartbeat"
 
 
-# --------------------------------------- C1: 组长被回收后不得盲杀旧 pgid
+# --------------------------------------- C1: must not blindly signal a stale pgid after the leader is reaped
 
 
 def test_stop_process_group_skips_unverifiable_reaped_leader():
-    """组长已被回收 + 身份无法核实 → 绝不对该 pgid 发信号（可能已被复用）。"""
+    """Leader already reaped + identity unverifiable -> never signal that pgid (it may have been reused)."""
     victim = _spawn_sleeper()
     reaped = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
     try:
-        reaped.wait()  # 组长已被回收，pid/pgid 理论上可被复用
+        reaped.wait()  # The leader has been reaped, so the pid/pgid could in principle be reused
         stop_process_group(reaped, victim.pid, expected_start="forged")
         time.sleep(0.3)
-        assert _process_running(victim.pid), "身份不符时不得杀掉无关进程组"
+        assert _process_running(victim.pid), (
+            "must not kill an unrelated process group when identity does not match"
+        )
 
-        stop_process_group(reaped, victim.pid)  # 未提供身份 → 同样跳过
+        stop_process_group(reaped, victim.pid)  # No identity given -> likewise skip
         time.sleep(0.2)
-        assert _process_running(victim.pid), "无法核实身份时不得发信号"
+        assert _process_running(victim.pid), "must not signal when identity cannot be verified"
     finally:
         stop_process_group(victim, victim.pid)
 
 
 def test_run_kills_grandchildren_after_leader_already_exited(paths, tmp_path):
-    """正常退出路径：组长先退出，孙进程仍必须被按组清理。
+    """Normal exit path: the leader exits first, but grandchildren must still be cleaned up by group.
 
-    旧实现先 proc.wait() 回收组长、再 killpg —— 存在 pid 复用窗口；
-    新实现用 waitid(WNOWAIT) 把组长保持为僵尸直到补刀完成。
+    The old implementation first proc.wait() reaped the leader and then killpg -- a pid
+    reuse window; the new implementation uses waitid(WNOWAIT) to keep the leader as a
+    zombie until the finishing blow is done.
     """
     paths.ensure_files()
     runner = _runner(paths)
@@ -629,10 +651,12 @@ def test_run_kills_grandchildren_after_leader_already_exited(paths, tmp_path):
     assert rc == 0
     assert wait_until(lambda: marker.exists() and marker.read_text().strip())
     gpid = int(marker.read_text())
-    assert wait_until(lambda: not _process_running(gpid)), "组长退出后孙进程仍必须被清理"
+    assert wait_until(lambda: not _process_running(gpid)), (
+        "grandchildren must still be cleaned up after the leader exits"
+    )
 
 
-# ------------------------------- I2: 同名路由的注销 / 心跳必须校验归属
+# ------------------------------- I2: deregistration / heartbeat of same-name routes must check ownership
 
 
 def test_deregister_does_not_remove_route_replaced_by_new_up(paths):
@@ -649,11 +673,11 @@ def test_deregister_does_not_remove_route_replaced_by_new_up(paths):
     store.mutate(lambda t: t.upsert(new))
 
     runner._deregister(old)
-    assert store.get("x") == new, "旧 up 的清理不得删掉同名的新路由"
+    assert store.get("x") == new, "cleanup of the old up must not delete the new same-name route"
 
 
 def test_watch_stops_without_overwriting_route_replaced_by_new_up(paths):
-    """同名路由已被新 up 接管（pid/port 不同）→ 旧心跳既不复写也不空转。"""
+    """The same-name route has been taken over by a new up (different pid/port) -> the old heartbeat neither overwrites nor spins."""
     import threading
 
     paths.ensure_files()
@@ -667,7 +691,7 @@ def test_watch_stops_without_overwriting_route_replaced_by_new_up(paths):
     old = Route(name="x", domain="x.test", port=1, mode="up", upstream="127.0.0.1:1", pid=111)
     new = Route(name="x", domain="x.test", port=2, mode="up", upstream="127.0.0.1:2", pid=222)
     store.mutate(lambda t: t.upsert(new))
-    admin.config_payload = {}  # 旧路由确实不在 Caddy 里
+    admin.config_payload = {}  # The old route really is not in Caddy
     before = caddy.reloads
 
     stop = threading.Event()
@@ -675,12 +699,12 @@ def test_watch_stops_without_overwriting_route_replaced_by_new_up(paths):
     t.start()
     t.join(timeout=10)
     stop.set()
-    assert not t.is_alive(), "路由已被接管，旧心跳应结束"
-    assert caddy.reloads == before, "旧心跳不得覆盖新路由"
+    assert not t.is_alive(), "the route was taken over; the old heartbeat should end"
+    assert caddy.reloads == before, "the old heartbeat must not overwrite the new route"
     assert store.get("x") == new
 
 
-# --------------------------- I3: kill_pid_group 等待退出并升级 SIGKILL
+# --------------------------- I3: kill_pid_group waits for exit and escalates to SIGKILL
 
 
 def test_kill_pid_group_escalates_to_sigkill(tmp_path):
@@ -693,18 +717,18 @@ def test_kill_pid_group_escalates_to_sigkill(tmp_path):
     )
     proc = subprocess.Popen([sys.executable, "-c", code], start_new_session=True)
     try:
-        assert wait_until(marker.exists), "子进程未完成 SIGTERM handler 安装"
+        assert wait_until(marker.exists), "the child did not finish installing the SIGTERM handler"
         start = proc_start_time(proc.pid)
         assert kill_pid_group(proc.pid, start, timeout=0.3) is True
         assert wait_until(lambda: not _process_running(proc.pid)), (
-            "忽略 SIGTERM 的进程必须被 SIGKILL 收掉"
+            "a process ignoring SIGTERM must be taken down by SIGKILL"
         )
     finally:
         stop_process_group(proc, proc.pid)
 
 
 def test_run_reclaims_existing_route_and_reuses_its_port(paths):
-    """同名旧进程占着显式端口：先等它死透，再启动新进程 —— 不得误报端口占用。"""
+    """An old same-name process holds the explicit port: wait for it to die first, then start the new process -- must not falsely report the port as occupied."""
     paths.ensure_files()
     cfg = Config(storage=str(paths.data_dir))
     caddy = FakeCaddy()
@@ -739,32 +763,34 @@ def test_run_reclaims_existing_route_and_reuses_its_port(paths):
         runner = UpRunner(store, cfg, FakeAdmin())
         rc = runner.run("codeup", [sys.executable, "-c", _LISTEN_AND_EXIT], port=port)
         assert rc == 0
-        assert wait_until(lambda: not _process_running(old.pid)), "旧进程必须被收掉"
+        assert wait_until(lambda: not _process_running(old.pid)), (
+            "the old process must be taken down"
+        )
         assert wait_until(lambda: json.loads(paths.routes_json.read_text())["routes"] == [])
     finally:
         stop_process_group(old, old.pid)
 
 
-# ------------------------------------- I4: 不可执行命令映射成 UpError
+# ------------------------------------- I4: non-executable command maps to UpError
 
 
 def test_run_maps_non_executable_command_to_up_error(paths, tmp_path):
     paths.ensure_files()
     script = tmp_path / "no-exec.sh"
-    script.write_text("#!/bin/sh\nexit 0\n")  # 故意不 chmod +x
+    script.write_text("#!/bin/sh\nexit 0\n")  # deliberately not chmod +x
     with pytest.raises(UpError) as cm:
         _runner(paths).run("codeup", [str(script)])
-    assert "无法启动命令" in str(cm.value)
+    assert "cannot start command" in str(cm.value)
 
 
 def test_run_maps_missing_command_to_up_error(paths, tmp_path):
     paths.ensure_files()
     with pytest.raises(UpError) as cm:
         _runner(paths).run("codeup", [str(tmp_path / "absent-cmd")])
-    assert "无法启动命令" in str(cm.value)
+    assert "cannot start command" in str(cm.value)
 
 
-# ------------------------- I5: 心跳不再静默吞异常（可重试报一次，未知则停）
+# ------------------------- I5: heartbeat no longer silently swallows exceptions (retryable reported once, unknown stops)
 
 
 def test_watch_retries_store_errors_and_reports_once(paths, monkeypatch, capsys):
@@ -788,19 +814,21 @@ def test_watch_retries_store_errors_and_reports_once(paths, monkeypatch, capsys)
 
     def failing_mutate(fn, *args, **kwargs):
         calls["n"] += 1
-        raise RouteStoreError("reload 持续失败（测试）")
+        raise RouteStoreError("reload keeps failing (test)")
 
     monkeypatch.setattr(store, "mutate", failing_mutate)
     stop = threading.Event()
     t = threading.Thread(target=runner._watch, args=(route, stop), daemon=True)
     t.start()
-    assert wait_until(lambda: calls["n"] >= 3), "可重试错误不得杀死守护线程"
+    assert wait_until(lambda: calls["n"] >= 3), (
+        "a retryable error must not kill the watchdog thread"
+    )
     stop.set()
     t.join(timeout=10)
     assert not t.is_alive()
 
     err = capsys.readouterr().err
-    assert err.count("心跳失败") == 1, "相同错误只报一次，避免每轮刷屏"
+    assert err.count("heartbeat failed") == 1, "the same error is reported once, not every round"
 
 
 def test_watch_stops_on_unknown_exception(paths, monkeypatch, capsys):
@@ -818,7 +846,7 @@ def test_watch_stops_on_unknown_exception(paths, monkeypatch, capsys):
     admin.config_payload = {}
 
     def broken_mutate(fn, *args, **kwargs):
-        raise RuntimeError("未知错误（测试）")
+        raise RuntimeError("unknown error (test)")
 
     monkeypatch.setattr(store, "mutate", broken_mutate)
     stop = threading.Event()
@@ -826,11 +854,11 @@ def test_watch_stops_on_unknown_exception(paths, monkeypatch, capsys):
     t.start()
     t.join(timeout=10)
     stop.set()
-    assert not t.is_alive(), "未知异常应记录后结束线程"
-    assert "已停止" in capsys.readouterr().err
+    assert not t.is_alive(), "an unknown exception should be logged and end the thread"
+    assert "stopping" in capsys.readouterr().err
 
 
-# --------------------------- M5: 区分「身份缺失」与「pid 被复用」的诊断
+# --------------------------- M5: distinguish "identity missing" from "pid reused" diagnostics
 
 
 def test_kill_pid_group_messages_distinguish_unknown_identity_from_reuse(capsys):
@@ -838,17 +866,17 @@ def test_kill_pid_group_messages_distinguish_unknown_identity_from_reuse(capsys)
     try:
         assert kill_pid_group(proc.pid, None) is False
         err = capsys.readouterr().err
-        assert "缺少 proc_start" in err
-        assert "pid 被复用" not in err
+        assert "missing proc_start" in err
+        assert "was reused" not in err
 
         forged = (proc_start_time(proc.pid) or "0") + "-forged"
         assert kill_pid_group(proc.pid, forged) is False
-        assert "已被复用" in capsys.readouterr().err
+        assert "was reused" in capsys.readouterr().err
     finally:
         stop_process_group(proc, proc.pid)
 
 
-# ----------------------- M7: 路由存活判断必须结构化，不能做全局子串匹配
+# ----------------------- M7: route liveness must be structural, not a global substring match
 
 
 def test_route_live_ignores_domain_string_in_unrelated_fields():

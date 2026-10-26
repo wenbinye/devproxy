@@ -1,10 +1,12 @@
-"""假平台：测试与 dry-run 用。不碰真实系统。
+"""Fake platform for tests and dry-run. Never touches the real system.
 
-"不碰真实系统"对**提权会话**同样成立：`FakeElevated` 的 write / read /
-copy 一律经过 `FakePlatform._sandbox_target()`，把 /etc、/usr/local/share、
-/Library/LaunchDaemons 这类系统路径映射到沙箱目录。只有测试自己的临时
-目录（pytest 的 tmp_path、TemporaryDirectory）允许真实落盘，用例才能
-读回内容做断言。
+"Do not touch the real system" also holds for the **elevated session**:
+`FakeElevated`'s write / read / copy all go through
+`FakePlatform._sandbox_target()`, mapping system paths such as /etc,
+/usr/local/share, and /Library/LaunchDaemons into the sandbox directory. Only
+the test's own temporary directories (pytest's tmp_path, TemporaryDirectory)
+are allowed to write to disk for real, so the test can read the content back
+and assert on it.
 """
 
 from __future__ import annotations
@@ -20,7 +22,7 @@ from devproxy.platform.base import nss_db_dir
 
 
 def _certutil_opt(argv: list[str], name: str) -> str | None:
-    """取 certutil 的选项值（`-i <路径>` / `-n <昵称>` / `-d <库>` / `-t <标志>`）。"""
+    """Get a certutil option value (`-i <path>` / `-n <nickname>` / `-d <database>` / `-t <flags>`)."""
     if name not in argv:
         return None
     index = argv.index(name)
@@ -30,7 +32,7 @@ def _certutil_opt(argv: list[str], name: str) -> str | None:
 
 
 def _norm(path: Path | str) -> Path:
-    """规范化路径（不解析软链，只消除 `..` 与多余分隔符）。"""
+    """Normalize a path (no symlink resolution, only collapse `..` and redundant separators)."""
     return Path(os.path.normpath(str(path)))
 
 
@@ -42,12 +44,12 @@ def _read_bytes(path: Path) -> bytes | None:
 
 
 def _flags_ssl_trusted(flags: str) -> bool:
-    """与 `linux._nss_flags_trusted` 同一语义：只看 SSL 列是否 "C"。"""
+    """Same semantics as `linux._nss_flags_trusted`: only check whether the SSL column is "C"."""
     return bool(flags) and flags[0] == "C"
 
 
 def _repair_flags(flags: str) -> str:
-    """与 `linux._nss_repair_flags` 同一语义：只把 SSL 列补成 "C"。"""
+    """Same semantics as `linux._nss_repair_flags`: only repair the SSL column to "C"."""
     parts = flags.split(",")
     if len(parts) != 3:
         return flags
@@ -61,8 +63,9 @@ class FakeElevated:
     def run(self, argv: list[str]) -> tuple[int, str]:
         self.platform.commands.append(list(argv))
         if argv[:1] == ["rm"]:
-            # 模拟 `rm -f/-rf -- <path>`：卸载流程靠它删除 /etc 下的
-            # DNS drop-in 与系统信任库文件，假平台不模拟就永远删不掉。
+            # Simulate `rm -f/-rf -- <path>`: the uninstall flow relies on it to
+            # delete the DNS drop-in and system trust store files under /etc;
+            # without modeling it, the fake platform could never delete them.
             for raw in argv[1:]:
                 if raw.startswith("-"):
                     continue
@@ -83,11 +86,12 @@ class FakeElevated:
         return self.platform._sandbox_target(path).read_text(encoding="utf-8")
 
     def copy(self, src: Path, dest: Path) -> None:
-        """与 write 保持一致：真实落盘（沙箱内），并记录 commands 与 written。
+        """Consistent with write: write to disk for real (inside the sandbox), and record commands and written.
 
-        系统 CA 安装走这条路径：复制成功后立刻把源 CA 记入 `trusted`，
-        让"安装 → 复查"这条链路在假平台上真的闭合（而不是靠测试提前
-        预置 `trusted` 绕过）。
+        System CA installation goes through this path: after a successful copy,
+        immediately record the source CA in `trusted`, so that the
+        "install → recheck" chain really closes on the fake platform (instead of
+        relying on the test pre-seeding `trusted` to bypass it).
         """
         content = Path(src).read_text(encoding="utf-8")
         target = self.platform._sandbox_target(dest)
@@ -106,55 +110,64 @@ class FakePlatform:
         self.services: dict[str, str] = {}
         self.active: set[str] = set()
         self.trusted: set[Path] = set()
-        # 兼容旧测试：直接往里加 CA 表示"NSS 判定已信任"。
+        # Compatibility with old tests: adding a CA directly here means
+        # "NSS considers it trusted".
         self.nss: set[Path] = set()
-        # 更真实的 NSS 状态：(库路径, 昵称) -> (证书路径, 三列信任标志)。
-        # 组件用 `-A/-D/-M` 改的就是这张表，`nss_trusted` 按内容 + SSL 列判定。
+        # More realistic NSS state: (database path, nickname) -> (certificate
+        # path, three-column trust flags). What the component changes via
+        # `-A/-D/-M` is exactly this table; `nss_trusted` decides by content +
+        # SSL column.
         self.nss_entries_db: dict[tuple[Path, str], tuple[Path, str]] = {}
         self.dns_backends: set[str] = set()
         self.commands: list[list[str]] = []
         self.written: dict[Path, str] = {}
         self._elevated: FakeElevated | None = None
-        # 平台默认 NSS 库。测试把组件指向别的库时同步改这个属性，
-        # `CertComponent._require_same_nss_db` 才会认为两边一致。
+        # Platform default NSS database. When a test points components at a
+        # different database, change this attribute in sync, so that
+        # `CertComponent._require_same_nss_db` considers both sides consistent.
         self.nss_db = _norm(nss_db_dir())
-        # auto DNS 后端：默认模拟 resolved 在运行
+        # auto DNS backend: simulate resolved running by default
         self.resolved_running = True
-        # linger：默认未启用，enable_linger() 后置真
+        # linger: disabled by default; set to true after enable_linger()
         self.linger = False
-        # verify() 的功能探测：可按需改这些“罐头答案”
+        # Feature probes for verify(): these "canned answers" can be changed as needed
         self.dns_answer: str | None = "127.0.0.1"
         self.dns_answers: dict[str, str | None] = {}
         self.dns_queries: list[str] = []
         self.http_result = True
         self.http_results: dict[str, bool] = {}
         self.http_probes: list[str] = []
-        # 单元落盘的隔离目录 —— 绝不读写真实的 ~/.config/systemd/user
+        # Isolated directory for unit files on disk — never read/write the real ~/.config/systemd/user
         self._unit_tmp = tempfile.TemporaryDirectory(prefix="devproxy-fake-units-")
         self.unit_dir = Path(self._unit_tmp.name)
-        # 特权路径的沙箱根 —— 系统绝对路径一律映射到这里
+        # Sandbox root for privileged paths — all absolute system paths are mapped here
         self._sandbox_tmp = tempfile.TemporaryDirectory(prefix="devproxy-fake-root-")
         self.sandbox = Path(self._sandbox_tmp.name)
 
-    # -- 路径隔离 -------------------------------------------------------
+    # -- Path isolation ------------------------------------------------
 
     def _sandbox_target(self, path: Path) -> Path:
-        """把提权路径映射到安全位置。
+        """Map a privileged path to a safe location.
 
-        - 测试自己的临时目录（pytest tmp_path / TemporaryDirectory）允许
-          真实落盘 —— 用例要读回内容；
-        - 其余绝对路径（/etc、/usr/local/share、/Library/LaunchDaemons…）
-          映射到 `self.sandbox` 下，绝不碰真机；
-        - 相对路径直接拒绝：假平台只接受明确的绝对路径。
+        - The test's own temporary directories (pytest tmp_path /
+          TemporaryDirectory) are allowed to write to disk for real — the case
+          needs to read the content back;
+        - All other absolute paths (/etc, /usr/local/share,
+          /Library/LaunchDaemons…) are mapped under `self.sandbox` and never
+          touch the real machine;
+        - Relative paths are rejected outright: the fake platform accepts only
+          explicit absolute paths.
         """
         target = _norm(path)
         if not target.is_absolute():
-            raise AssertionError(f"假平台的提权路径必须是绝对路径: {path}")
-        # 必须按 ``resolve()`` 后的形态比较：macOS 上 pytest 的 tmp_path 是
-        # `/private/var/...`，而 tempfile.gettempdir() 给的是 `/var/...`
-        # （`/var` 是指向 `/private/var` 的符号链接）。不解析就把测试自己的
-        # 临时目录误判成"系统路径"，于是写进沙箱、用例读不回内容 —— 在
-        # macOS 上整片组件测试因此变红，而 Linux 上正常。
+            raise AssertionError(f"fake platform privilege paths must be absolute: {path}")
+        # Compare against the ``resolve()``d form: on macOS, pytest's tmp_path is
+        # `/private/var/...` while tempfile.gettempdir() returns `/var/...`
+        # (`/var` is a symlink to `/private/var`). Without resolving, the test's
+        # own temporary directory is misclassified as a "system path", so the
+        # write goes into the sandbox and the test cannot read the content back
+        # — on macOS whole component test suites turn red because of this,
+        # while Linux is fine.
         resolved = target.resolve()
         allowed_roots = (self.sandbox.resolve(), Path(tempfile.gettempdir()).resolve())
         for root in allowed_roots:
@@ -170,7 +183,7 @@ class FakePlatform:
             self._elevated = FakeElevated(self)
         return self._elevated
 
-    # -- 命令与证书 -----------------------------------------------------
+    # -- Commands and certificates -------------------------------------
 
     def run(self, argv: list[str]) -> tuple[int, str]:
         self.commands.append(list(argv))
@@ -193,12 +206,15 @@ class FakePlatform:
         return _norm(Path(raw).expanduser())
 
     def _apply_certutil(self, argv: list[str]) -> None:
-        """把 certutil 的 -A / -D / -M 映射到假平台的 NSS 状态上。
+        """Map certutil's -A / -D / -M onto the fake platform's NSS state.
 
-        真机语义：`-A` 把证书装进 `-d` 指定的库；`-D` 删掉该库里同名条目；
-        `-M` 改写该条目的三列信任标志。`-t` 与 `-d` 都必须生效 ——
-        组件把 `-t "C,,"` 改成 `-t ",,"` 的回归、以及"写库 A、复查库 B"
-        的 bug，只有照真语义建模才能被测试发现。
+        Real-machine semantics: `-A` installs a certificate into the database
+        given by `-d`; `-D` deletes the entry with the same name from that
+        database; `-M` rewrites that entry's three-column trust flags. Both
+        `-t` and `-d` must take effect — the regression where the component
+        changes `-t "C,,"` to `-t ",,"`, and the bug of "writing database A,
+        rechecking database B", can only be caught by tests when modeled with
+        the real semantics.
         """
         db = self._certutil_db(argv, _norm(self.nss_db))
         nickname = _certutil_opt(argv, "-n")
@@ -237,10 +253,12 @@ class FakePlatform:
         env: dict[str, str],
         description: str = "",
     ) -> None:
-        """渲染单元并落盘到隔离目录。
+        """Render the unit and write it to the isolated directory.
 
-        单元文本保留 systemd 的字段形态（Type= / ExecReload= / WantedBy= …），
-        组件测试要断言的就是这些字段 —— 压成一行摘要会让断言失去意义。
+        The unit text preserves systemd's field shape (Type= / ExecReload= /
+        WantedBy= …); those fields are exactly what component tests assert on —
+        collapsing it into a one-line summary would make the assertions
+        meaningless.
         """
         program = Path(exec_start[0]).name if exec_start else ""
         service_type = "notify" if program.startswith("caddy") else "simple"
@@ -279,7 +297,7 @@ class FakePlatform:
         self.active.add(name)
 
     def remove_service(self, name: str) -> None:
-        """幂等地移除服务与单元文件，并像真实平台一样记录命令。"""
+        """Idempotently remove the service and unit file, recording commands like the real platform."""
         self.commands.append(["remove-service", name])
         self.services.pop(name, None)
         self.active.discard(name)
@@ -289,7 +307,7 @@ class FakePlatform:
         pass
 
     def open_in_editor(self, path: Path, editor: str) -> int:
-        """假平台不真的开编辑器，只把这次调用记下来。"""
+        """The fake platform does not really open an editor; it only records the call."""
         self.commands.append(["editor", *shlex.split(editor), str(path)])
         return 0
 
@@ -299,7 +317,7 @@ class FakePlatform:
         return 0, ""
 
     def linger_status(self) -> bool | None:
-        """假平台永远知道答案（没有"判不了"的分支）。"""
+        """The fake platform always knows the answer (there is no "cannot determine" branch)."""
         return self.linger
 
     def linger_enabled(self) -> bool:
@@ -320,24 +338,24 @@ class FakePlatform:
         return Path(ca) in self.trusted
 
     def privilege_read(self, path: Path) -> str | None:
-        """非交互读：读得到就返回，读不到返回 None（绝不提示密码）。
+        """Non-interactive read: return content if readable, None otherwise (never prompt for a password).
 
-        与提权写入使用同一套沙箱映射 —— 宿主机上的真实配置文件不会
-        改变测试结果。
+        Uses the same sandbox mapping as privileged writes — real config files
+        on the host cannot change test results.
         """
         try:
             return self._sandbox_target(path).read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError, AssertionError):
             return None
 
-    # -- NSS（与 linux.py 的三态语义对齐） ------------------------------
+    # -- NSS (aligned with the three-state semantics in linux.py) ------
 
     def nss_db_path(self) -> Path:
-        """假平台认定的默认 NSS 库路径（**非协议方法**）。"""
+        """Default NSS database path as the fake platform sees it (**not a protocol method**)."""
         return _norm(self.nss_db)
 
     def nss_entries(self, ca: Path, nss_dir: Path | None = None) -> list[tuple[str, str]] | None:
-        """库里与这张 CA 内容相同的条目；假平台不会"判不了"（返回 []）。"""
+        """Entries in the database whose content matches this CA; the fake platform is never "unable to determine" (returns [])."""
         db = self._nss_db_for(nss_dir)
         target = _read_bytes(ca)
         if target is None:
@@ -351,7 +369,7 @@ class FakePlatform:
     def nss_stale_nickname(
         self, ca: Path, nickname: str, nss_dir: Path | None = None
     ) -> bool | None:
-        """该昵称下是否残留着**别的** CA；内容读不到时返回 None。"""
+        """Whether a **different** CA is left over under this nickname; return None when the content cannot be read."""
         entry = self.nss_entries_db.get((self._nss_db_for(nss_dir), nickname))
         if entry is None:
             return False
@@ -368,10 +386,11 @@ class FakePlatform:
         return _repair_flags(flags)
 
     def nss_trusted(self, ca: Path) -> bool:
-        """按**证书内容 + SSL 列**判定，不是"这个路径被 -A 过"。
+        """Decide by **certificate content + SSL column**, not "this path was passed to -A once".
 
-        `self.nss` 仍作为测试的显式预置（老用例用它表示"平台认为已信任"），
-        与真实条目判定是"或"的关系。
+        `self.nss` remains an explicit test precondition (old tests use it to
+        mean "the platform considers it trusted"), and it is OR'ed with the
+        real-entry check.
         """
         if Path(ca) in self.nss:
             return True

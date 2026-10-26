@@ -1,4 +1,4 @@
-"""devproxy sync：计划、冲突、prune、退出码与后台工作进程。"""
+"""devproxy sync: plan, conflicts, prune, exit codes, and background workers."""
 
 import json
 import sys
@@ -17,7 +17,7 @@ from devproxy.gateway.sync import conflict_reason
 
 
 class FakeCaddy:
-    """假 Caddy：validate/reload 恒成功。"""
+    """Fake Caddy: validate/reload always succeed."""
 
     def validate(self, caddyfile=None):
         return True, "ok"
@@ -27,7 +27,7 @@ class FakeCaddy:
 
 
 class FakeAdmin:
-    """假 Admin API 客户端。"""
+    """Fake Admin API client."""
 
     def __init__(self, alive=True):
         self.alive = alive
@@ -40,7 +40,7 @@ class FakeAdmin:
 
 
 class FakeProc:
-    """假的后台工作进程句柄。"""
+    """Fake background worker handle."""
 
     def __init__(self, rc=None):
         self._rc = rc
@@ -73,7 +73,7 @@ def env(tmp_path, monkeypatch):
 
 @pytest.fixture
 def project_dir(tmp_path, monkeypatch):
-    """一个含 devproxy.toml 的项目目录（sync 的发现起点）。"""
+    """A project directory containing devproxy.toml (sync's discovery starting point)."""
     directory = tmp_path / "project"
     directory.mkdir()
     monkeypatch.chdir(directory)
@@ -82,7 +82,7 @@ def project_dir(tmp_path, monkeypatch):
 
 @pytest.fixture
 def ctx(env, monkeypatch):
-    """把 CLI 的依赖装配换成假 Caddy / 假 Admin。"""
+    """Replace the CLI's dependency wiring with a fake Caddy / fake Admin."""
     paths = Paths(env / "config", env / "state", env / "data")
     paths.ensure_files()
     paths.caddyfile.write_text("# test Caddyfile\n", encoding="utf-8")
@@ -97,7 +97,7 @@ def ctx(env, monkeypatch):
 
 
 def _stub_spawn(monkeypatch, store, *, register=True, rc=None, calls=None):
-    """把后台工作进程换成假的：成功时把路由注册上去，失败时直接退出。"""
+    """Replace the background worker with a fake: register the route on success, exit directly on failure."""
 
     def spawn(project, declared, log_path):
         if calls is not None:
@@ -126,7 +126,7 @@ def _routes_json(env) -> list:
     return json.loads(path.read_text(encoding="utf-8"))["routes"]
 
 
-# ------------------------------- 计划（纯函数）
+# ------------------------------- Plan (pure functions)
 
 
 def _project(tmp_path, text):
@@ -175,7 +175,7 @@ def test_plan_reports_command_change_as_conflict(tmp_path):
     plan = build_sync_plan(project, existing)
     assert not plan.create_up
     assert plan.conflict
-    assert "启动命令不同" in plan.conflict[0][2]
+    assert "start command differs" in plan.conflict[0][2]
 
 
 def test_plan_reports_port_change_as_conflict(tmp_path):
@@ -191,7 +191,7 @@ def test_plan_reports_port_change_as_conflict(tmp_path):
     ]
     plan = build_sync_plan(project, existing)
     assert plan.conflict
-    assert "端口不同" in plan.conflict[0][2]
+    assert "port differs" in plan.conflict[0][2]
 
 
 def test_plan_reports_mode_change_as_conflict(tmp_path):
@@ -208,7 +208,7 @@ def test_plan_reports_mode_change_as_conflict(tmp_path):
     ]
     plan = build_sync_plan(project, existing)
     assert plan.conflict
-    assert "模式不同" in plan.conflict[0][2]
+    assert "mode differs" in plan.conflict[0][2]
 
 
 def test_plan_prune_only_touches_routes_declared_by_this_file(tmp_path):
@@ -259,7 +259,7 @@ def test_conflict_reason_is_none_for_consistent_declaration(tmp_path):
     assert conflict_reason(existing, declared) is None
 
 
-# ------------------------------- 命令行为
+# ------------------------------- Command behavior
 
 
 def test_sync_without_project_file_exits_2(tmp_path, monkeypatch):
@@ -320,8 +320,10 @@ def test_sync_is_idempotent(ctx, env, project_dir, monkeypatch):
 
     second = CliRunner().invoke(app, ["up"])
     assert second.exit_code == 0, second.output
-    assert "全部已是最新" in second.output
-    assert (env / "state" / "routes.json").read_text() == before, "第二次不得改动路由表"
+    assert "Everything is up to date" in second.output
+    assert (env / "state" / "routes.json").read_text() == before, (
+        "the second run must not change the route table"
+    )
 
 
 def test_sync_reports_conflict_without_touching_anything(ctx, env, project_dir):
@@ -342,11 +344,11 @@ def test_sync_reports_conflict_without_touching_anything(ctx, env, project_dir):
 
     res = CliRunner().invoke(app, ["up"])
     assert res.exit_code == 1, res.output
-    assert "冲突" in res.output
+    assert "conflicts" in res.output
     assert "devproxy down web" in res.output
     after = _routes_json(env)
-    assert after[0]["command"] == ["npm", "run", "old"], "冲突时不得改命令"
-    assert after[0]["pid"] == 4242, "冲突时不得动已有进程"
+    assert after[0]["command"] == ["npm", "run", "old"], "a conflict must not change the command"
+    assert after[0]["pid"] == 4242, "a conflict must not touch the existing process"
     assert json.loads(before)["routes"] == after
 
 
@@ -374,8 +376,8 @@ def test_sync_prune_removes_only_file_declared_routes(ctx, env, project_dir, mon
     res = CliRunner().invoke(app, ["up", "--prune", "--yes"])
     assert res.exit_code == 0, res.output
     names = [r["name"] for r in _routes_json(env)]
-    assert "stale" not in names, "本文件声明过的路由应被 prune"
-    assert "handmade" in names, "手工 up/expose 出来的路由不得被 prune"
+    assert "stale" not in names, "routes declared in this file should be pruned"
+    assert "handmade" in names, "routes created by manual up/expose must not be pruned"
 
 
 def test_sync_prune_without_yes_in_non_interactive_exits_4(ctx, env, project_dir):
@@ -392,7 +394,7 @@ def test_sync_prune_without_yes_in_non_interactive_exits_4(ctx, env, project_dir
     store.mutate(lambda t: t.upsert(mine))
     res = CliRunner().invoke(app, ["up", "--prune"])
     assert res.exit_code == 4, res.output
-    assert [r["name"] for r in _routes_json(env)] == ["stale"], "拒绝后什么都没改"
+    assert [r["name"] for r in _routes_json(env)] == ["stale"], "nothing changed after declining"
 
 
 def test_sync_partial_failure_exits_1_and_continues(ctx, env, project_dir, monkeypatch):
@@ -406,7 +408,7 @@ def test_sync_partial_failure_exits_1_and_continues(ctx, env, project_dir, monke
     def spawn(project, declared, log_path):
         calls.append(declared.name)
         if declared.name == "web":
-            # 启动失败：进程直接退出，路由没注册上
+            # Startup failure: the process exits immediately and the route is not registered
             return FakeProc(1)
         port = 45672
         route = Route(
@@ -424,8 +426,10 @@ def test_sync_partial_failure_exits_1_and_continues(ctx, env, project_dir, monke
     monkeypatch.setattr("devproxy.gateway.sync._spawn_worker", spawn)
     res = CliRunner().invoke(app, ["up"])
     assert res.exit_code == 1, res.output
-    assert "失败" in res.output
-    assert [r["name"] for r in _routes_json(env)] == ["api"], "其余路由仍应被创建"
+    assert "failed" in res.output
+    assert [r["name"] for r in _routes_json(env)] == ["api"], (
+        "the remaining routes should still be created"
+    )
 
 
 def test_sync_uses_explicit_file(ctx, env, tmp_path, monkeypatch):
@@ -438,10 +442,10 @@ def test_sync_uses_explicit_file(ctx, env, tmp_path, monkeypatch):
 
 
 def test_sync_spawns_real_worker_and_reports_its_failure(ctx, env, project_dir):
-    """真起后台工作进程（不桩）：模块路径、工作负载、日志重定向都得对。
+    """Really start a background worker (no stub): module path, workload, and log redirection must all be right.
 
-    命令故意指向不存在的可执行文件 —— 工作进程会启动失败并退出，
-    sync 必须把它的错误原样带出来（而不是「未知错误」）。
+    The command deliberately points at a nonexistent executable -- the worker fails
+    to start and exits, and sync must surface its error verbatim (not "unknown error").
     """
     paths, cfg, store, admin = ctx
     (project_dir / "devproxy.toml").write_text(
@@ -449,13 +453,13 @@ def test_sync_spawns_real_worker_and_reports_its_failure(ctx, env, project_dir):
     )
     res = CliRunner().invoke(app, ["up"])
     assert res.exit_code == 1, res.output
-    assert "失败" in res.output
+    assert "failed" in res.output
     log = paths.log_dir / "routes" / "web.log"
-    assert log.exists(), "后台进程的输出应落到日志文件"
-    assert "无法启动命令" in log.read_text(encoding="utf-8")
+    assert log.exists(), "background process output should be written to the log file"
+    assert "cannot start command" in log.read_text(encoding="utf-8")
 
 
-# ------------------------------- 后台工作进程
+# ------------------------------- Background worker
 
 
 def test_worker_passes_cwd_and_source_to_up_request(monkeypatch, tmp_path):
@@ -497,7 +501,7 @@ def test_worker_passes_cwd_and_source_to_up_request(monkeypatch, tmp_path):
 
 
 def test_worker_runs_app_in_project_dir(monkeypatch, tmp_path):
-    """子进程的工作目录必须是**项目文件所在目录**，不是用户当前目录。"""
+    """The child process's working directory must be **the directory containing the project file**, not the user's current directory."""
     from devproxy.cli import _worker
 
     project_dir = tmp_path / "project"
@@ -544,7 +548,7 @@ def test_worker_runs_app_in_project_dir(monkeypatch, tmp_path):
     assert recorded[0]["routes"][0]["source"] == source
 
 
-# -- 应用已死 → 重建而不是跳过 -------------------------------------------
+# -- App dead -> rebuild instead of skip --------------------------------------
 
 
 def _up_route(name: str, pid: int | None, proc_start: str | None = None) -> Route:
@@ -561,31 +565,31 @@ def _up_route(name: str, pid: int | None, proc_start: str | None = None) -> Rout
 
 
 def test_plan_restarts_route_whose_app_died(tmp_path):
-    """应用进程已退出（pid 不存在）→ 重建，而不是骗用户"已是最最新"。"""
+    """The app process has exited (pid does not exist) -> rebuild, instead of telling the user "up to date"."""
     import os
 
     project = _project(tmp_path, UP_TOML)
-    dead_pid = 999_999_999  # 不存在的 pid
+    dead_pid = 999_999_999  # A pid that does not exist
     assert not os.path.exists(f"/proc/{dead_pid}")
     existing = [_up_route("web", pid=dead_pid)]
     plan = build_sync_plan(project, existing)
-    assert [r.name for r in plan.create_up] == ["web"], "死了就该重建"
+    assert [r.name for r in plan.create_up] == ["web"], "rebuild when it is dead"
     assert not plan.skip
 
 
 def test_plan_skips_route_whose_app_is_alive(tmp_path):
-    """进程活着 → 照常跳过。"""
+    """The process is alive -> skip as usual."""
     import os
 
     project = _project(tmp_path, UP_TOML)
-    existing = [_up_route("web", pid=os.getpid())]  # 测试进程自己，肯定活着
+    existing = [_up_route("web", pid=os.getpid())]  # This test process itself, definitely alive
     plan = build_sync_plan(project, existing)
     assert plan.skip and plan.skip[0][0].name == "web"
     assert not plan.create_up
 
 
 def test_plan_restarts_when_pid_was_reused(tmp_path):
-    """pid 存在但 proc_start 对不上 = 被系统复用给了别的进程 → 重建。"""
+    """The pid exists but proc_start does not match = the system reused it for another process -> rebuild."""
     import os
 
     project = _project(tmp_path, UP_TOML)
@@ -596,7 +600,7 @@ def test_plan_restarts_when_pid_was_reused(tmp_path):
 
 
 def test_plan_skips_expose_route_without_pid(tmp_path):
-    """expose 路由没有受管进程 —— 无从判断，不重建。"""
+    """An expose route has no managed process -- there is nothing to judge, so do not rebuild."""
     project = _project(tmp_path, EXPOSE_TOML)
     existing = [
         Route(

@@ -1,14 +1,19 @@
-"""sync 的编排：比对现状 → 生成计划 → 执行。
+"""sync orchestration: compare current state -> build a plan -> execute.
 
-分工：
+Division of labor:
 
-- `gateway.project`：文件发现、解析、校验（纯函数，无副作用）
-- `gateway.sync`（本模块）：计划（纯函数）+ 执行（有副作用）
-- `cli.sync`：只做展示与退出码
+- `gateway.project`: file discovery, parsing, validation (pure functions, no
+  side effects)
+- `gateway.sync` (this module): plan (pure function) + execution (side
+  effects)
+- `cli.sync`: presentation and exit codes only
 
-**绝不自动重启**：路由表里已有同名路由、但声明变了（命令或端口）时，
-只报告冲突，不杀进程、不重启 —— 换端口/换命令等于换了个服务，
-该不该重启由人决定（工具给出的修复命令是 `devproxy down <name>` 再 sync）。
+**Never restart automatically**: when a route with the same name already
+exists in the route table but its declaration changed (command or port),
+only report the conflict -- do not kill the process or restart it. Changing
+the port/command means changing the service, and whether to restart is a
+human decision (the fix the tool suggests is `devproxy down <name>` then
+sync).
 """
 
 from __future__ import annotations
@@ -37,21 +42,24 @@ from devproxy.gateway.runner import reachable
 from devproxy.gateway.store import RouteStore
 from devproxy.gateway.store import RouteStoreError
 
-# 后台工作进程：它负责「启动应用 + 陪着应用 + 应用退出时注销路由」。
-# 放在 cli 包里是因为它复用 cli._context.build_context（配置/storage
-# 留档的解析只有一份实现）。这里只用模块路径字符串引用它 —— 不 import，
-# 免得网关层反过来依赖 CLI 层。
+# Background worker process: it handles "start the app + stay with the app +
+# unregister the route when the app exits". It lives in the cli package
+# because it reuses cli._context.build_context (there is only one
+# implementation for parsing config/storage archives). Here it is referenced
+# only by module path string -- no import, so the gateway layer does not end
+# up depending on the CLI layer.
 WORKER_MODULE = "devproxy.cli._worker"
 PAYLOAD_ENV = "DEVPROXY_UP_PAYLOAD"
 
-# 工作进程注册路由前要经历「启动 → 就绪」，sync 在这之后额外留一点余量；
-# 真正的超时由工作进程自己按 ready_timeout 兜底（它超时会退出并报错）。
+# The worker goes through "start -> ready" before registering the route, and
+# sync leaves some extra margin after that; the real timeout is enforced by
+# the worker itself via ready_timeout (on timeout it exits and reports).
 _WAIT_MARGIN = 30.0
 
 
 @dataclass
 class SyncPlan:
-    """现状与声明的差异。"""
+    """Differences between current state and the declarations."""
 
     create_up: list[ProjectRoute] = field(default_factory=list)
     create_expose: list[ProjectRoute] = field(default_factory=list)
@@ -66,7 +74,7 @@ class SyncPlan:
 
 @dataclass
 class SyncOutcome:
-    """一条路由的最终结果。"""
+    """The final outcome for one route."""
 
     name: str
     status: str  # created | skipped | conflict | failed | pruned
@@ -78,17 +86,21 @@ class SyncOutcome:
 
 
 def route_log_path(paths: Paths, name: str) -> Path:
-    """后台应用的日志文件路径（stdout/stderr 都落在这里）。"""
+    """Log file path for background apps (both stdout/stderr go here)."""
     return paths.log_dir / "routes" / f"{name}.log"
 
 
 def app_process_alive(route: Route) -> bool:
-    """up 模式的应用进程还在吗。
+    """Is the app process in up mode still alive?
 
-    expose 路由没有受管进程（上游是外部服务），无从判断，按"活着"处理；
-    无 pid 的老路由同样。**pid 已不存在**、或 proc_start 对不上（pid 被系统
-    复用给了别的进程）都算死了 —— 这正是 sync 跳过判定最容易漏的：
-    路由记录还在，应用却早已退出，sync 会说「已是最最新」而域名是死的。
+    expose routes have no managed process (the upstream is an external
+    service), so there is nothing to check and they are treated as "alive";
+    likewise old routes without a pid. **A pid that no longer exists**, or a
+    proc_start that does not match (the pid was reused by the system for
+    another process), both count as dead -- this is exactly what sync's skip
+    check most easily misses: the route record is still there, but the app
+    exited long ago, so sync says "already up to date" while the domain is
+    dead.
     """
     if route.mode != MODE_UP or route.pid is None:
         return True
@@ -102,10 +114,11 @@ def app_process_alive(route: Route) -> bool:
 
 
 def build_sync_plan(project: ProjectFile, existing: list[Route], prune: bool = False) -> SyncPlan:
-    """把声明与现状比对成计划。
+    """Turn declarations and current state into a plan.
 
-    会读 /proc 判断 up 模式应用是否还活着（docstring 说"纯函数"是老黄历了：
-    应用死掉但路由记录还在是最常见的坏状态，必须在这里识别出来）。
+    This reads /proc to determine whether up-mode apps are still alive
+    (calling it a "pure function" is outdated: a dead app with a leftover
+    route record is the most common bad state, and it must be detected here).
     """
     plan = SyncPlan()
     by_name = {r.name: r for r in existing}
@@ -120,15 +133,17 @@ def build_sync_plan(project: ProjectFile, existing: list[Route], prune: bool = F
         reason = conflict_reason(current, declared)
         if reason is None:
             if not app_process_alive(current):
-                # 应用已死、路由记录还在 → 重建。UpRunner 会清理同名旧路由
+                # App dead but route record still present -> recreate.
+                # UpRunner cleans up the old same-named route
                 plan.create_up.append(declared)
                 continue
             plan.skip.append((declared, current))
         else:
             plan.conflict.append((declared, current, reason))
     if prune:
-        # 只清理「本文件声明过、现在不再声明」的路由。
-        # source 为 None 的路由（手工 up/expose 出来的）永远不碰。
+        # Only clean up routes that "this file declared but no longer
+        # declares". Routes with source None (created manually via
+        # up/expose) are never touched.
         declared_names = {r.name for r in project.routes}
         plan.prune = [
             r for r in existing if r.source == str(project.path) and r.name not in declared_names
@@ -137,15 +152,15 @@ def build_sync_plan(project: ProjectFile, existing: list[Route], prune: bool = F
 
 
 def conflict_reason(existing: Route, declared: ProjectRoute) -> str | None:
-    """现状与声明不一致的原因；一致时返回 None。"""
+    """Why current state and declaration differ; None when they match."""
     if existing.mode != declared.mode:
-        return f"模式不同（现状 {existing.mode}，期望 {declared.mode}）"
+        return f"mode differs (current {existing.mode}, expected {declared.mode})"
     if declared.port is not None and existing.port != declared.port:
-        return f"端口不同（现状 {existing.port}，期望 {declared.port}）"
+        return f"port differs (current {existing.port}, expected {declared.port})"
     if declared.mode == MODE_UP:
         current_cmd = list(existing.command or [])
         if current_cmd != list(declared.command or []):
-            return f"启动命令不同（现状 {current_cmd}，期望 {declared.command}）"
+            return f"start command differs (current {current_cmd}, expected {declared.command})"
     return None
 
 
@@ -157,33 +172,35 @@ def execute_sync_plan(
     config: Config,
     paths: Paths,
 ) -> list[SyncOutcome]:
-    """执行计划。返回逐条结果（顺序与声明一致，prune 的排在最后）。"""
+    """Execute the plan. Returns one outcome per entry (in declaration order,
+    pruned ones last)."""
     outcomes: dict[str, SyncOutcome] = {}
 
     def record(outcome: SyncOutcome) -> None:
         outcomes[outcome.name] = outcome
 
-    # 1) up 模式：先把后台工作进程都拉起来（并行启动），再逐个等就绪。
+    # 1) up mode: start all background workers first (in parallel), then wait
+    # for each to become ready.
     workers: list[tuple[ProjectRoute, subprocess.Popen, Path]] = []
     for declared in plan.create_up:
         log_path = route_log_path(paths, declared.name)
         try:
             proc = _spawn_worker(project, declared, log_path)
         except OSError as e:
-            record(SyncOutcome(declared.name, "failed", f"无法启动后台进程：{e}"))
+            record(SyncOutcome(declared.name, "failed", f"cannot start background process: {e}"))
             continue
         workers.append((declared, proc, log_path))
 
-    # 2) expose 模式：直接注册路由（不起进程）。
+    # 2) expose mode: register the route directly (no process).
     for declared in plan.create_expose:
         try:
             route = register_expose(store, config, declared, str(project.path))
         except (RouteStoreError, RouteTableError) as e:
             record(SyncOutcome(declared.name, "failed", str(e)))
             continue
-        detail = f"上游 127.0.0.1:{route.port}"
+        detail = f"upstream 127.0.0.1:{route.port}"
         if not reachable(route.port):
-            detail += "（上游当前无响应，路由已注册）"
+            detail += " (upstream not responding right now; route registered)"
         record(
             SyncOutcome(
                 declared.name,
@@ -194,19 +211,20 @@ def execute_sync_plan(
             )
         )
 
-    # 3) 等 up 模式的就绪。
+    # 3) Wait for up-mode readiness.
     for declared, proc, log_path in workers:
         timeout = (declared.ready_timeout or config.ready_timeout) + _WAIT_MARGIN
         ok, reason = _wait_ready(store, declared.name, proc, timeout)
         if ok:
             ready_route = store.get(declared.name)
             if ready_route is None:
-                # 就绪后立刻退出 —— 工作进程已经把路由注销了
+                # Exited immediately after becoming ready -- the worker
+                # already unregistered the route
                 record(
                     SyncOutcome(
                         declared.name,
                         "failed",
-                        "应用启动后立即退出（路由已被注销）",
+                        "app exited immediately after starting (route was unregistered)",
                         log_path=log_path,
                     )
                 )
@@ -215,7 +233,7 @@ def execute_sync_plan(
                 SyncOutcome(
                     declared.name,
                     "created",
-                    f"端口 {ready_route.port}",
+                    f"port {ready_route.port}",
                     domain=ready_route.domain,
                     port=ready_route.port,
                     log_path=log_path,
@@ -223,16 +241,16 @@ def execute_sync_plan(
             )
         else:
             tail = _log_tail(log_path)
-            detail = f"{reason}：{tail}" if tail else reason
+            detail = f"{reason}: {tail}" if tail else reason
             record(SyncOutcome(declared.name, "failed", detail, log_path=log_path))
 
-    # 4) 跳过与冲突（只报告，不动手）。
+    # 4) Skips and conflicts (report only, take no action).
     for declared, current in plan.skip:
         record(
             SyncOutcome(
                 declared.name,
                 "skipped",
-                f"已是最最新（端口 {current.port}）",
+                f"already up to date (port {current.port})",
                 domain=current.domain,
                 port=current.port,
             )
@@ -242,14 +260,14 @@ def execute_sync_plan(
             SyncOutcome(
                 declared.name,
                 "conflict",
-                f"{reason}；现状：{_describe(current)}",
+                f"{reason}; current: {_describe(current)}",
                 domain=current.domain,
                 port=current.port,
-                hint=f"devproxy down {declared.name} 后重新运行 devproxy up",
+                hint=f"run devproxy down {declared.name} and then devproxy up again",
             )
         )
 
-    # 5) prune：清理本文件里已删掉的声明。
+    # 5) prune: clean up declarations removed from this file.
     if plan.prune:
         try:
             prune_routes(store, plan.prune)
@@ -262,12 +280,13 @@ def execute_sync_plan(
                     SyncOutcome(
                         route.name,
                         "pruned",
-                        "本文件已不再声明该路由",
+                        "this file no longer declares this route",
                         domain=route.domain,
                     )
                 )
 
-    # 输出顺序：与声明一致（prune 掉的排在最后 —— 它们已不在声明里）
+    # Output order: declaration order (pruned ones last -- they are no longer
+    # declared)
     ordered: list[SyncOutcome] = []
     for declared in project.routes:
         outcome = outcomes.get(declared.name)
@@ -281,19 +300,21 @@ def execute_sync_plan(
 
 
 def _describe(route: Route) -> str:
-    """一句话描述路由现状（冲突报告用）。"""
-    parts = [f"模式 {route.mode}", f"端口 {route.port}"]
+    """One-line description of the current route state (for conflict
+    reports)."""
+    parts = [f"mode {route.mode}", f"port {route.port}"]
     if route.command:
-        parts.append(f"命令 {route.command}")
+        parts.append(f"command {route.command}")
     if route.pid:
         parts.append(f"pid {route.pid}")
-    return "，".join(parts)
+    return ", ".join(parts)
 
 
 def register_expose(
     store: RouteStore, config: Config, declared: ProjectRoute, source: str
 ) -> Route:
-    """注册一条 expose 路由（上游端口来自声明）。"""
+    """Register an expose route (the upstream port comes from the
+    declaration)."""
     port = int(declared.port or 0)
     route = Route(
         name=declared.name,
@@ -309,7 +330,8 @@ def register_expose(
 
 
 def prune_routes(store: RouteStore, routes: list[Route]) -> None:
-    """移除给定的路由，并把它们的子进程一并收掉（与 `devproxy down` 同语义）。"""
+    """Remove the given routes and take down their child processes too (same
+    semantics as `devproxy down`)."""
     names = [r.name for r in routes]
 
     def apply(table) -> None:
@@ -319,15 +341,18 @@ def prune_routes(store: RouteStore, routes: list[Route]) -> None:
     store.mutate(apply)
     for route in routes:
         if route.pid:
-            # 带上注册时记录的进程身份 —— pid 可能已被复用，身份不符不杀
+            # Include the process identity recorded at registration -- the
+            # pid may have been reused; do not kill when the identity does
+            # not match
             kill_pid_group(route.pid, route.proc_start)
 
 
 def _spawn_worker(project: ProjectFile, declared: ProjectRoute, log_path: Path) -> subprocess.Popen:
-    """启动后台工作进程：它去跑应用并陪着应用。
+    """Start the background worker: it runs the app and stays with it.
 
-    独立会话（start_new_session）—— sync 自己退出后它继续陪着应用；
-    工作目录是**项目文件所在目录**（不是用户当前目录）。
+    Independent session (start_new_session) -- it keeps staying with the app
+    after sync itself exits; the working directory is **the directory
+    containing the project file** (not the user's current directory).
     """
     payload = {
         "name": declared.name,
@@ -342,11 +367,13 @@ def _spawn_worker(project: ProjectFile, declared: ProjectRoute, log_path: Path) 
     env[PAYLOAD_ENV] = json.dumps(payload)
     env["PYTHONPATH"] = _pythonpath()
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    # 上一轮留下的日志挪成 .1：反复重启不会把日志堆成一条
+    # Move the previous run's log to .1: repeated restarts do not pile logs
+    # into one
     rotate_at_start(log_path)
-    # stdout/stderr 交给 worker 自己写进日志文件（见 cli/_worker.py 的
-    # _LogProxy）—— 那样 worker 的消息和应用的输出走同一个写入端，
-    # 文件被轮转时不会有一半消息留在旧 inode 里。
+    # stdout/stderr are left for the worker to write into the log file itself
+    # (see _LogProxy in cli/_worker.py) -- that way the worker's messages and
+    # the app's output share one writer, so when the file is rotated half the
+    # messages are not left behind in the old inode.
     return subprocess.Popen(
         [sys.executable, "-m", WORKER_MODULE],
         env=env,
@@ -359,10 +386,12 @@ def _spawn_worker(project: ProjectFile, declared: ProjectRoute, log_path: Path) 
 
 
 def _pythonpath() -> str:
-    """把本包的父目录放进 PYTHONPATH —— 后台进程必须能 import 到 devproxy。
+    """Put this package's parent directory on PYTHONPATH -- the background
+    process must be able to import devproxy.
 
-    正常安装（pip/uv 安装到 venv）时这步是多余的；但从源码树直接跑
-    （开发、测试）时 sys.executable 未必能找到这个包。
+    With a normal install (pip/uv into a venv) this step is unnecessary; but
+    when running straight from the source tree (development, tests),
+    sys.executable may not find the package.
     """
     import devproxy
 
@@ -374,10 +403,11 @@ def _pythonpath() -> str:
 def _wait_ready(
     store: RouteStore, name: str, proc: subprocess.Popen, timeout: float
 ) -> tuple[bool, str]:
-    """等工作进程把路由注册上来。
+    """Wait for the worker to register the route.
 
-    路由出现在表里 == 应用已就绪（工作进程是「就绪之后才注册」的）。
-    工作进程自己先退出 = 启动失败（就绪超时、命令不存在……）。
+    Route appears in the table == app is ready (the worker "registers only
+    after readiness"). The worker itself exiting first = startup failure
+    (ready timeout, command not found, ...).
     """
     deadline = time.monotonic() + timeout
     while True:
@@ -389,14 +419,15 @@ def _wait_ready(
             return True, ""
         rc = proc.poll()
         if rc is not None:
-            return False, f"后台进程已退出（退出码 {rc}）"
+            return False, f"background process exited (exit code {rc})"
         if time.monotonic() >= deadline:
-            return False, f"等待路由注册超时（{timeout:.0f}s）"
+            return False, f"timed out waiting for route registration ({timeout:.0f}s)"
         time.sleep(0.15)
 
 
 def _log_tail(path: Path, lines: int = 3) -> str:
-    """取日志末尾几行 —— 后台进程失败时用它把原因带出来。"""
+    """Take the last few log lines -- used to surface the cause when a
+    background process fails."""
     try:
         content = path.read_text(encoding="utf-8", errors="replace")
     except OSError:

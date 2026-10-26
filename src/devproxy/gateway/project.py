@@ -1,9 +1,10 @@
-"""项目级配置文件 devproxy.toml：发现、解析、校验。
+"""Project-level config file devproxy.toml: discovery, parsing, validation.
 
-文件放在**项目仓库根目录**，随代码提交，全组共享 —— 一份声明，
-每个人的机器上跑 `devproxy up` 就得到同一套域名。
+The file lives in the **project repository root**, is committed with the
+code, and is shared by the whole team -- one declaration, and `devproxy up`
+on everyone's machine produces the same set of domains.
 
-格式（完整说明见 README）：
+Format (see the README for full details):
 
     [[routes]]
     name = "web"
@@ -14,8 +15,9 @@
     mode = "expose"
     port = 3000
 
-解析要**明确报错**：文件缺失、语法错、未知键、字段不合法 —— 每一条
-都要带上文件名与出错位置，否则用户只能对着「一堆 TOML」猜。
+Parsing must **fail loudly**: missing file, syntax error, unknown key,
+invalid field -- each one must include the file name and error location,
+otherwise users are left guessing at "a pile of TOML".
 """
 
 from __future__ import annotations
@@ -36,20 +38,22 @@ MODE_UP = "up"
 MODE_EXPOSE = "expose"
 MODES = (MODE_UP, MODE_EXPOSE)
 
-# 顶层只允许 routes；路由表里只允许下面这几个键。
-# 未知键一律报错 —— 拼错的键名（prot 而不是 port）静默忽略会让人
-# 以为配置生效了，实际没有。
+# Only routes is allowed at the top level; only the keys below are allowed
+# in each route entry. Unknown keys always error out -- silently ignoring a
+# typo (prot instead of port) would make people think the config took effect
+# when it did not.
 _TOP_LEVEL_KEYS = ("routes",)
 _ROUTE_KEYS = ("name", "command", "mode", "port", "ready_timeout")
 
 
 class ProjectFileError(RuntimeError):
-    """devproxy.toml 缺失、语法错误或字段不合法。"""
+    """devproxy.toml is missing, has a syntax error, or contains an invalid
+    field."""
 
 
 @dataclass(frozen=True)
 class ProjectRoute:
-    """文件里声明的一条路由。"""
+    """One route declared in the file."""
 
     name: str
     mode: str = MODE_UP
@@ -64,14 +68,15 @@ class ProjectRoute:
 
 @dataclass(frozen=True)
 class ProjectFile:
-    """一份项目声明。`path` 始终是绝对路径。"""
+    """A project declaration. `path` is always absolute."""
 
     path: Path
     routes: list[ProjectRoute] = field(default_factory=list)
 
     @property
     def project_dir(self) -> Path:
-        """命令的工作目录 —— 项目文件所在目录（不是用户当前目录）。"""
+        """The command's working directory -- the directory containing the
+        project file (not the user's current directory)."""
         return self.path.parent
 
     def get(self, name: str) -> ProjectRoute | None:
@@ -79,10 +84,11 @@ class ProjectFile:
 
 
 def find_project_file(start: Path | None = None) -> Path | None:
-    """从 start 向上逐级找 devproxy.toml，找到第一个就返回。
+    """Search upward from start for devproxy.toml and return the first match.
 
-    找不到返回 None（由调用方决定怎么报错）。`start` 默认当前目录 ——
-    用户在项目里的任意子目录执行 sync 都应该找到同一个文件。
+    Return None when not found (the caller decides how to report it). `start`
+    defaults to the current directory -- running sync from any subdirectory
+    of the project should find the same file.
     """
     try:
         current = (start or Path.cwd()).resolve()
@@ -96,44 +102,46 @@ def find_project_file(start: Path | None = None) -> Path | None:
 
 
 def resolve_project_file(explicit: str | Path | None) -> Path:
-    """定位项目文件：`--file` 显式指定，或从当前目录向上查找。
+    """Locate the project file: explicit `--file`, or search upward from the
+    current directory.
 
-    两条路径互斥：给了 `--file` 就不再向上找（显式指定优先）。
-    找不到时抛 ProjectFileError（CLI 层映射成退出码 2）。
+    The two paths are mutually exclusive: with `--file` there is no upward
+    search (explicit wins). Raises ProjectFileError when not found (the CLI
+    maps it to exit code 2).
     """
     if explicit is not None:
         path = Path(explicit).expanduser()
         if not path.is_absolute():
             path = (Path.cwd() / path).resolve()
         if not path.is_file():
-            raise ProjectFileError(f"指定的配置文件不存在：{path}")
+            raise ProjectFileError(f"specified config file does not exist: {path}")
         return path
     found = find_project_file()
     if found is None:
         raise ProjectFileError(
-            f"未找到 {PROJECT_FILE_NAME}"
-            f"（已从当前目录 {Path.cwd()} 逐级向上查找）。"
-            f"请在项目根目录创建 {PROJECT_FILE_NAME}，"
-            f"或用 --file <路径> 显式指定。"
+            f"{PROJECT_FILE_NAME} not found"
+            f" (searched upward from the current directory {Path.cwd()});"
+            f" create {PROJECT_FILE_NAME} in the project root"
+            " or specify it explicitly with --file <path>"
         )
     return found
 
 
 def load_project_file(path: Path) -> ProjectFile:
-    """读取并校验一个项目文件。"""
+    """Read and validate one project file."""
     try:
         text = Path(path).read_text(encoding="utf-8")
     except FileNotFoundError as e:
-        raise ProjectFileError(f"配置文件不存在：{path}") from e
+        raise ProjectFileError(f"config file does not exist: {path}") from e
     except UnicodeDecodeError as e:
-        raise ProjectFileError(f"{path}：不是 UTF-8 编码的文本文件") from e
+        raise ProjectFileError(f"{path}: not a UTF-8 text file") from e
     except OSError as e:
-        raise ProjectFileError(f"无法读取配置文件 {path}：{e}") from e
+        raise ProjectFileError(f"cannot read config file {path}: {e}") from e
     try:
         data = tomllib.loads(text)
     except tomllib.TOMLDecodeError as e:
-        # tomllib 的报错自带行列号（at line X, column Y），保留它
-        raise ProjectFileError(f"{path}：TOML 语法错误 —— {e}") from e
+        # tomllib's error includes line/column (at line X, column Y); keep it
+        raise ProjectFileError(f"{path}: TOML syntax error -- {e}") from e
     return _parse(path, data)
 
 
@@ -141,20 +149,20 @@ def _parse(path: Path, data: dict) -> ProjectFile:
     unknown = [k for k in data if k not in _TOP_LEVEL_KEYS]
     if unknown:
         raise ProjectFileError(
-            f"{path}：未知顶层键 {'、'.join(sorted(unknown))}"
-            f"（可用键：{', '.join(_TOP_LEVEL_KEYS)}）"
+            f"{path}: unknown top-level key(s) {', '.join(sorted(unknown))}"
+            f" (available keys: {', '.join(_TOP_LEVEL_KEYS)})"
         )
     raw_routes = data.get("routes", [])
     if not isinstance(raw_routes, list):
-        raise ProjectFileError(f"{path}：routes 必须是 [[routes]] 形式的数组")
+        raise ProjectFileError(f"{path}: routes must be an array in [[routes]] form")
     routes: list[ProjectRoute] = []
     seen: dict[str, int] = {}
     for index, item in enumerate(raw_routes):
         route = _parse_route(path, index, item)
         if route.name in seen:
             raise ProjectFileError(
-                f"{path}：路由名 {route.name!r} 重复声明"
-                f"（routes[{seen[route.name]}] 与 routes[{index}]）"
+                f"{path}: route name {route.name!r} declared more than once"
+                f" (routes[{seen[route.name]}] and routes[{index}])"
             )
         seen[route.name] = index
         routes.append(route)
@@ -162,25 +170,26 @@ def _parse(path: Path, data: dict) -> ProjectFile:
 
 
 def _parse_route(path: Path, index: int, item: object) -> ProjectRoute:
-    where = f"{path}：routes[{index}]"
+    where = f"{path}: routes[{index}]"
     if not isinstance(item, dict):
-        raise ProjectFileError(f"{where} 必须是 [[routes]] 形式的表")
+        raise ProjectFileError(f"{where} must be a table in [[routes]] form")
     unknown = [k for k in item if k not in _ROUTE_KEYS]
     if unknown:
         raise ProjectFileError(
-            f"{where}：未知键 {'、'.join(sorted(unknown))}（可用键：{', '.join(_ROUTE_KEYS)}）"
+            f"{where}: unknown key(s) {', '.join(sorted(unknown))}"
+            f" (available keys: {', '.join(_ROUTE_KEYS)})"
         )
     name = item.get("name")
     if not isinstance(name, str) or not name:
-        raise ProjectFileError(f"{where}：缺少 name（路由名）")
+        raise ProjectFileError(f"{where}: missing name (route name)")
     try:
         validate_name(name)
     except InvalidNameError as e:
-        raise ProjectFileError(f"{where}：{e}") from e
+        raise ProjectFileError(f"{where}: {e}") from e
 
     mode = item.get("mode", MODE_UP)
     if mode not in MODES:
-        raise ProjectFileError(f"{where}（{name}）：mode 只能是 'up' 或 'expose'，当前 {mode!r}")
+        raise ProjectFileError(f"{where} ({name}): mode must be 'up' or 'expose', got {mode!r}")
     command = _parse_command(where, name, mode, item)
     port = _parse_port(where, name, mode, item)
     ready_timeout = _parse_ready_timeout(where, name, item)
@@ -197,21 +206,23 @@ def _parse_command(where: str, name: str, mode: str, item: dict) -> list[str] | 
     raw = item.get("command")
     if mode == MODE_EXPOSE:
         if raw is not None:
-            raise ProjectFileError(f"{where}（{name}）：expose 模式不启动进程，不能声明 command")
+            raise ProjectFileError(
+                f"{where} ({name}): expose mode does not start a process, so command cannot be declared"
+            )
         return None
     if raw is None:
         raise ProjectFileError(
-            f'{where}（{name}）：up 模式必须声明 command（例如 command = ["npm", "run", "dev"]）'
+            f'{where} ({name}): up mode must declare command (e.g. command = ["npm", "run", "dev"])'
         )
     if not isinstance(raw, list) or not raw:
         raise ProjectFileError(
-            f"{where}（{name}）：command 必须是非空字符串数组"
-            f'（例如 command = ["npm", "run", "dev"]）'
+            f"{where} ({name}): command must be a non-empty array of strings"
+            f' (e.g. command = ["npm", "run", "dev"])'
         )
     if not all(isinstance(part, str) for part in raw):
-        raise ProjectFileError(f"{where}（{name}）：command 的每一项都必须是字符串")
+        raise ProjectFileError(f"{where} ({name}): every command item must be a string")
     if any(not part for part in raw):
-        raise ProjectFileError(f"{where}（{name}）：command 里不能有空字符串参数")
+        raise ProjectFileError(f"{where} ({name}): command must not contain empty string arguments")
     return list(raw)
 
 
@@ -220,14 +231,15 @@ def _parse_port(where: str, name: str, mode: str, item: dict) -> int | None:
     if raw is None:
         if mode == MODE_EXPOSE:
             raise ProjectFileError(
-                f"{where}（{name}）：expose 模式必须声明 port（上游已在监听的端口）"
+                f"{where} ({name}): expose mode must declare port "
+                "(the port the upstream already listens on)"
             )
         return None
-    # bool 是 int 的子类 —— True 会当成端口 1 混过去
+    # bool is a subclass of int -- True would slip through as port 1
     if isinstance(raw, bool) or not isinstance(raw, int):
-        raise ProjectFileError(f"{where}（{name}）：port 必须是整数")
+        raise ProjectFileError(f"{where} ({name}): port must be an integer")
     if not (1 <= raw <= 65535):
-        raise ProjectFileError(f"{where}（{name}）：port {raw} 超出 1..65535 范围")
+        raise ProjectFileError(f"{where} ({name}): port {raw} is outside the 1-65535 range")
     return raw
 
 
@@ -236,23 +248,25 @@ def _parse_ready_timeout(where: str, name: str, item: dict) -> int | None:
     if raw is None:
         return None
     if isinstance(raw, bool) or not isinstance(raw, int):
-        raise ProjectFileError(f"{where}（{name}）：ready_timeout 必须是整数（秒）")
+        raise ProjectFileError(f"{where} ({name}): ready_timeout must be an integer (seconds)")
     if not (READY_TIMEOUT_MIN <= raw <= READY_TIMEOUT_MAX):
         raise ProjectFileError(
-            f"{where}（{name}）：ready_timeout {raw} 必须在 "
-            f"{READY_TIMEOUT_MIN}..{READY_TIMEOUT_MAX} 秒之间"
+            f"{where} ({name}): ready_timeout {raw} must be between "
+            f"{READY_TIMEOUT_MIN}..{READY_TIMEOUT_MAX} seconds"
         )
     return raw
 
 
-# -- 脚手架：生成一份可用的 devproxy.toml --------------------------------
+# -- Scaffolding: generate a usable devproxy.toml ---------------------------
 
 
 def detect_project_root(start: Path | None = None) -> Path:
-    """项目文件该放在哪：git 仓库根，没有 git 就用当前目录。
+    """Where the project file belongs: the git repository root, or the current
+    directory when there is no git.
 
-    向上找 `.git`（文件或目录都行 —— worktree 里 `.git` 是文件），
-    找到的那一层就是仓库根，项目文件该和 `pyproject.toml` 放一起。
+    Search upward for `.git` (either a file or a directory -- in a worktree
+    `.git` is a file); the directory where it is found is the repository
+    root, and the project file belongs next to `pyproject.toml`.
     """
     try:
         current = (start or Path.cwd()).resolve()
@@ -265,17 +279,20 @@ def detect_project_root(start: Path | None = None) -> Path:
 
 
 def suggest_command(root: Path) -> tuple[list[str] | None, str]:
-    """按项目类型猜一条启动命令。返回 (命令, 判断依据)。
+    """Guess a start command based on the project type. Returns (command, reason).
 
-    猜错比不猜更糟 —— 但完全不猜等于让用户从零写 TOML。所以只在
-    **有明确证据**时给建议（package.json 里有 dev 脚本、composer.json
-    里有 serve 脚本、artisan 存在……），否则返回 None 让用户自己写。
+    A wrong guess is worse than none -- but not guessing at all leaves users
+    writing TOML from scratch. So only suggest when there is **clear
+    evidence** (a dev script in package.json, a serve script in composer.json,
+    an existing artisan, ...); otherwise return None and let the user write it.
 
-    **硬性要求**：猜出来的命令必须让应用监听 devproxy 分配的 `$PORT`。
-    devproxy 的就绪判定就是「应用在 $PORT 上可连接」—— 命令若把应用
-    起在固定端口上，sync 永远等不到就绪，报「就绪超时」，而原因很难猜。
-    所以端口可控的猜法（`--port` / `-S ...:$PORT`）才敢给；
-    端口不可控的（`composer serve` 之类）只给命令 + 明确提醒。
+    **Hard requirement**: a guessed command must make the app listen on the
+    `$PORT` assigned by devproxy. devproxy's readiness check is "the app is
+    connectable on $PORT" -- if the command starts the app on a fixed port,
+    sync waits for readiness forever, reports "ready timeout", and the cause
+    is hard to guess. So only port-controllable guesses (`--port` /
+    `-S ...:$PORT`) are offered; non-port-controllable ones (like
+    `composer serve`) get the command plus an explicit warning.
     """
     package_json = root / "package.json"
     if package_json.is_file():
@@ -283,10 +300,11 @@ def suggest_command(root: Path) -> tuple[list[str] | None, str]:
         if isinstance(scripts, dict):
             for name in ("dev", "start"):
                 if name in scripts:
-                    # --port 透传给脚本里的 dev server（vite/next 都认）
+                    # --port is passed through to the dev server in the
+                    # script (vite/next both honor it)
                     return (
                         ["sh", "-c", f"npm run {name} -- --port $PORT"],
-                        f"package.json 里有 {name} 脚本",
+                        f"package.json has a {name} script",
                     )
 
     composer_json = root / "composer.json"
@@ -296,60 +314,73 @@ def suggest_command(root: Path) -> tuple[list[str] | None, str]:
         if php is not None:
             return php
         return None, (
-            "检测到 composer.json（PHP 项目）—— 请填上实际启动命令"
-            f"，应用必须监听 $PORT{_ports_hint(ports)}"
+            "detected composer.json (PHP project) -- fill in the actual start command"
+            f"; the app must listen on $PORT{_ports_hint(ports)}"
         )
 
     if (root / "pyproject.toml").is_file():
-        return None, "检测到 pyproject.toml —— 请填上实际启动命令（应用必须监听 $PORT）"
+        return None, (
+            "detected pyproject.toml -- fill in the actual start command "
+            "(the app must listen on $PORT)"
+        )
     if (root / "Makefile").is_file():
         if _makefile_has_target(root / "Makefile", "dev"):
-            return ["make", "dev"], "Makefile 里有 dev 目标"
-        return None, "检测到 Makefile 但没有 dev 目标 —— 请填上实际启动命令"
-    return None, ("没有检测到常见的项目类型 —— 请填上实际启动命令（应用必须监听 $PORT）")
+            return ["make", "dev"], "Makefile has a dev target"
+        return None, "detected a Makefile but no dev target -- fill in the actual start command"
+    return None, (
+        "no common project type detected -- fill in the actual start command "
+        "(the app must listen on $PORT)"
+    )
 
 
 def _ports_hint(ports: list[str]) -> str:
-    """.env 里定义的端口变量 —— 提示里要点名，用户才知道改哪个。"""
+    """Port variables defined in .env -- name them in the hint so users know
+    which to change."""
     if not ports:
         return ""
-    return f"（.env 里定义了端口：{'、'.join(ports)} —— 改成 $PORT 或改用 expose 模式）"
+    return (
+        f" (.env defines ports: {', '.join(ports)}"
+        " -- change them to $PORT or switch to expose mode)"
+    )
 
 
 def _suggest_php_command(
     root: Path, composer_json: Path, ports: list[str]
 ) -> tuple[list[str] | None, str] | None:
-    """PHP 项目的启动命令。按证据强度从高到低：
+    """Start command for a PHP project, by strength of evidence (strongest
+    first):
 
-    1. `artisan` → Laravel 的官方起法；
-    2. `public/index.php` → 绝大多数框架的 front controller；
-    3. 根目录 `index.php` → 同样是 front controller；
-    4. composer.json 里的 serve/start/dev 脚本 → 端口不可控，只给命令 + 提醒。
+    1. `artisan` -> Laravel's official start command;
+    2. `public/index.php` -> the front controller of most frameworks;
+    3. root-level `index.php` -> likewise a front controller;
+    4. a serve/start/dev script in composer.json -> port not controllable, so
+       only the command plus a warning.
 
-    认不出来时返回 None（由调用方给提示）。
+    Return None when nothing is recognized (the caller provides the hint).
     """
     if (root / "artisan").is_file():
-        return ["sh", "-c", "php artisan serve --port=$PORT"], "有 artisan（Laravel）"
+        return ["sh", "-c", "php artisan serve --port=$PORT"], "found artisan (Laravel)"
     if (root / "public" / "index.php").is_file():
         return (
             ["sh", "-c", "php -S 127.0.0.1:$PORT -t public"],
-            "有 public/index.php",
+            "found public/index.php",
         )
     if (root / "index.php").is_file():
-        return ["sh", "-c", "php -S 127.0.0.1:$PORT"], "根目录有 index.php"
+        return ["sh", "-c", "php -S 127.0.0.1:$PORT"], "found index.php in the project root"
     scripts = _read_json_field(composer_json, "scripts")
     if isinstance(scripts, dict):
         for name in ("serve", "start", "dev"):
             if name in scripts:
                 return (
                     ["sh", "-c", f"composer {name}"],
-                    f"composer.json 里有 {name} 脚本；端口不可控"
-                    f"—— 应用必须监听 $PORT 才会被接管{_ports_hint(ports)}",
+                    f"composer.json has a {name} script; the port is not controllable"
+                    f" -- the app must listen on $PORT to be taken over{_ports_hint(ports)}",
                 )
     return None
 
 
-# 这些端口跟 devproxy 无关（应用不会因为它们被接管）
+# These ports are unrelated to devproxy (the app is not taken over because of
+# them)
 _NON_WEB_PORT_WORDS = (
     "DB",
     "DATABASE",
@@ -368,7 +399,7 @@ _NON_WEB_PORT_WORDS = (
 
 
 def _port_env_names(root: Path) -> list[str]:
-    """.env 里定义了端口的变量名（给提示用）。"""
+    """Names of port variables defined in .env (for hints)."""
     env_file = root / ".env"
     if not env_file.is_file():
         return []
@@ -381,7 +412,8 @@ def _port_env_names(root: Path) -> list[str]:
             key = line.split("=", 1)[0].strip()
             if key != "PORT" and not key.endswith("_PORT"):
                 continue
-            # 只留"可能是 Web 监听端口"的：数据库/缓存/LDAP 那些跟 devproxy 无关
+            # Keep only likely web listening ports: database/cache/LDAP ones
+            # are unrelated to devproxy
             upper = key.upper()
             if any(word in upper for word in _NON_WEB_PORT_WORDS):
                 continue
@@ -392,7 +424,8 @@ def _port_env_names(root: Path) -> list[str]:
 
 
 def _makefile_has_target(path: Path, target: str) -> bool:
-    """Makefile 里真的有这个目标吗（只看 `名字:` 开头的行）。"""
+    """Does the Makefile really have this target (only lines starting with
+    `name:`)."""
     try:
         text = path.read_text(encoding="utf-8")
     except OSError:
@@ -408,7 +441,8 @@ def _makefile_has_target(path: Path, target: str) -> bool:
 
 
 def _read_json_field(path: Path, field_name: str) -> object:
-    """读 JSON 的一个顶层字段；解析不了就返回 None（不抛）。"""
+    """Read one top-level JSON field; return None if it cannot be parsed
+    (never raises)."""
     import json
 
     try:
@@ -421,7 +455,8 @@ def _read_json_field(path: Path, field_name: str) -> object:
 
 
 def route_name_from_dir(root: Path) -> str:
-    """用目录名推一个合法的路由名（`[a-z0-9-]`，首尾字母数字）。"""
+    """Derive a valid route name from the directory name (`[a-z0-9-]`,
+    letters/digits at both ends)."""
     raw = root.name.lower()
     cleaned = "".join(c if c.isalnum() or c == "-" else "-" for c in raw)
     cleaned = cleaned.strip("-")
@@ -431,24 +466,28 @@ def route_name_from_dir(root: Path) -> str:
         cleaned = f"app-{cleaned}".strip("-")
     if not cleaned:
         return "app"
-    # 目录名可能超过 63 字符 —— 截断后仍要保证首尾是字母数字
+    # The directory name may exceed 63 characters -- after truncation the ends
+    # must still be letters/digits
     cleaned = cleaned[:63].strip("-")
     return cleaned or "app"
 
 
 def render_project_file(routes: list[ProjectRoute], *, notes: list[str] | None = None) -> str:
-    """渲染成 devproxy.toml 的文本。
+    """Render as devproxy.toml text.
 
-    注释只说**为什么**与**有哪些坑**，不复述字段名（那是文档的事）。
+    Comments only explain **why** and **which pitfalls exist**, not restate
+    field names (that is the documentation's job).
     """
     lines: list[str] = [
-        "# devproxy.toml —— 本项目的本地开发路由声明",
+        "# devproxy.toml -- local development route declarations for this project",
         "#",
-        "# 提交进仓库，全组共享：每个人跑一次 `devproxy up` 就得到同一套域名。",
-        "# 完整说明见 devproxy 仓库的 docs/project-config.md。",
+        "# Commit this to the repository so the whole team shares it: everyone runs",
+        "# `devproxy up` once and gets the same set of domains.",
+        "# See docs/project-config.md in the devproxy repository for full details.",
         "#",
-        "# command 是 argv 数组，不经过 shell —— $PORT 不会自动展开。",
-        "# 需要端口参数的应用要自己包一层 sh -c，让 shell 在端口分配之后再展开：",
+        "# command is an argv array and does not go through a shell -- $PORT is not",
+        "# expanded automatically. Apps that need a port argument must wrap it in",
+        "# sh -c so the shell expands it after port allocation:",
         '#   command = ["sh", "-c", "npx vite --port $PORT --host 127.0.0.1"]',
     ]
     for note in notes or []:
@@ -471,6 +510,6 @@ def render_project_file(routes: list[ProjectRoute], *, notes: list[str] | None =
 
 
 def _toml_string(value: str) -> str:
-    """渲染成 TOML 基本字符串（含引号与转义）。"""
+    """Render as a TOML basic string (including quotes and escapes)."""
     escaped = value.replace("\\", "\\\\").replace('"', '\\"')
     return f'"{escaped}"'

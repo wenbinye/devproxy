@@ -10,7 +10,7 @@ from devproxy.cli._shared import EXIT_SUDO
 
 
 def _print_firefox_note(comp) -> None:
-    """本机装了 Firefox 时提醒它要单独信任 CA。"""
+    """Remind the user that Firefox needs the CA trusted separately."""
     note = s.component_note(comp, "firefox_note")
     if note:
         s.console.print(f"[yellow]⚠ {escape(note)}[/yellow]")
@@ -18,23 +18,28 @@ def _print_firefox_note(comp) -> None:
 
 @app.command()
 def trust(
-    yes: bool = typer.Option(False, "--yes", help="非交互模式，不询问"),
+    yes: bool = typer.Option(False, "--yes", help="Non-interactive mode; do not ask"),
 ) -> None:
-    """把 CA 根证书装进系统信任库与 NSS 库。"""
+    """Install the CA root certificate into the system trust store and the NSS DB."""
     paths, config, _, _ = s.build_context()
     comp = s.CertComponent(s._platform(), paths, config)
     actions = comp.plan()
     if not actions:
         if not comp.ca_path.exists():
-            s.console.print("尚无 CA 根证书（注册首条路由后由 Caddy 生成），无需变更。")
+            s.console.print(
+                "No CA root certificate yet (Caddy creates it when the first route is "
+                "registered); nothing to do."
+            )
         else:
-            s.console.print("CA 根证书已信任，无需变更。")
-        # 已经信任过了也可能只有 Firefox 不认 —— 同样要提醒
+            s.console.print("The CA root certificate is already trusted; nothing to do.")
+        # Even when it is already trusted, Firefox alone may still reject it -- remind anyway
         _print_firefox_note(comp)
         raise typer.Exit(EXIT_OK)
-    # 统一经 _shared._interactive() 判断，测试打桩才能覆盖所有命令
+    # Always go through _shared._interactive() so patching it in tests covers every command
     if any(a.privileged for a in actions) and not yes and not s._interactive():
-        s.err_console.print("非交互环境且未指定 --yes，拒绝执行需要提权的步骤。")
+        s.err_console.print(
+            "Non-interactive environment without --yes; refusing to run steps that need elevation."
+        )
         raise typer.Exit(EXIT_SUDO)
     try:
         comp.apply(actions)
@@ -42,15 +47,22 @@ def trust(
         s.err_console.print(f"devproxy: {escape(str(e))}")
         raise typer.Exit(EXIT_SUDO) from e
     except RuntimeError as e:
-        # 组件的 documented 契约只有 PermissionError / RuntimeError；
-        # 其余异常是程序 bug，不能被伪装成运维错误
+        # The component's documented contract is PermissionError / RuntimeError only;
+        # anything else is a bug in this program and must not be dressed up as an ops error
         s.fail(str(e))
-    # 只做清理时不能说"已安装" —— 那是两回事，用户会以为 CA 被重装过
+    # Cleanup-only runs must not say "installed" -- that is a different thing, and the
+    # user would think the CA had been reinstalled
     commands = {a.command[0] for a in actions if a.command}
     if commands <= {"remove-stale-nss-ca"}:
-        s.console.print("已清理 NSS 库中的陈旧 CA 根证书（Chrome 需完全退出重启后生效）")
+        s.console.print(
+            "Removed the stale CA root certificate from the NSS DB "
+            "(Chrome picks it up only after a full restart)"
+        )
     else:
-        s.console.print("已安装 CA 根证书（Chrome 需完全退出重启后生效）")
-    # Firefox 有自己的证书库 —— 装进系统信任库与 NSS 库对它**无效**。
-    # 只在本机装了 Firefox 时才提，别给没装的人制造噪音。
+        s.console.print(
+            "Installed the CA root certificate (Chrome picks it up only after a full restart)"
+        )
+    # Firefox keeps its own certificate store -- trusting it in the system store and the
+    # NSS DB has **no effect** on it. Only mention this on machines that have Firefox, so
+    # people without it get no noise.
     _print_firefox_note(comp)

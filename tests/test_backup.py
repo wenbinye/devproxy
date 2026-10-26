@@ -78,7 +78,7 @@ def test_restore_removes_files_that_did_not_exist(tmp_path):
     b = BackupManager(tmp_path / "backups").create([target])
     target.write_text("new")
     b.restore()
-    assert not target.exists(), "原本不存在的文件在还原时应被删除"
+    assert not target.exists(), "a file that did not exist should be deleted on restore"
 
 
 def test_load_backup_roundtrip(tmp_path):
@@ -99,10 +99,10 @@ def test_basename_collision_is_resolved(tmp_path):
     m = BackupManager(tmp_path / "backups")
     backup = m.create([a, b])
     names = {e.backup for e in backup.entries}
-    assert len(names) == 2, "同名文件的备份名不能冲突"
+    assert len(names) == 2, "backup names for same-name files must not collide"
 
 
-# --- 非普通文件目标必须被拒绝，不得静默记成"原本不存在" ---
+# --- Non-regular-file targets must be rejected, never silently recorded as "did not exist" ---
 
 
 def test_directory_target_is_rejected(tmp_path):
@@ -119,7 +119,9 @@ def test_rejected_target_leaves_no_backup_directory(tmp_path):
     with pytest.raises(ValueError):
         BackupManager(tmp_path / "backups").create([target])
     base = tmp_path / "backups"
-    assert not base.exists() or not any(base.iterdir()), "被拒绝的备份不得留下孤儿目录"
+    assert not base.exists() or not any(base.iterdir()), (
+        "a rejected backup must not leave an orphan directory"
+    )
 
 
 def test_symlink_target_is_rejected(tmp_path):
@@ -145,7 +147,7 @@ def test_missing_path_is_still_recorded_as_not_existed(tmp_path):
     assert b.entries[0].existed is False
 
 
-# --- sha256 必须落在备份副本上，而不是复制后的源文件上 ---
+# --- sha256 must be computed on the backup copy, not on the source after copying ---
 
 
 def test_sha256_is_computed_on_the_backup_copy(tmp_path):
@@ -163,7 +165,7 @@ def test_sha256_matches_source_when_source_is_unchanged(tmp_path):
     assert b.entries[0].sha256 == hashlib.sha256(b"hello").hexdigest()
 
 
-# --- 还原中途失败不得丢失已还原清单，也不得跳过其余条目 ---
+# --- A failure mid-restore must not lose the restored list or skip remaining entries ---
 
 
 def test_restore_failure_keeps_restored_list_and_continues(tmp_path):
@@ -174,17 +176,19 @@ def test_restore_failure_keeps_restored_list_and_continues(tmp_path):
     s3 = tmp_path / "s3"
     s3.write_text("three")
     b = BackupManager(tmp_path / "backups").create([s1, s2, s3])
-    # 破坏第二个条目的备份文件，模拟备份丢失
+    # Corrupt the second entry's backup file to simulate a lost backup
     (b.directory / b.entries[1].backup).unlink()
     s1.write_text("modified1")
     s2.write_text("modified2")
     s3.write_text("modified3")
     with pytest.raises(BackupRestoreError) as exc:
         b.restore()
-    assert exc.value.restored == [s1, s3], "已还原清单不得丢失其余成功条目"
+    assert exc.value.restored == [s1, s3], (
+        "the restored list must not lose the other successful entries"
+    )
     assert [p for p, _ in exc.value.failures] == [s2]
-    assert s1.read_text() == "one", "失败前的条目必须已被还原"
-    assert s3.read_text() == "three", "失败不得中断其余条目的还原"
+    assert s1.read_text() == "one", "entries before the failure must already be restored"
+    assert s3.read_text() == "three", "a failure must not interrupt restoring the remaining entries"
 
 
 def test_restore_returns_all_paths_when_nothing_fails(tmp_path):
@@ -196,7 +200,7 @@ def test_restore_returns_all_paths_when_nothing_fails(tmp_path):
     assert b.restore() == [s1, s2]
 
 
-# --- 备份过程失败不得留下没有 manifest 的孤儿目录 ---
+# --- A failed backup process must not leave an orphan directory without a manifest ---
 
 
 def test_failed_copy_leaves_no_orphan_backup_directory(tmp_path, monkeypatch):
@@ -217,14 +221,16 @@ def test_failed_copy_leaves_no_orphan_backup_directory(tmp_path, monkeypatch):
     with pytest.raises(OSError):
         BackupManager(tmp_path / "backups").create([a, b])
     base = tmp_path / "backups"
-    assert not base.exists() or not any(base.iterdir()), "失败的备份不得留下孤儿目录"
+    assert not base.exists() or not any(base.iterdir()), (
+        "a failed backup must not leave an orphan directory"
+    )
 
 
-# --- 还原前必须校验备份副本的 sha256 ---
+# --- The backup copy's sha256 must be verified before restoring ---
 
 
 def test_restore_refuses_corrupted_backup_copy(tmp_path):
-    """备份副本损坏时绝不能写回现役文件。"""
+    """A corrupted backup copy must never be written back over the live file."""
     src = tmp_path / "f"
     src.write_text("original")
     b = BackupManager(tmp_path / "backups").create([src])
@@ -236,11 +242,11 @@ def test_restore_refuses_corrupted_backup_copy(tmp_path):
         b.restore()
     assert [p for p, _ in exc.value.failures] == [src]
     assert "sha256" in str(exc.value.failures[0][1])
-    assert src.read_text() == "modified", "损坏的备份不得覆盖现役文件"
+    assert src.read_text() == "modified", "a corrupted backup must not overwrite the live file"
 
 
 def test_restore_continues_after_corrupted_entry(tmp_path):
-    """一个条目的副本损坏不应中断其余条目的还原。"""
+    """A corrupted copy for one entry must not interrupt restoring the remaining entries."""
     good = tmp_path / "good"
     good.write_text("good-original")
     bad = tmp_path / "bad"
@@ -259,7 +265,7 @@ def test_restore_continues_after_corrupted_entry(tmp_path):
 
 
 def test_restore_skips_verification_when_manifest_has_no_sha(tmp_path):
-    """旧清单没有 sha256 时不能因此拒绝还原。"""
+    """An old manifest without sha256 must not cause restore to be refused."""
     src = tmp_path / "f"
     src.write_text("original")
     b = BackupManager(tmp_path / "backups").create([src])

@@ -1,4 +1,4 @@
-"""组件协议。check 永不抛异常 —— doctor 依赖它一次列出全部问题。"""
+"""Component protocol. check never raises -- doctor relies on it to list every problem at once."""
 
 from __future__ import annotations
 
@@ -12,16 +12,17 @@ from devproxy.platform.base import Status
 
 
 def _site_host(address: str) -> str:
-    """站点地址 → 主机名（去掉 scheme 与端口）。
+    """Site address -> hostname (strip the scheme and port).
 
-    Caddy 站点地址可以写成 `localhost`、`localhost:8443`、
-    `https://localhost:8443` 或纯端口 `:443`。只有主机名部分才参与
-    精确比较 —— 子串匹配会把 `foo.localhost.test` 误当成 localhost。
+    A Caddy site address may be written as `localhost`, `localhost:8443`,
+    `https://localhost:8443`, or a bare port `:443`. Only the hostname part
+    takes part in exact comparison -- substring matching would mistake
+    `foo.localhost.test` for localhost.
     """
     raw = address.strip()
     if "://" in raw:
         raw = raw.split("://", 1)[1]
-    if raw.startswith("["):  # IPv6 字面量，如 [::1]:443
+    if raw.startswith("["):  # IPv6 literal, e.g. [::1]:443
         end = raw.find("]")
         return (raw[1:end] if end != -1 else raw).lower()
     if ":" in raw:
@@ -30,10 +31,11 @@ def _site_host(address: str) -> str:
 
 
 def has_localhost_site(sites_caddy: Path) -> bool:
-    """sites.caddy 里是否有 localhost 站点块（精确匹配站点地址 token）。
+    """Whether sites.caddy contains a localhost site block (exact match on the site address token).
 
-    只有 `*.test` 站点的机器上没有 localhost 站点 —— 那时探 localhost
-    验的是"站点名匹配"而不是"服务活着"。
+    Machines with only `*.test` sites have no localhost site -- probing
+    localhost there verifies "the site name matches", not "the service is
+    alive".
     """
     try:
         text = sites_caddy.read_text(encoding="utf-8")
@@ -43,7 +45,7 @@ def has_localhost_site(sites_caddy: Path) -> bool:
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
-        # 站点地址写在 `{` 之前，多个地址用逗号或空白分隔。
+        # Site addresses are written before `{`; multiple addresses are separated by commas or whitespace.
         head = stripped.split("{", 1)[0]
         if any(_site_host(address) == "localhost" for address in head.replace(",", " ").split()):
             return True
@@ -51,12 +53,14 @@ def has_localhost_site(sites_caddy: Path) -> bool:
 
 
 def probe_url(routes_json: Path, sites_caddy: Path) -> str | None:
-    """该拿哪个 URL 做端到端 HTTPS 探测；没有可探目标时返回 None。
+    """Which URL to use for the end-to-end HTTPS probe; None when there is nothing to probe.
 
-    Caddy 与证书组件共用同一份判据（两处各写一遍已经漂移过一次）：
-    优先首条已注册路由，其次**确有 localhost 站点时**才用 localhost。
-    只有 codeup.test 这类站点的机器上，探 localhost 会因站点名不匹配而
-    握手失败，把健康机器判成故障。
+    Caddy and the certificates component share this same criterion (writing it
+    twice in two places has already drifted once): prefer the first registered
+    route, and use localhost only **when a localhost site actually exists**.
+    On machines with only sites such as codeup.test, probing localhost fails
+    the handshake because the site name does not match, marking a healthy
+    machine as broken.
     """
     try:
         state = json.loads(routes_json.read_text(encoding="utf-8"))
@@ -77,10 +81,10 @@ class Component(Protocol):
     name: str
 
     def check(self) -> Status:
-        """检查现状。永不抛异常。"""
+        """Inspect the current state. Never raises."""
 
     def plan(self) -> list[Action]:
-        """根据当前状态算出要执行的动作。空列表表示无需变更。"""
+        """Compute the actions to perform from the current state. An empty list means no changes are needed."""
 
     def apply(self, actions: list[Action]) -> None:
-        """执行动作。"""
+        """Perform the actions."""

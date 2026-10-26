@@ -1,1 +1,1 @@
-"""部署、体检与迁移。"""
+"""Deployment, health checks, and migration."""

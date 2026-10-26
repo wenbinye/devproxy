@@ -14,11 +14,11 @@ def paths(tmp_path) -> Paths:
 
 @pytest.fixture(autouse=True)
 def isolated_home(tmp_path_factory, monkeypatch):
-    """把 HOME 指向临时目录 —— 测试绝不写进用户家目录。
+    """Point HOME at a temporary directory -- tests must never write into the real home.
 
-    Path.home() 与 os.path.expanduser("~") 都认 HOME：这挡住了
-    default_paths() 在真实的 ~/.config/devproxy、~/.local/state/devproxy
-    里凭空造文件，也挡住了 dnsmasq 配置、~/.pki/nssdb 这类家目录路径。
+        Both Path.home() and os.path.expanduser("~") honour HOME: this keeps default_paths()
+    from conjuring files inside the real ~/.config/devproxy or ~/.local/state/devproxy, and
+    keeps home-directory paths such as the dnsmasq config and ~/.pki/nssdb away as well.
     """
     home = tmp_path_factory.mktemp("home")
     monkeypatch.setenv("HOME", str(home))
@@ -30,15 +30,16 @@ def isolated_home(tmp_path_factory, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def isolated_cli_platform(monkeypatch):
-    """把 CLI 用的平台换成 FakePlatform —— 测试绝不允许碰真实系统。
+    """Swap the CLI platform for FakePlatform -- tests must never touch the real system.
 
-    CLI 的 setup 会改写 ~/.config/systemd/user/ 下的单元、写 /etc 下的
-    DNS 配置，迁移流程还会重启真实服务。这些路径全由平台对象决定，
-    只要平台还是真的 LinuxPlatform，一次 `setup --yes` 就会改掉用户
-    机器上的东西（曾经真的把用户自己的 caddy.service 覆盖掉）。
+    The CLI's setup rewrites the units under ~/.config/systemd/user/ and the DNS config
+    under /etc, and the migration restarts real services. All those paths are decided by the
+    platform object, so as long as the platform is still the real LinuxPlatform, one
+    `setup --yes` changes things on the user's machine (it once really overwrote the user's
+    own caddy.service).
 
-    这里全局兜底：任何测试默认拿到的都是隔离的假平台；确实需要真实
-    平台的测试自己再 monkeypatch 覆盖（顺序在后，优先生效）。
+    This is the global fallback: every test gets an isolated fake platform by default; tests
+    that genuinely need the real one monkeypatch over it themselves (later wins).
     """
     from devproxy.platform.fake import FakePlatform
 

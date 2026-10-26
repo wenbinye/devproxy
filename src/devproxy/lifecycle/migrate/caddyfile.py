@@ -1,6 +1,7 @@
-"""Caddyfile 文本处理：站点块切分、storage 提取、通配块识别。
+"""Caddyfile text processing: site block splitting, storage extraction, wildcard detection.
 
-纯文本操作，不碰平台、不碰文件系统（除了读 legacy_storage_path 的入参）。
+Pure text operations; touches neither the platform nor the filesystem (except
+reading the input to legacy_storage_path).
 """
 
 from __future__ import annotations
@@ -11,7 +12,7 @@ from pathlib import Path
 
 
 def _strip_inline_comment(line: str) -> str:
-    """去掉引号感知的行内注释（Caddyfile 里引号内的 # 是普通字符）。"""
+    """Strip an inline comment, quote-aware (inside quotes, # is an ordinary character in a Caddyfile)."""
     quote: str | None = None
     escaped = False
     for i, ch in enumerate(line):
@@ -31,7 +32,7 @@ def _strip_inline_comment(line: str) -> str:
 
 
 def _brace_delta(line: str) -> int:
-    """一行代码对块深度的影响（注释与引号里的花括号不算）。"""
+    """Effect of one line on block depth (braces inside comments and quotes do not count)."""
     code = _strip_inline_comment(line)
     delta = 0
     quote: str | None = None
@@ -55,7 +56,7 @@ def _brace_delta(line: str) -> int:
 
 
 def _block_head(block: str) -> str:
-    """块的首个有效行（跳过注释与空行，去掉行内注释）。"""
+    """First meaningful line of a block (skipping comments and blank lines, stripping inline comments)."""
     for line in block.splitlines():
         s = _strip_inline_comment(line).strip()
         if not s:
@@ -65,7 +66,7 @@ def _block_head(block: str) -> str:
 
 
 def _block_address(block: str) -> str:
-    """块声明的站点地址；全局块（以 "{" 开头）返回空串。"""
+    """Site address declared by the block; a global block (starting with "{") returns an empty string."""
     head = _block_head(block)
     if head.startswith("{"):
         return ""
@@ -73,11 +74,13 @@ def _block_address(block: str) -> str:
 
 
 def _split_blocks(text: str) -> tuple[list[str], list[str]]:
-    """按大括号深度切分顶层块。返回 (全局块列表, 站点块列表)。
+    """Split top-level blocks by brace depth. Returns (global blocks, site blocks).
 
-    站点块前面的注释归入该块 —— 用户 Caddyfile 里每个站点都带一段说明，
-    拆开丢掉等于丢掉用户的文档。注释（含行内注释）与引号里的花括号
-    不参与深度计算，否则 `example.test { # 站点 } 说明` 会被当场切碎。
+    Comments preceding a site block belong to that block -- each site in a user's
+    Caddyfile usually carries an explanation, and splitting it off would discard
+    the user's documentation. Comments (including inline comments) and braces
+    inside quotes do not participate in depth counting; otherwise
+    `example.test { # site } note` would be torn apart on the spot.
     """
     global_blocks: list[str] = []
     site_blocks: list[str] = []
@@ -95,23 +98,23 @@ def _split_blocks(text: str) -> tuple[list[str], list[str]]:
             else:
                 site_blocks.append(block)
     if current and any(line.strip() for line in current):
-        # 结尾没有闭合的残留内容：原样保留，不吞掉用户的配置
+        # Trailing unclosed residual content: keep it as-is; do not swallow the user's config
         site_blocks.append("\n".join(current).rstrip() + "\n")
     return global_blocks, site_blocks
 
 
 def _address_tokens(address_line: str) -> list[str]:
-    """把 `foo.test, *.test` 这样的地址行拆成单个地址 token。"""
+    """Split an address line like `foo.test, *.test` into individual address tokens."""
     return [t for t in re.split(r"[,\s]+", address_line.strip()) if t]
 
 
 def _host_of(token: str) -> str:
-    """地址 token 里的主机名：去 scheme、去路径、去端口、统一小写。"""
+    """Host name in an address token: strip scheme, path, and port; lowercase."""
     host = token.strip()
     if "://" in host:
         host = host.split("://", 1)[1]
     host = host.split("/", 1)[0]
-    if host.startswith("["):  # IPv6 字面量
+    if host.startswith("["):  # IPv6 literal
         end = host.find("]")
         if end != -1:
             return host[: end + 1].lower()
@@ -121,11 +124,12 @@ def _host_of(token: str) -> str:
 
 
 def _is_wildcard_host(host: str, suffix: str) -> bool:
-    """host 是否为本工具后缀下的通配站点。
+    """Whether host is a wildcard site under this tool's suffix.
 
-    必须做**带点边界的精确后缀匹配**：`*.testing` 不属于 `test`，
-    `*.test` 与 `*.local.test` 才属于。整串 startswith 会把前者误杀，
-    又会漏掉 `https://*.test` 这类带 scheme 的写法。
+    Must do **exact suffix matching with a dot boundary**: `*.testing` does not
+    belong to `test`, while `*.test` and `*.local.test` do. A whole-string
+    startswith would falsely match the former and miss forms with a scheme such
+    as `https://*.test`.
     """
     suffix = (suffix or "test").lower()
     if not host.startswith("*."):
@@ -141,9 +145,10 @@ def _block_is_wildcard(block: str, suffix: str) -> bool:
 
 
 def split_caddyfile_blocks(text: str, suffix: str = "test") -> tuple[list[str], list[str]]:
-    """拆出个人站点块。返回 (个人站点块列表, 被丢弃的 .test 相关块列表)。
+    """Extract personal site blocks. Returns (personal site blocks, discarded .test-related blocks).
 
-    只做块级切分，不解析 Caddyfile 语法 —— 站点块原样保留。
+    Only performs block-level splitting and does not parse Caddyfile syntax --
+    site blocks are kept as-is.
     """
     _, sites = _split_blocks(text)
     personal: list[str] = []
@@ -157,36 +162,39 @@ def split_caddyfile_blocks(text: str, suffix: str = "test") -> tuple[list[str], 
 
 
 def split_caddyfile(text: str, suffix: str = "test") -> tuple[str, list[str]]:
-    """拆出个人站点。返回 (个人站点文本, 被丢弃的 .test 相关块)。"""
+    """Extract personal sites. Returns (personal site text, discarded .test-related blocks)."""
     personal, dropped = split_caddyfile_blocks(text, suffix)
     return "\n".join(personal), dropped
 
 
 def block_addresses(blocks: list[str]) -> list[str]:
-    """一组站点块声明的地址（全局块与解析不出地址的块略过）。"""
+    """Addresses declared by a group of site blocks (global blocks and blocks whose address cannot be parsed are skipped)."""
     addresses = [_block_address(b) for b in blocks]
     return [a for a in addresses if a]
 
 
 def wildcard_addresses(text: str, suffix: str = "test") -> list[str]:
-    """文本里仍存在的通配站点块地址。
+    """Addresses of wildcard site blocks still present in the text.
 
-    通配块（如 *.test）与工具生成的精确站点块同后缀时，Caddy 的 TLS
-    握手会整体失败 —— 所以 doctor 必须能指出"现役配置里还有通配块"。
+    When a wildcard block (e.g. *.test) shares a suffix with the exact site
+    blocks the tool generates, Caddy's TLS handshake fails entirely -- so doctor
+    must be able to point out that "a wildcard block remains in the active
+    config".
     """
     _, dropped = split_caddyfile_blocks(text, suffix)
     return block_addresses(dropped)
 
 
 def legacy_storage_path(text: str) -> Path | None:
-    """遗留 Caddyfile 全局块里的 storage 路径。
+    """storage path in the global block of a legacy Caddyfile.
 
-    例：`storage file_system /home/u/.local/share/caddy`。
-    迁移时必须沿用它 —— storage 换了位置，Caddy 会重新生成 CA，
-    浏览器里的信任与已有站点的 tls internal 证书全部失效。
+    Example: `storage file_system /home/u/.local/share/caddy`. Migration must
+    reuse it -- if storage moves, Caddy regenerates the CA, and browser trust
+    plus the existing sites' tls internal certificates are all invalidated.
 
-    行内注释（`storage file_system /data # old ca`）与引号路径都要按
-    词法解析：前者曾被当成路径的一部分，后者曾被剥掉引号。
+    Inline comments (`storage file_system /data # old ca`) and quoted paths must
+    be parsed lexically: the former used to be taken as part of the path, and
+    the latter used to have its quotes stripped.
     """
     global_blocks, _ = _split_blocks(text)
     for block in global_blocks:
@@ -205,5 +213,5 @@ def legacy_storage_path(text: str) -> Path | None:
 
 
 def _has_content(text: str) -> bool:
-    """文本里有没有实质内容（注释与空行不算）。"""
+    """Whether the text has substantive content (comments and blank lines do not count)."""
     return any(_strip_inline_comment(line).strip() for line in text.splitlines())

@@ -1,35 +1,39 @@
-"""路由名校验与域名拼装。"""
+"""Route name validation and domain assembly."""
 
 from __future__ import annotations
 
 import re
 
-# 用 \A / \Z 而非 ^ / $ —— $ 也会匹配末尾换行之前，"codeup\n" 会被误放行。
-# 首尾都必须是字母/数字：与 HOSTNAME_RE / DNS_LABEL_RE 对齐，否则 "foo-"
-# 会一路通过入口校验，直到渲染时才因 "foo-.test" 非法而失败。
+# Use \A / \Z instead of ^ / $ -- $ also matches before a trailing newline,
+# so "codeup\n" would be let through by mistake. Both ends must be
+# letters/digits: aligned with HOSTNAME_RE / DNS_LABEL_RE, otherwise "foo-"
+# passes all entry validation and only fails at render time because
+# "foo-.test" is invalid.
 NAME_RE = re.compile(r"\A[a-z0-9]([a-z0-9-]*[a-z0-9])?\Z")
 MAX_NAME_LEN = 63
 
 
 class InvalidNameError(ValueError):
     def __init__(self, name: str, reason: str):
-        super().__init__(f"非法路由名 {name!r}: {reason}")
+        super().__init__(f"invalid route name {name!r}: {reason}")
         self.name = name
         self.reason = reason
 
 
 def validate_name(name: str) -> str:
-    """合法则原样返回；非法抛 InvalidNameError。"""
+    """Return the name unchanged if valid; raise InvalidNameError otherwise."""
     if not name:
-        raise InvalidNameError(name, "不得为空")
+        raise InvalidNameError(name, "must not be empty")
     if len(name) > MAX_NAME_LEN:
-        raise InvalidNameError(name, f"长度不得超过 {MAX_NAME_LEN}")
+        raise InvalidNameError(name, f"length must not exceed {MAX_NAME_LEN}")
     if not NAME_RE.match(name):
-        raise InvalidNameError(name, "限单标签 [a-z0-9-]，首尾为字母或数字，不得含点")
+        raise InvalidNameError(
+            name, "must be a single label [a-z0-9-] with letters or digits at both ends and no dots"
+        )
     return name
 
 
 def domain_for(name: str, suffix: str) -> str:
-    """<name>.<suffix>；suffix 前导点会被去掉。"""
+    """<name>.<suffix>; a leading dot in suffix is stripped."""
     validate_name(name)
     return f"{name}.{suffix.lstrip('.')}"

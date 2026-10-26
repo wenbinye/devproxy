@@ -1,4 +1,4 @@
-"""devproxy stop：停掉本项目（devproxy.toml）声明的所有应用。"""
+"""devproxy stop: stop every app declared by this project (devproxy.toml)."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ def _invoke(args: list[str]):
 
 @pytest.fixture
 def project_env(tmp_path, monkeypatch):
-    """项目目录（devproxy.toml）+ 假 Caddy/Admin + 空路由表。"""
+    """Project directory (devproxy.toml) + fake Caddy/Admin + empty route table."""
     from devproxy.core.config import Config
     from devproxy.core.paths import Paths
     from devproxy.gateway.store import RouteStore
@@ -79,7 +79,7 @@ def _routes(store) -> list[str]:
 
 
 def test_stop_stops_all_project_apps(project_env, monkeypatch):
-    """本项目声明的应用全部停止：路由移除 + 进程按注册身份击杀。"""
+    """Stop every app declared by this project: remove routes + kill processes by registered identity."""
     _, paths, store = project_env
     source = str(paths.state_dir / "devproxy.toml")
     _seed(store, "web", source, pid=111)
@@ -92,34 +92,35 @@ def test_stop_stops_all_project_apps(project_env, monkeypatch):
 
     result = _invoke([])
     assert result.exit_code == 0, result.output
-    assert _routes(store) == [], "声明内的路由应被移除"
+    assert _routes(store) == [], "routes inside the declaration must be removed"
     assert killed == [(111, "12345"), (222, "12345")]
-    assert "全部停止（2 个应用）" in result.output
+    assert "All stopped (2 apps)" in result.output
 
 
 def test_stop_never_touches_other_projects(project_env, monkeypatch):
-    """手工路由（无 source）与别的项目的路由**不能**被碰。"""
+    """Manual routes (no source) and other projects' routes must **not** be touched."""
     _, paths, store = project_env
     source = str(paths.state_dir / "devproxy.toml")
     _seed(store, "web", source, pid=111)
-    _seed(store, "manual", None, pid=333)  # 手工 up 的
-    _seed(store, "other", "/elsewhere/devproxy.toml")  # 别的项目的
+    _seed(store, "manual", None, pid=333)  # started manually with up
+    _seed(store, "other", "/elsewhere/devproxy.toml")  # another project's
     monkeypatch.setattr("devproxy.cli._shared.kill_pid_group", lambda *a, **k: None)
 
     result = _invoke([])
     assert result.exit_code == 0, result.output
     assert _routes(store) == ["manual", "other"]
-    assert "manual" in result.output or True  # 输出只报本项目停了几个
+    # The output reports only what this project stopped -- one app, not the two others
+    assert "All stopped (1 apps)" in result.output
 
 
 def test_stop_with_none_running_is_ok(project_env):
     result = _invoke([])
     assert result.exit_code == 0, result.output
-    assert "没有在跑的应用" in result.output
+    assert "No running apps." in result.output
 
 
 def test_stop_outside_project_exits_2(tmp_path, monkeypatch):
-    """项目外没有可依据的声明 —— 拒绝并指路。"""
+    """Outside a project there is no declaration to rely on -- refuse and point the way."""
     from devproxy.core.config import Config
     from devproxy.core.paths import Paths
     from devproxy.gateway.store import RouteStore
@@ -140,7 +141,7 @@ def test_stop_outside_project_exits_2(tmp_path, monkeypatch):
 
 
 def test_stop_route_with_no_pid_is_removed_silently(project_env, monkeypatch):
-    """expose 起的路由没有 pid —— 只移除路由，不击杀。"""
+    """Routes started by expose have no pid -- remove the route only, never kill."""
     _, paths, store = project_env
     source = str(paths.state_dir / "devproxy.toml")
     _seed(store, "web", source, pid=None)

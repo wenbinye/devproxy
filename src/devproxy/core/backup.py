@@ -1,6 +1,7 @@
-"""迁移前的强制备份与回滚。
+"""Forced backup and rollback before migration.
 
-备份目录带 UTC 时间戳，多次迁移不互相覆盖；只增不删，由用户自行清理。
+Backup directories carry a UTC timestamp so multiple migrations do not
+overwrite each other; they are append-only and left for the user to clean up.
 """
 
 from __future__ import annotations
@@ -14,19 +15,22 @@ from dataclasses import dataclass
 from dataclasses import field
 from pathlib import Path
 
-# 备份用的复制函数：把源文件复制到备份目录。默认 shutil.copy2；
-# /etc 下的文件普通用户读不到，迁移场景要换成走提权会话的实现。
+# Copy function for backups: copies the source file into the backup
+# directory. Defaults to shutil.copy2; files under /etc are unreadable to a
+# normal user, so migration scenarios must substitute an implementation that
+# goes through an elevated session.
 Copier = Callable[[Path, Path], None]
 
 
 def _copy2(src: Path, dest: Path) -> None:
-    """默认的复制实现。显式写成返回 None —— shutil.copy2 自己返回目标路径，
-    直接拿它当 Copier 会让类型对不上（Copier 的约定是「复制完就完事」）。
+    """Default copy implementation. It explicitly returns None -- shutil.copy2
+    returns the destination path itself, so using it directly as a Copier
+    makes the types mismatch (Copier's contract is "copy and be done").
     """
     shutil.copy2(src, dest)
 
 
-# 还原用的文件操作：src 为 None 表示"删除 dest"。
+# File operation used during restore: src being None means "delete dest".
 Restorer = Callable[[Path | None, Path], None]
 
 
@@ -41,32 +45,37 @@ def _sha256(path: Path) -> str:
 @dataclass
 class BackupEntry:
     original: Path
-    backup: str  # 相对备份目录的文件名
+    backup: str  # file name relative to the backup directory
     existed: bool
     sha256: str = ""
 
 
 def _verify_backup_copy(entry: BackupEntry, src: Path) -> None:
-    """还原前校验备份副本 —— 声明了 sha256 就必须兑现。
+    """Verify the backup copy before restoring -- a declared sha256 must be honored.
 
-    副本被截断/改写（磁盘问题、用户误改、非原子复制遗留）时，直接写回
-    等于用损坏内容覆盖现役文件。旧清单可能没有 sha256，跳过校验。
+    When the copy is truncated/rewritten (disk problems, accidental user
+    edits, leftovers of a non-atomic copy), writing it back means overwriting
+    live files with corrupt content. Old manifests may have no sha256; skip
+    verification in that case.
     """
     if not entry.sha256:
         return
     actual = _sha256(src)
     if actual != entry.sha256:
         raise ValueError(
-            f"备份副本 sha256 不匹配，拒绝还原：{src}（期望 {entry.sha256}，实际 {actual}）"
+            f"backup copy sha256 mismatch, refusing to restore: {src} "
+            f"(expected {entry.sha256}, got {actual})"
         )
 
 
 class BackupRestoreError(RuntimeError):
-    """还原过程中有条目失败时抛出。
+    """Raised when some entries fail during a restore.
 
-    还原会尽力完成其余条目，不会因单个条目失败而中断。
-    `.restored` 是已成功还原（覆盖或删除）的原始路径列表，
-    `.failures` 是失败条目列表，元素为 (原始路径, 异常)。
+    A restore does its best to complete the remaining entries and does not
+    abort because of a single failure. `.restored` is the list of original
+    paths that were successfully restored (overwritten or deleted);
+    `.failures` is the list of failed entries, each as
+    (original path, exception).
     """
 
     def __init__(
@@ -78,7 +87,8 @@ class BackupRestoreError(RuntimeError):
         self.failures = list(failures)
         detail = "; ".join(f"{p}: {exc}" for p, exc in self.failures)
         super().__init__(
-            f"还原失败 {len(self.failures)} 项（已还原 {len(self.restored)} 项）: {detail}"
+            f"restore failed for {len(self.failures)} item(s) "
+            f"(restored {len(self.restored)}): {detail}"
         )
 
 
@@ -87,37 +97,42 @@ class Backup:
     directory: Path
     created_at: str
     entries: list[BackupEntry] = field(default_factory=list)
-    # 还原时的文件操作。默认 shutil.copy2（不存在则删除）；/etc 下的文件
-    # 普通用户写不了也删不了，迁移场景要换成走提权会话的实现。
+    # File operation used during restore. Defaults to shutil.copy2 (delete
+    # when the file did not exist); files under /etc cannot be written or
+    # deleted by a normal user, so migration scenarios must substitute an
+    # implementation that goes through an elevated session.
     restorer: Restorer | None = None
 
     def manifest_text(self) -> str:
         lines = [
-            "# devproxy 备份清单",
-            f"# 备份时间: {self.created_at}",
-            "# 还原方式: devproxy setup --rollback " + str(self.directory),
+            "# devproxy backup manifest",
+            f"# Backup time: {self.created_at}",
+            "# Restore: devproxy setup --rollback " + str(self.directory),
             "",
         ]
         for i, e in enumerate(self.entries, 1):
-            state = "存在" if e.existed else "原本不存在（还原时将删除）"
+            state = "existed" if e.existed else "did not exist (deleted on restore)"
             lines.append(f"[{i}] {e.original}")
-            lines.append(f"    备份文件: {e.backup}")
-            lines.append(f"    原始状态: {state}")
+            lines.append(f"    Backup file: {e.backup}")
+            lines.append(f"    Original state: {state}")
             if e.sha256:
                 lines.append(f"    sha256: {e.sha256}")
             lines.append("")
         return "\n".join(lines)
 
     def restore(self) -> list[Path]:
-        """还原所有条目。返回被还原或被删除的原始路径。
+        """Restore all entries. Return the original paths restored or deleted.
 
-        单个条目失败不会中断还原：尽可能还原其余条目，全部尝试完后若仍有失败，
-        抛出 `BackupRestoreError`，其 `.restored` 保留已成功还原的原始路径，
-        `.failures` 保留失败条目（原始路径, 异常）。调用方必须捕获该异常，
-        否则已还原清单会丢失。
+        A single failing entry does not abort the restore: restore as many
+        other entries as possible, and after all have been attempted, raise
+        `BackupRestoreError` if any failed. Its `.restored` keeps the
+        successfully restored original paths and `.failures` keeps the failed
+        entries (original path, exception). The caller must catch this
+        exception, otherwise the list of restored paths is lost.
 
-        还原前会校验备份副本的 sha256：副本损坏时拒绝写回（记为该条目
-        失败），绝不把损坏内容覆盖到现役文件上。
+        The sha256 of each backup copy is verified before restoring: refuse to
+        write back a corrupt copy (record the entry as failed) and never
+        overwrite live files with corrupt content.
         """
         restored: list[Path] = []
         failures: list[tuple[Path, Exception]] = []
@@ -149,16 +164,20 @@ class Backup:
 class BackupManager:
     def __init__(self, base_dir: Path, *, copier: Copier | None = None):
         self.base_dir = base_dir
-        # copier(src, dest)：把源文件复制进备份目录。默认 shutil.copy2；
-        # 迁移场景里 /etc 下的文件普通用户读不到，要换成走提权会话的实现。
+        # copier(src, dest): copy the source file into the backup directory.
+        # Defaults to shutil.copy2; in migration scenarios files under /etc are
+        # unreadable to a normal user, so substitute an implementation that
+        # goes through an elevated session.
         self._copier: Copier = copier or _copy2
 
     def create(self, targets: list[Path]) -> Backup:
-        """备份目标文件。目录创建或复制失败一律抛异常 —— 调用方必须中止迁移。
+        """Back up the target files. Directory creation or copy failures always raise -- the caller must abort the migration.
 
-        目标必须是普通文件：目录、符号链接（含悬空链接）、其他特殊文件一律
-        抛 `ValueError`，不得被静默记成"原本不存在"，否则还原时可能删除
-        原本存在的东西。目标确实不存在时记 `existed=False`。
+        Targets must be regular files: directories, symbolic links (including
+        dangling ones), and other special files all raise `ValueError` and
+        must not be silently recorded as "did not exist", or a restore might
+        delete something that did exist. When a target really does not exist,
+        record `existed=False`.
         """
         stamp = time.strftime("%Y-%m-%dT%H-%M-%SZ", time.gmtime())
         directory = self.base_dir / stamp
@@ -173,7 +192,7 @@ class BackupManager:
         try:
             for target in targets:
                 if target.is_symlink() or (target.exists() and not target.is_file()):
-                    raise ValueError(f"备份目标不是普通文件: {target}")
+                    raise ValueError(f"backup target is not a regular file: {target}")
                 name = target.name or "root"
                 backup_name = f"{name}.bak"
                 i = 1
@@ -195,10 +214,12 @@ class BackupManager:
                 else:
                     entries.append(BackupEntry(original=target, backup=backup_name, existed=False))
         except Exception:
-            # 备份未完成：先打标记再清理半成品目录，避免留下没有 manifest 的孤儿备份
+            # Backup incomplete: mark it first, then clean up the half-finished
+            # directory, to avoid leaving orphan backups without a manifest
             try:
                 (directory / "INCOMPLETE").write_text(
-                    "本次备份未完成，已被清理；如目录仍存在说明清理失败，请手动删除。\n",
+                    "This backup did not complete and has been cleaned up; "
+                    "if the directory still exists, cleanup failed -- delete it manually.\n",
                     encoding="utf-8",
                 )
             except OSError:

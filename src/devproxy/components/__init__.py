@@ -1,1 +1,1 @@
-"""组件层：依赖 Platform 协议，产出 check/plan/apply 三段式接口。"""
+"""Component layer: depends on the Platform protocol and exposes a three-stage check/plan/apply interface."""

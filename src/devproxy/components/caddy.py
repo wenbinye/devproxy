@@ -1,7 +1,9 @@
-"""Caddy 组件：二进制下载与校验、setcap 授权、systemd 单元、主 Caddyfile。
+"""Caddy component: binary download and verification, setcap authorization, systemd unit, main Caddyfile.
 
-Caddy 版本固定，sha256 内置在源码里 —— 上游发布的 checksums.txt 与实际
-托管的资产不一致（实测 tar.gz 与 deb 均对不上），不能信任该文件。
+The Caddy version is pinned and the sha256 is built into the source -- the
+checksums.txt published upstream does not match the actually hosted assets
+(measured: neither the tar.gz nor the deb matches), so that file cannot be
+trusted.
 """
 
 from __future__ import annotations
@@ -40,12 +42,12 @@ RELEASE_BASE = "https://github.com/caddyserver/caddy/releases/download/v{version
 
 
 def caddy_asset_name(os_name: str, arch: str, version: str = CADDY_VERSION) -> str:
-    """资产名。注意 macOS 用 mac 而非 darwin。"""
+    """Asset name. Note that macOS uses mac, not darwin."""
     return f"caddy_{version}_{os_name}_{arch}.tar.gz"
 
 
 def current_platform_key() -> tuple[str, str]:
-    """返回 (os, arch)。未知平台直接报错，绝不悄悄退回 amd64。"""
+    """Return (os, arch). Unknown platforms raise outright; never silently fall back to amd64."""
     system = _platform.system().lower()
     machine = _platform.machine().lower()
     if system == "darwin":
@@ -53,13 +55,13 @@ def current_platform_key() -> tuple[str, str]:
     elif system == "linux":
         os_name = "linux"
     else:
-        raise RuntimeError(f"不支持的平台: {system}/{machine}")
+        raise RuntimeError(f"unsupported platform: {system}/{machine}")
     if machine in ("arm64", "aarch64"):
         arch = "arm64"
     elif machine in ("x86_64", "amd64"):
         arch = "amd64"
     else:
-        raise RuntimeError(f"不支持的平台: {system}/{machine}")
+        raise RuntimeError(f"unsupported platform: {system}/{machine}")
     return os_name, arch
 
 
@@ -72,9 +74,10 @@ def _sha256_file(path: Path) -> str:
 
 
 def _exec_line_argv(text: str, field: str) -> list[str] | None:
-    """从 systemd 单元文本里取某个 `Exec*=` 字段的 argv。
+    """Extract the argv of a given `Exec*=` field from systemd unit text.
 
-    launchd 的 plist 没有这些字段（返回 None）—— 调用方据此跳过检查。
+    launchd plists have no such fields (return None) -- the caller skips the
+    check accordingly.
     """
     prefix = f"{field}="
     for raw in text.splitlines():
@@ -86,7 +89,7 @@ def _exec_line_argv(text: str, field: str) -> list[str] | None:
 
 
 def _binary_version(binary: Path) -> str:
-    """运行 `caddy version`，返回首个字段（如 v2.11.7）；失败返回空串。"""
+    """Run `caddy version` and return the first field (e.g. v2.11.7); return an empty string on failure."""
     try:
         proc = subprocess.run([str(binary), "version"], capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.TimeoutExpired):
@@ -98,16 +101,18 @@ def _binary_version(binary: Path) -> str:
 
 
 def download_caddy(dest: Path, version: str = CADDY_VERSION) -> None:
-    """下载并校验后解包出 caddy 二进制。校验失败必须抛异常，不留半个文件。
+    """Download, verify, then extract the caddy binary. A failed verification must raise and leave no half-written file.
 
-    校验分两层：内置 sha256（下载包）与 `caddy version`（解包后的二进制）。
-    落盘用同目录临时文件 + os.replace —— 旧二进制正在运行时直接覆盖会
-    触发 ETXTBSY，且半写的二进制会被后续动作当成可用。
+    Verification has two layers: the built-in sha256 (the downloaded package)
+    and `caddy version` (the extracted binary). Write with a same-directory
+    temp file + os.replace -- overwriting an old binary that is still running
+    triggers ETXTBSY, and a half-written binary would be treated as usable by
+    subsequent actions.
     """
     os_name, arch = current_platform_key()
     key = (os_name, arch)
     if key not in CADDY_SHA256:
-        raise RuntimeError(f"不支持的平台: {os_name}/{arch}")
+        raise RuntimeError(f"unsupported platform: {os_name}/{arch}")
     asset = caddy_asset_name(os_name, arch, version)
     url = RELEASE_BASE.format(version=version) + "/" + asset
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -122,22 +127,23 @@ def download_caddy(dest: Path, version: str = CADDY_VERSION) -> None:
             expected = CADDY_SHA256[key]
             if actual != expected:
                 raise RuntimeError(
-                    f"caddy 包校验失败（{asset}）\n"
-                    f"  期望 sha256: {expected}\n  实际 sha256: {actual}"
+                    f"caddy package verification failed ({asset})\n"
+                    f"  expected sha256: {expected}\n  actual sha256: {actual}"
                 )
             with tarfile.open(tgz) as tf:
                 member = tf.getmember("caddy")
                 src = tf.extractfile(member)
                 if src is None:
-                    raise RuntimeError(f"caddy 包里读不出 caddy 这个文件：{tgz}")
+                    raise RuntimeError(f"cannot read the caddy file from the caddy package: {tgz}")
                 with src, os.fdopen(fd, "wb") as out:
-                    fd = -1  # 已交给 fdopen 管理，避免重复关闭
+                    fd = -1  # Now owned by fdopen; avoid closing it twice
                     shutil.copyfileobj(src, out)
         tmp_dest.chmod(0o755)
         actual_version = _binary_version(tmp_dest)
         if actual_version != f"v{version}":
             raise RuntimeError(
-                f"caddy 二进制版本不符: 期望 v{version}，实际 {actual_version or '无法执行'}"
+                f"caddy binary version mismatch: expected v{version}, "
+                f"actual {actual_version or 'not executable'}"
             )
         os.replace(tmp_dest, dest)
     finally:
@@ -159,15 +165,17 @@ class CaddyComponent:
         self.platform = platform
         self.paths = paths
         self.config = config
-        # 下载属网络操作，默认走真实下载器；测试可注入假实现，保持离线。
+        # Downloading is a network operation; default to the real downloader,
+        # but tests can inject a fake to stay offline.
         self._downloader = downloader or download_caddy
-        # 迁移来的环境变量（如 MINIKUBE_IP）—— 用户站点里的 {$MINIKUBE_IP:…}
-        # 依赖它，重装单元时必须一并带上。
+        # Environment variables migrated over (such as MINIKUBE_IP) -- user
+        # sites' {$MINIKUBE_IP:…} depends on them and they must be carried
+        # over when reinstalling the unit.
         self.extra_env: dict[str, str] = load_extra_env(paths)
 
-    # -- 判据 ----------------------------------------------------------
+    # -- criteria ------------------------------------------------------
     def _caddyfile_current(self) -> bool:
-        """主 Caddyfile 是否存在且内容与该组件会生成的一致。"""
+        """Whether the main Caddyfile exists and its content matches what this component would generate."""
         expected = self._main_caddyfile()
         try:
             return (
@@ -178,16 +186,20 @@ class CaddyComponent:
             return False
 
     def _read_unit_text(self, unit: Path) -> str | None:
-        """读单元内容；普通读不到时（权限不足）改走**非交互**的特权读。
+        """Read unit content; when normal reads fail (insufficient permissions), fall back to a **non-interactive** privileged read.
 
-        macOS 的 system scope 单元在 /Library/LaunchDaemons —— 权限或归属
-        不对时普通用户读不了。"读不到"绝不等于"单元过期"：那样 doctor 会
-        永远报红，setup 每次都要重装单元并再要一次密码。
+        macOS system-scope units live in /Library/LaunchDaemons -- a normal
+        user cannot read them when permissions or ownership are wrong.
+        "Cannot read" must never mean "unit is stale": otherwise doctor would
+        report red forever and setup would reinstall the unit and ask for a
+        password every time.
 
-        这里必须走协议里的**非交互**特权读（Linux 上是 `sudo -n`）：
-        doctor 承诺只读、无副作用，绝不能因为一个读不到的单元就把密码框
-        弹到用户脸上。`privilege()` 会构造交互式提权会话（可能弹密码），
-        因此这里绝不回退到它。
+        This must go through the protocol's **non-interactive** privileged
+        read (`sudo -n` on Linux): doctor promises read-only, side-effect-free
+        behavior and must never pop a password prompt in the user's face just
+        because of an unreadable unit. `privilege()` constructs an interactive
+        elevated session (which may prompt for a password), so this never
+        falls back to it.
         """
         try:
             return unit.read_text(encoding="utf-8")
@@ -196,33 +208,42 @@ class CaddyComponent:
         try:
             return self.platform.privilege_read(unit)
         except (OSError, RuntimeError):
-            # 平台实现自身失败也要守住 check 的"永不抛异常"契约。
+            # Even if the platform implementation itself fails, honor check's
+            # "never raises" contract.
             return None
 
     def _unit_current(self) -> bool:
-        """已安装的单元是否把 ExecStart 指向本工具的主 Caddyfile 与二进制。
+        """Whether the installed unit points ExecStart at this tool's main Caddyfile and binary.
 
-        只看 --config 不够：改了配置里的 caddy_bin 之后，已装单元仍指着旧
-        二进制跑 —— "单元过期"永远判不出来，服务会一直用旧二进制。
+        Checking only --config is not enough: after changing caddy_bin in the
+        config, the installed unit still runs the old binary -- "unit is
+        stale" can never be detected and the service keeps using the old
+        binary.
 
-        判据是**整条命令行**（argv 前缀必须完全对上），不是子串：只看
-        "路径出现过"会把参数配对错乱的单元也判成当前的 —— 而"单元是不是
-        当前的"正是 setup 决定要不要重装的依据。
+        The criterion is the **entire command line** (the argv prefix must
+        match exactly), not a substring: just checking "the path appears"
+        would also declare units with mismatched argument pairing as current
+        -- and "is the unit current" is exactly what setup uses to decide
+        whether to reinstall.
 
-        两种单元格式都要认：systemd 的 ExecStart= 行与 launchd 的
-        ProgramArguments 数组（后者是数组，逐个元素比对）。
+        Both unit formats must be recognized: systemd's ExecStart= line and
+        launchd's ProgramArguments array (the latter is an array, compared
+        element by element).
 
-        ExecReload 也只对 systemd 单元检查（launchd 没有该字段）：
-        `admin_addr` 变了但 ExecStart 不变时，旧单元里的 `--address`
-        已经过期，单元必须重装。老版本装出的单元可能没有 ExecReload 行，
-        那种情况按"兼容"放过 —— 否则升级后 doctor 会无谓地报红一次。
+        ExecReload is also checked for systemd units only (launchd has no such
+        field): when `admin_addr` changes but ExecStart does not, the old
+        unit's `--address` is already stale and the unit must be reinstalled.
+        Units installed by older versions may have no ExecReload line; treat
+        that case as "compatible" and let it pass -- otherwise doctor would
+        needlessly report red once after an upgrade.
         """
         unit = self.platform.service_unit_path("caddy")
         if not unit.exists():
             return False
         text = self._read_unit_text(unit)
         if text is None:
-            # 读不到就不能说它过期 —— 宁可放过，也不能让 doctor 永远报红。
+            # If it cannot be read, it cannot be called stale -- better to let
+            # it pass than have doctor report red forever.
             return True
         argv = unit_exec_argv(text)
         if argv is None:
@@ -248,11 +269,12 @@ class CaddyComponent:
         ]
 
     def _need_binary(self, version: str | None = None) -> bool:
-        """二进制判据：不存在，或版本与固定版本不符（含"版本读不出来"）。
+        """Binary criterion: missing, or version not matching the pinned version (including "version unreadable").
 
-        check 与 plan 必须共用它 —— 否则同一行既写"已就绪"又写"下载"，
-        而且每次 setup 都会重复下载。`version` 可由调用方传入已测得的
-        结果，避免同一轮里再跑一次 `caddy version`。
+        check and plan must share it -- otherwise the same line would say both
+        "ready" and "download", and every setup would download again.
+        `version` may be supplied by the caller from an already-measured
+        result, to avoid running `caddy version` again in the same round.
         """
         binary = self.config.caddy_bin_path
         if not binary.exists():
@@ -262,7 +284,7 @@ class CaddyComponent:
         return version != f"v{CADDY_VERSION}"
 
     def _service_hint(self) -> str:
-        """服务相关的修复提示（按平台给不同的命令）。"""
+        """Service-related repair hint (different commands per platform)."""
         if self.platform.name == "mac":
             return "launchctl print system/com.devproxy.caddy"
         return "systemctl --user status caddy"
@@ -273,63 +295,72 @@ class CaddyComponent:
         if not binary.exists():
             return Status(
                 ok=False,
-                detail=f"caddy 二进制不存在: {binary}",
-                hint=f"devproxy setup 会自动下载 {CADDY_VERSION}",
+                detail=f"caddy binary does not exist: {binary}",
+                hint=f"devproxy setup will download {CADDY_VERSION} automatically",
             )
         version = self.platform.binary_version(binary)
         if self._need_binary(version):
             return Status(
                 ok=False,
-                detail=(f"caddy 版本不符: 期望 v{CADDY_VERSION}，实际 {version or '无法读取'}"),
-                hint="devproxy setup 会替换为固定版本",
+                detail=(
+                    f"caddy version mismatch: expected v{CADDY_VERSION}, "
+                    f"actual {version or 'unreadable'}"
+                ),
+                hint="devproxy setup will replace it with the pinned version",
             )
         if not self._caddyfile_current():
             return Status(
                 ok=False,
-                detail=f"主 Caddyfile 不存在或已过期: {self.paths.caddyfile}",
-                hint="devproxy setup 会重新生成主 Caddyfile",
+                detail=f"main Caddyfile is missing or stale: {self.paths.caddyfile}",
+                hint="devproxy setup will regenerate the main Caddyfile",
             )
         if not self._unit_current():
             return Status(
                 ok=False,
-                detail="caddy 服务单元未指向本工具的 Caddyfile 或二进制",
+                detail="caddy service unit does not point at this tool's Caddyfile or binary",
                 hint=(
-                    "devproxy setup 会重装 caddy LaunchDaemon"
+                    "devproxy setup will reinstall the caddy LaunchDaemon"
                     if self.platform.name == "mac"
-                    else "devproxy setup 会重装 systemd user 单元"
+                    else "devproxy setup will reinstall the systemd user unit"
                 ),
             )
         if not self.platform.service_active("caddy"):
             return Status(
                 ok=False,
-                detail="caddy 服务未运行",
+                detail="caddy service is not running",
                 hint=(
                     "launchctl kickstart -k system/com.devproxy.caddy"
                     if self.platform.name == "mac"
                     else "systemctl --user start caddy"
                 ),
             )
-        # linger 也必须是就绪判据的一部分：没开 linger 时用户服务不会
-        # 开机自启，重启机器后 caddy 根本不在了 —— 与 plan 的判据保持一致。
+        # linger must also be part of the readiness criterion: without linger
+        # the user service does not start at boot, and after a reboot caddy
+        # would not be there at all -- keep this consistent with plan's
+        # criterion.
         if not self.platform.linger_enabled():
             return Status(
                 ok=False,
-                detail="linger 未启用（用户服务不会开机自启）",
-                hint="devproxy setup（会执行 loginctl enable-linger，需要 sudo）",
+                detail="linger is not enabled (user services will not start at boot)",
+                hint="devproxy setup (runs loginctl enable-linger, requires sudo)",
             )
-        return Status(ok=True, detail=f"caddy {CADDY_VERSION} 已就绪")
+        return Status(ok=True, detail=f"caddy {CADDY_VERSION} is ready")
 
     # -- plan ----------------------------------------------------------
     def plan(self) -> list[Action]:
-        """按缺失项给出动作；全部就绪时返回空列表。
+        """Return actions for missing items; return an empty list when everything is ready.
 
-        主 Caddyfile 与单元内容都是**独立判据**：本机就出现过二进制度对、
-        服务 active，但单元仍指向旧 Caddyfile、主 Caddyfile 根本不存在，
-        导致 setup 报“已就绪”而 up 时 reload 必然失败。
-        setcap 与下载/服务绑定 —— 新下载的二进制或服务没起来时才需要重新授权。
+        The main Caddyfile and the unit content are **independent criteria**:
+        this machine has actually seen the binary version right and the
+        service active, while the unit still pointed at the old Caddyfile and
+        the main Caddyfile did not exist at all, making setup report "ready"
+        while `up`'s reload was bound to fail. setcap is tied to
+        download/service -- re-authorization is only needed when the binary
+        was newly downloaded or the service is not up.
         """
         binary = self.config.caddy_bin_path
-        # 一次快照：同一轮里重复探测会在状态变化时给出自相矛盾的分支。
+        # One snapshot: probing repeatedly within the same round would produce
+        # self-contradictory branches if state changes.
         version = self.platform.binary_version(binary) if binary.exists() else ""
         need_binary = self._need_binary(version)
         need_caddyfile = not self._caddyfile_current()
@@ -342,19 +373,21 @@ class CaddyComponent:
         if need_binary:
             actions.append(
                 Action(
-                    description=f"下载 caddy {CADDY_VERSION} 并校验 sha256",
+                    description=f"download caddy {CADDY_VERSION} and verify sha256",
                     kind="run",
                     command=["download-caddy", str(binary)],
                 )
             )
         if need_binary or need_service:
-            # 没完全就绪就重新授权：上一轮下载成功但 setcap 失败（用户拒了
-            # sudo）时，二进制已在位而服务没起 —— 这一轮必须补 setcap。
-            # macOS 没有 setcap：绑 80/443 靠以 root 运行的 LaunchDaemon。
+            # Re-authorize unless fully ready: when the previous round's
+            # download succeeded but setcap failed (the user declined sudo),
+            # the binary is in place but the service is not up -- this round
+            # must redo setcap. macOS has no setcap: binding 80/443 relies on
+            # the LaunchDaemon running as root.
             if self.platform.name != "mac":
                 actions.append(
                     Action(
-                        description="授权 caddy 绑定 80/443（setcap）",
+                        description="authorize caddy to bind 80/443 (setcap)",
                         kind="run",
                         command=["setcap", "cap_net_bind_service=+ep", str(binary)],
                         privileged=True,
@@ -363,7 +396,7 @@ class CaddyComponent:
         if need_caddyfile:
             actions.append(
                 Action(
-                    description="生成主 Caddyfile",
+                    description="generate the main Caddyfile",
                     kind="write",
                     path=self.paths.caddyfile,
                     content=self._main_caddyfile(),
@@ -373,43 +406,53 @@ class CaddyComponent:
             actions.append(
                 Action(
                     description=(
-                        "安装并启动 caddy LaunchDaemon（macOS）"
+                        "install and start the caddy LaunchDaemon (macOS)"
                         if self.platform.name == "mac"
-                        else "安装并启动 caddy.service（systemd user）"
+                        else "install and start caddy.service (systemd user)"
                     ),
                     kind="run",
                     command=["install-service", "caddy"],
-                    # macOS 的 caddy 是 /Library/LaunchDaemons 下的 root 守护进程
-                    # （绑 80/443 必须 root）；Linux 是 ~/.config/systemd/user 下的
-                    # **用户** unit，不需要提权。标错方向的两种后果都不小：
-                    # 漏标 → sudo 清单谎报、非交互护栏被绕过、中途弹密码框；
-                    # 多标 → Linux 上凭空多一项 sudo，非交互环境误退 4。
+                    # macOS's caddy is a root daemon under /Library/LaunchDaemons
+                    # (binding 80/443 requires root); on Linux it is a **user**
+                    # unit under ~/.config/systemd/user and needs no elevation.
+                    # Marking it the wrong way has serious consequences in both
+                    # directions:
+                    # missing -> the sudo list lies, the non-interactive guard
+                    # is bypassed, and a password prompt appears mid-run;
+                    # extra -> a phantom sudo entry on Linux, and
+                    # non-interactive environments wrongly exit with 4.
                     privileged=self.platform.name == "mac",
                 )
             )
         if need_linger:
             actions.append(
                 Action(
-                    description="启用 linger（用户服务开机自启，无需登录）",
+                    description="enable linger (user services start at boot without login)",
                     kind="run",
                     command=["enable-linger"],
                     privileged=True,
                 )
             )
         if (need_binary or need_caddyfile) and caddy_active and not need_unit:
-            # 运行中的 Caddy 不会自己发现二进制或主 Caddyfile 变了：
-            # - 换了二进制：跑着的还是旧版本；
-            # - 只改了主 Caddyfile（http_port / admin_addr / storage …）：
-            #   单元与服务都没变，只写文件等于什么都没生效。
-            # 单元/服务本身要重装的不在这里重启 —— install-service 分支
-            # 会处理（was_active → restart），避免重复重启两次。
-            # 放在最后：setcap 必须先做完，否则重启后绑不上 80/443。
+            # A running Caddy does not notice that the binary or main
+            # Caddyfile changed:
+            # - binary replaced: the running process is still the old version;
+            # - only the main Caddyfile changed (http_port / admin_addr /
+            #   storage ...): neither the unit nor the service changed, so only
+            #   writing the file means nothing takes effect.
+            # Cases where the unit/service itself must be reinstalled are not
+            # restarted here -- the install-service branch handles that
+            # (was_active -> restart), avoiding a double restart.
+            # Put this last: setcap must be done first, otherwise it cannot
+            # bind 80/443 after the restart.
             if need_binary and need_caddyfile:
-                description = "重启 caddy 服务以使用新二进制与新主 Caddyfile"
+                description = "restart the caddy service to use the new binary and main Caddyfile"
             elif need_binary:
-                description = f"重启 caddy 服务以使用新下载的 {CADDY_VERSION}"
+                description = (
+                    f"restart the caddy service to use the newly downloaded {CADDY_VERSION}"
+                )
             else:
-                description = "重启 caddy 服务以加载新的主 Caddyfile"
+                description = "restart the caddy service to load the new main Caddyfile"
             actions.append(
                 Action(
                     description=description,
@@ -428,8 +471,10 @@ class CaddyComponent:
                 action.path.write_text(action.content, encoding="utf-8")
                 continue
             if action.command[:1] == ["download-caddy"]:
-                # 下载属组件职责：固定版本 + sha256 校验，失败即抛，
-                # 不留半个文件，后续动作（setcap 等）不会在坏二进制上执行。
+                # Downloading is the component's job: pinned version + sha256
+                # verification, raise on failure, leave no half-written file,
+                # so later actions (setcap etc.) never run against a bad
+                # binary.
                 binary.parent.mkdir(parents=True, exist_ok=True)
                 self._downloader(binary)
                 continue
@@ -437,8 +482,8 @@ class CaddyComponent:
                 code, msg = self.platform.privilege().run(action.command)
                 if code != 0:
                     raise RuntimeError(
-                        "setcap 失败（caddy 无法绑定 80/443）："
-                        f"{msg}；请先安装 libcap2-bin（sudo apt install libcap2-bin）"
+                        "setcap failed (caddy cannot bind 80/443): "
+                        f"{msg}; install libcap2-bin first (sudo apt install libcap2-bin)"
                     )
                 continue
             if action.command[:1] == ["install-service"]:
@@ -465,25 +510,27 @@ class CaddyComponent:
                 )
                 self.platform.enable_service("caddy")
                 if was_active:
-                    # 单元文件已换（如 ExecStart 指向新 Caddyfile），
-                    # enable --now 对已 active 的单元不会重启，必须显式 restart。
+                    # The unit file has changed (e.g. ExecStart points at the
+                    # new Caddyfile); enable --now does not restart an
+                    # already-active unit, so an explicit restart is required.
                     self.platform.restart_service("caddy")
                 continue
             if action.command[:1] == ["enable-linger"]:
                 code, msg = self.platform.enable_linger()
                 if code != 0:
-                    raise RuntimeError(f"loginctl enable-linger 失败: {msg}")
+                    raise RuntimeError(f"loginctl enable-linger failed: {msg}")
                 continue
             if action.command[:2] == ["restart-service", "caddy"]:
                 self.platform.restart_service("caddy")
                 continue
-            raise RuntimeError(f"未知动作: {action.command}")
+            raise RuntimeError(f"unknown action: {action.command}")
 
     def _has_configured_site(self) -> bool:
-        """是否有任何真实站点（注释/空行不算）。
+        """Whether there is any real site (comments/blank lines do not count).
 
-        干净机器上 Caddyfile 只 import 两个空文件，Caddy 不会监听 443 ——
-        此时 TLS 探测不可执行，应保持“ok + 提示”而不是把 setup 判成失败。
+        On a clean machine the Caddyfile only imports two empty files, so
+        Caddy does not listen on 443 -- TLS probing is not possible then, and
+        this should stay "ok + note" rather than marking setup as failed.
         """
         for path in (self.paths.routes_caddy, self.paths.sites_caddy):
             try:
@@ -495,50 +542,57 @@ class CaddyComponent:
         return False
 
     def _has_localhost_site(self) -> bool:
-        """sites.caddy 里是否有 localhost 站点块（精确匹配站点地址）。"""
+        """Whether sites.caddy contains a localhost site block (exact match on the site address)."""
         return has_localhost_site(self.paths.sites_caddy)
 
     def _probe_url(self) -> str | None:
-        """TLS 探测目标：优先首条已注册路由，其次确有 localhost 站点时的 localhost。
+        """TLS probe target: prefer the first registered route, otherwise localhost when a localhost site actually exists.
 
-        判据由 `components.base.probe_url` 统一提供 —— 证书组件用的是
-        同一份实现，避免两处逻辑再次漂移。没有可探目标时返回 None。
+        The criterion is provided in one place by `components.base.probe_url`
+        -- the certificates component uses the same implementation, avoiding
+        drift between the two again. Return None when there is nothing to
+        probe.
         """
         return probe_url(self.paths.routes_json, self.paths.sites_caddy)
 
     # -- verify --------------------------------------------------------
     def verify(self) -> Status:
-        """apply 后自检：二进制、服务 active、且真的能完成 TLS 握手。"""
+        """Post-apply self-check: binary present, service active, and the TLS handshake actually succeeds."""
         if not self.config.caddy_bin_path.exists():
             return Status(
                 ok=False,
-                detail=f"caddy 二进制缺失: {self.config.caddy_bin_path}",
-                hint=f"devproxy setup 会下载；{self._service_hint()} 查看服务",
+                detail=f"caddy binary is missing: {self.config.caddy_bin_path}",
+                hint=(
+                    f"devproxy setup will download it; "
+                    f"use {self._service_hint()} to inspect the service"
+                ),
             )
         if not self.platform.service_active("caddy"):
             return Status(
                 ok=False,
-                detail="caddy 服务未处于 active",
+                detail="caddy service is not active",
                 hint=self._service_hint(),
             )
         if not self._has_configured_site():
             return Status(
                 ok=True,
-                detail="caddy 服务运行中（尚无站点，跳过 TLS 探测）",
+                detail="caddy service is running (no sites yet, skipping TLS probe)",
             )
         url = self._probe_url()
         if url is None:
             return Status(
                 ok=True,
-                detail="caddy 服务运行中（无路由且无 localhost 站点，跳过 TLS 探测）",
+                detail=(
+                    "caddy service is running (no routes and no localhost site, skipping TLS probe)"
+                ),
             )
         if not self.platform.http_ok(url):
             return Status(
                 ok=False,
-                detail=f"{url} TLS 握手失败",
-                hint=f"{self._service_hint()}；检查 Caddyfile 与 443 端口占用",
+                detail=f"TLS handshake failed for {url}",
+                hint=f"{self._service_hint()}; check the Caddyfile and whether port 443 is in use",
             )
-        return Status(ok=True, detail=f"caddy 服务运行中，{url} 可访问")
+        return Status(ok=True, detail=f"caddy service is running, {url} is reachable")
 
     def _main_caddyfile(self) -> str:
         from devproxy.gateway.caddy import MainCaddyfileSpec

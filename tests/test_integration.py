@@ -21,7 +21,7 @@ CADDY = Path(os.environ.get("DEVPROXY_TEST_CADDY", Path.home() / ".local" / "bin
 
 
 def _test_domain_resolves() -> bool:
-    """*.test 必须解析到本机 —— 自检要靠真实主机名做 TLS 主机名校验。"""
+    """*.test must resolve to this machine -- the self-check uses the real hostname for TLS verification."""
     try:
         infos = socket.getaddrinfo("devproxy-selftest-probe.test", 443, type=socket.SOCK_STREAM)
     except OSError:
@@ -30,10 +30,10 @@ def _test_domain_resolves() -> bool:
 
 
 pytestmark = [
-    pytest.mark.skipif(not CADDY.exists(), reason=f"需要 caddy 二进制：{CADDY}"),
+    pytest.mark.skipif(not CADDY.exists(), reason=f"needs the caddy binary: {CADDY}"),
     pytest.mark.skipif(
         not _test_domain_resolves(),
-        reason="需要 *.test 解析到 127.0.0.1/::1（如 dnsmasq address=/.test/127.0.0.1）",
+        reason="needs *.test to resolve to 127.0.0.1/::1 (e.g. dnsmasq address=/.test/127.0.0.1)",
     ),
 ]
 
@@ -60,10 +60,10 @@ def _fetch(host, port, ctx):
 
 
 def test_exact_block_serves_route_and_withholds_cert_for_unknown():
-    """精确块：已注册域名可用；未注册域名拿不到证书。"""
+    """Exact blocks: a registered domain works; an unregistered one gets no certificate."""
     from devproxy.gateway.selftest import run_selftest
 
     result = run_selftest(CADDY)
     for desc, ok in result.checks:
-        assert ok, f"检查失败：{desc}"
+        assert ok, f"check failed: {desc}"
     assert result.failed == []

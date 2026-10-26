@@ -1,4 +1,4 @@
-"""遗留环境的探测：单元解析、Caddyfile 定位、storage 留档。"""
+"""Legacy environment detection: unit parsing, Caddyfile location, storage archive."""
 
 from __future__ import annotations
 
@@ -18,11 +18,12 @@ from devproxy.platform.base import Platform
 
 
 class MigrationError(RuntimeError):
-    """迁移失败。
+    """Migration failure.
 
-    `notes` 保存失败前已经收集到的用户提示（丢了哪些块、用了哪个二进制
-    等）—— 失败路径同样要把它们打出来，否则用户只看到“失败”，不知道
-    sites.caddy 被改成了什么样。
+    `notes` holds user-facing notes already collected before the failure (which
+    blocks were discarded, which binary was used, etc.) -- the failure path must
+    print them too, otherwise the user only sees "failed" and does not know what
+    sites.caddy was changed into.
     """
 
     def __init__(self, message: str, notes: list[str] | None = None):
@@ -32,11 +33,13 @@ class MigrationError(RuntimeError):
 
 @dataclass
 class LegacyState:
-    """检测到的遗留环境。
+    """Detected legacy environment.
 
-    `error` 非空表示“单元存在，但无法确认它的配置/内容”。这种状态必须
-    让迁移停下：把“解析失败”折叠成“没有遗留环境”，就等于按干净机器
-    身份无备份覆盖用户手工维护的单元 —— 迁移最不能犯的错。
+    A non-empty `error` means "the unit exists, but its config/content cannot be
+    confirmed". This state must stop migration: folding "parse failed" into "no
+    legacy environment" amounts to treating it as a clean machine and overwriting
+    the user's hand-maintained unit without a backup -- the worst mistake
+    migration can make.
     """
 
     unit_path: Path
@@ -46,19 +49,19 @@ class LegacyState:
 
 
 def _exec_start_args(unit_text: str) -> list[str] | None:
-    """ExecStart= 的命令行参数（systemd 的 "-" 前缀与引号都要正确处理）。"""
+    """Command-line arguments of ExecStart= (systemd's "-" prefix and quotes must be handled correctly)."""
     for raw in unit_text.splitlines():
         line = raw.strip()
         if not line.startswith("ExecStart="):
             continue
         value = line[len("ExecStart=") :]
         if value.startswith("-"):
-            # systemd：ExecStart=-cmd 表示启动失败不记错
+            # systemd: ExecStart=-cmd means a start failure is not logged as an error
             value = value[1:].lstrip()
         try:
             args = shlex.split(value)
         except ValueError:
-            # 引号不配对：退回朴素切分，至少别把整行丢掉
+            # Unbalanced quotes: fall back to naive splitting; at least do not drop the whole line
             args = value.split()
         if args:
             return args
@@ -66,7 +69,7 @@ def _exec_start_args(unit_text: str) -> list[str] | None:
 
 
 def _config_arg(args: list[str]) -> str | None:
-    """从参数列表里取出 --config 的值（同时支持空格与 = 两种写法）。"""
+    """Extract the value of --config from the argument list (supports both space and = forms)."""
     for i, arg in enumerate(args):
         if arg == "--config":
             value = args[i + 1] if i + 1 < len(args) else ""
@@ -80,11 +83,11 @@ def _config_arg(args: list[str]) -> str | None:
 
 
 def unit_config_path(unit_text: str, home: Path) -> Path | None:
-    """从 ExecStart= 里解析 --config 指向的路径（展开 %h）。
+    """Parse the path --config points to from ExecStart= (expanding %h).
 
-    Caddy/pflag 同时接受 `--config <path>` 与 `--config=<path>`；
-    systemd 还允许给二进制与路径加引号（路径里可以有空格）。
-    用 shlex 按真实词法解析，不能用裸 split()。
+    Caddy/pflag accepts both `--config <path>` and `--config=<path>`; systemd
+    also allows quoting the binary and path (paths may contain spaces). Use
+    shlex to parse real lexical rules, not a bare split().
     """
     args = _exec_start_args(unit_text)
     if args is None:
@@ -96,11 +99,12 @@ def unit_config_path(unit_text: str, home: Path) -> Path | None:
 
 
 def unit_env(unit_text: str) -> dict[str, str]:
-    """提取单元里的 Environment= 键值。
+    """Extract Environment= key-value pairs from the unit.
 
-    systemd 的 Environment= 是按 shell 风格分词的（支持引号与转义），
-    一行里也可以写多个 K=V。裸 split() 会把带空格的值拆坏，重写单元后
-    systemd 直接拒绝加载。
+    systemd's Environment= is tokenized shell-style (quotes and escapes
+    supported), and multiple K=V pairs can appear on one line. A bare split()
+    would break values containing spaces, and systemd would refuse to load the
+    rewritten unit.
     """
     env: dict[str, str] = {}
     for raw in unit_text.splitlines():
@@ -119,7 +123,7 @@ def unit_env(unit_text: str) -> dict[str, str]:
 
 
 def unit_environment_files(unit_text: str) -> list[str]:
-    """单元引用的 EnvironmentFile= 路径列表（去掉 systemd 的 "-" 前缀）。"""
+    """List of EnvironmentFile= paths referenced by the unit (with systemd's "-" prefix stripped)."""
     files: list[str] = []
     for raw in unit_text.splitlines():
         line = raw.strip()
@@ -137,7 +141,7 @@ def unit_environment_files(unit_text: str) -> list[str]:
 
 
 def unit_exec_start(unit_text: str) -> list[str] | None:
-    """从 ExecStart= 里解析出命令行参数列表（没有则返回 None）。"""
+    """Parse the command-line argument list from ExecStart= (None if absent)."""
     return _exec_start_args(unit_text)
 
 
@@ -148,15 +152,17 @@ def _home(platform: Platform, home: Path | None = None) -> Path:
 
 
 def _read_unit_text(platform: Platform, path: Path, *, interactive: bool = True) -> str | None:
-    """读单元内容；普通读不到时（权限不足）改走提权会话。
+    """Read unit content; when an ordinary read fails (insufficient permission), go through an elevated session.
 
-    macOS 的 system scope 单元在 /Library/LaunchDaemons —— 权限或归属不对时
-    普通用户读不了。读不到时调用方必须按“无法确认的遗留单元”处理，
-    绝不能当成“没有遗留环境” —— 那等于把用户手工维护的 Caddyfile 与
-    环境变量悄悄接管掉。
+    macOS system-scope units live in /Library/LaunchDaemons -- with wrong
+    permissions or ownership an ordinary user cannot read them. When unreadable,
+    the caller must treat it as an "unconfirmable legacy unit", never as "no
+    legacy environment" -- that would silently take over the user's
+    hand-maintained Caddyfile and environment variables.
 
-    interactive=False 时走**非交互**的特权读（sudo -n）：只读命令
-    （doctor）绝不能把密码框弹到用户脸上。
+    With interactive=False, use a **non-interactive** privileged read (sudo -n):
+    read-only commands (doctor) must never pop a password prompt in the user's
+    face.
     """
     try:
         return path.read_text(encoding="utf-8")
@@ -173,7 +179,7 @@ def _read_unit_text(platform: Platform, path: Path, *, interactive: bool = True)
     try:
         return platform.privilege().read(path)
     except (OSError, RuntimeError):
-        # 提权也读不到（sudo 不可用等）—— 调用方按“无法确认”处理
+        # An elevated read also failed (sudo unavailable, etc.) -- caller treats it as "unconfirmable"
         return None
 
 
@@ -185,14 +191,16 @@ def detect_legacy(
     home: Path | None = None,
     interactive: bool = True,
 ) -> LegacyState | None:
-    """检测是否存在本工具未管理的 caddy 服务。
+    """Detect whether a caddy service not managed by this tool exists.
 
-    返回 None 只表示“没有遗留单元”或“单元已经指向工具的 Caddyfile”。
-    单元存在却读不到/解析不出配置时，返回带 `error` 的 LegacyState ——
-    调用方（迁移）必须据此拒绝动手，不能当成干净机器。
+    Returning None only means "no legacy unit" or "the unit already points at
+    the tool's Caddyfile". When the unit exists but cannot be read / its config
+    cannot be parsed, return a LegacyState with `error` -- the caller (migration)
+    must refuse to act based on it, not treat it as a clean machine.
 
-    interactive=False 用于只读场景（doctor）：读不到单元时不弹密码框，
-    但同样返回“无法确认”的状态，让报告层有机会如实呈现。
+    interactive=False is for read-only scenarios (doctor): do not pop a password
+    prompt when the unit is unreadable, but still return an "unconfirmable"
+    state so the report layer can present it truthfully.
     """
     unit_path = unit_dir / "caddy.service" if unit_dir else platform.service_unit_path("caddy")
     if not unit_path.exists():
@@ -201,7 +209,7 @@ def detect_legacy(
     if unit_text is None:
         return LegacyState(
             unit_path=unit_path,
-            error=f"无法读取遗留 caddy 单元 {unit_path}，无法确认它的配置与来源",
+            error=f"cannot read legacy caddy unit {unit_path}; its config and origin cannot be confirmed",
         )
     config_path = unit_config_path(unit_text, _home(platform, home))
     if config_path is None:
@@ -209,13 +217,13 @@ def detect_legacy(
             unit_path=unit_path,
             env=unit_env(unit_text),
             error=(
-                f"遗留 caddy 单元 {unit_path} 存在，但 ExecStart= 里没有"
-                f"可解析的 --config，无法确认它使用的 Caddyfile"
+                f"legacy caddy unit {unit_path} exists, but ExecStart= has no "
+                f"parsable --config; the Caddyfile it uses cannot be confirmed"
             ),
         )
     try:
         if config_path.resolve() == paths.caddyfile.resolve():
-            return None  # 已经是本工具管理的
+            return None  # already managed by this tool
     except OSError:
         pass
     env_files = unit_environment_files(unit_text)
@@ -225,9 +233,10 @@ def detect_legacy(
             config_path=config_path,
             env=unit_env(unit_text),
             error=(
-                f"遗留 caddy 单元 {unit_path} 使用 EnvironmentFile="
-                f"{', '.join(env_files)}；迁移无法安全保留该文件里的变量。"
-                f"请把变量内联到 Environment= 或移除 EnvironmentFile 后重试"
+                f"legacy caddy unit {unit_path} uses EnvironmentFile="
+                f"{', '.join(env_files)}; migration cannot safely preserve the "
+                f"variables in that file. Inline the variables into Environment= "
+                f"or remove EnvironmentFile and retry"
             ),
         )
     return LegacyState(
@@ -238,7 +247,7 @@ def detect_legacy(
 
 
 def _legacy_storage(state: LegacyState) -> Path | None:
-    """旧 Caddyfile 全局块里声明的 storage 路径（读不到时返回 None）。"""
+    """storage path declared in the legacy Caddyfile's global block (None when unreadable)."""
     if state.config_path is None or not state.config_path.exists():
         return None
     try:
@@ -251,29 +260,31 @@ def _legacy_storage(state: LegacyState) -> Path | None:
 def resolve_storage_details(
     config: Config, state: LegacyState
 ) -> tuple[Config, Path | None, str | None]:
-    """沿用遗留 Caddyfile 的 storage 路径。
+    """Reuse the legacy Caddyfile's storage path.
 
-    返回 (生效的配置, 遗留 storage 路径, 提示语)。没有遗留 storage 时
-    路径为 None；没有差异时配置原样返回、提示为 None。
+    Returns (effective config, legacy storage path, note). When there is no
+    legacy storage the path is None; when there is no difference the config is
+    returned unchanged and the note is None.
 
-    一次返回路径，调用方就不必再读一遍遗留 Caddyfile，也不会把
-    “等值判断”写成一个恒真条件。差异必须说出来 —— 悄悄换掉 storage
-    等于让 Caddy 重新生成 CA，浏览器里的信任与个人站点已有的
-    tls internal 证书全部失效。
+    Returning the path once means the caller no longer needs to read the legacy
+    Caddyfile again, and cannot turn an "equality check" into an always-true
+    condition. The difference must be stated -- silently switching storage means
+    letting Caddy regenerate the CA, invalidating browser trust and the tls
+    internal certificates already held by personal sites.
     """
     legacy = _legacy_storage(state)
     if legacy is None or legacy == config.storage_path:
         return config, legacy, None
     note = (
-        f"已沿用遗留 Caddyfile 的 storage 路径 {legacy}"
-        f"（当前配置是 {config.storage_path}）：换了位置 Caddy 会重新生成 CA，"
-        f"浏览器信任与已有站点证书都会失效"
+        f"reusing the storage path {legacy} from the legacy Caddyfile "
+        f"(current config is {config.storage_path}): moving it makes Caddy "
+        f"regenerate the CA, invalidating browser trust and existing site certificates"
     )
     return replace(config, storage=str(legacy)), legacy, note
 
 
 def save_legacy_storage(paths: Paths, storage: Path | None) -> None:
-    """留档生效的 storage 路径 —— 之后的 setup 必须用同一个地方。"""
+    """Archive the effective storage path -- later setup must use the same location."""
     path = paths.caddy_storage
     if storage is None:
         path.unlink(missing_ok=True)
@@ -286,18 +297,20 @@ def save_legacy_storage(paths: Paths, storage: Path | None) -> None:
 
 def _warn_archive_unusable(path: Path, exc: Exception) -> None:
     warnings.warn(
-        f"storage 留档不可读：{path}（{exc}）。为避免 Caddy 重建 CA，请确认后删除或修复该文件。",
+        f"storage archive is unreadable: {path} ({exc}). To avoid Caddy regenerating "
+        f"the CA, verify and then delete or repair this file",
         UserWarning,
         stacklevel=3,
     )
 
 
 def load_legacy_storage(paths: Paths) -> Path | None:
-    """读回留档的 storage 路径。
+    """Read back the archived storage path.
 
-    文件不存在 → None（正常情况）。文件存在但损坏/无权限 → 发出显式
-    警告后返回 None：调用方必须先判断文件是否存在，才能区分“没有留档”
-    与“留档坏了”（`cli/_context.py` 正是这么做的）。
+    File missing -> None (normal). File exists but is corrupt/unreadable -> emit
+    an explicit warning and return None: the caller must first check whether the
+    file exists to distinguish "no archive" from "broken archive"
+    (`cli/_context.py` does exactly that).
     """
     path = paths.caddy_storage
     try:
@@ -309,14 +322,14 @@ def load_legacy_storage(paths: Paths) -> Path | None:
         return None
     try:
         data = json.loads(raw)
-    except ValueError as exc:  # UnicodeDecodeError 也是 ValueError 子类
+    except ValueError as exc:  # UnicodeDecodeError is also a ValueError subclass
         _warn_archive_unusable(path, exc)
         return None
     if not isinstance(data, dict):
-        _warn_archive_unusable(path, ValueError("顶层不是 JSON 对象"))
+        _warn_archive_unusable(path, ValueError("top level is not a JSON object"))
         return None
     value = data.get("storage")
     if not isinstance(value, str) or not value:
-        _warn_archive_unusable(path, ValueError("缺少有效的 storage 字段"))
+        _warn_archive_unusable(path, ValueError("missing a valid storage field"))
         return None
     return Path(value).expanduser()
