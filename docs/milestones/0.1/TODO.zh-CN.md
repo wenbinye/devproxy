@@ -109,7 +109,7 @@
   - 现状：CI 在 Linux 与 macOS × Python 3.11/3.12/3.13 上全绿（2026-10-26）。
   - **真机两轮（2026-10-26 与 10-27）**：SSH 到 `my-mac`（WenbindeMBP，macOS 26.1/25B78）
     把 **A 组 22 条全部跑完，全部有结论**（结论见
-    [docs/zh-CN/verification-checklist.md](../docs/zh-CN/verification-checklist.md) 的 E5）。
+    [docs/zh-CN/verification-checklist.md](../../zh-CN/verification-checklist.md) 的 E5）。
     三个真发现：
     - **macOS 自带 curl 不认钥匙串里的信任**（exit 60）—— 钥匙串只管 Safari/Chrome；
       要让 curl 信任，CA 得进 `/etc/ssl/cert.pem`。

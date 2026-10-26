@@ -144,7 +144,7 @@ Tracks the work items of this milestone. Format:
   - **Two real-machine rounds (2026-10-26 and 10-27)**: over SSH to `my-mac`
     (WenbindeMBP, macOS 26.1 / 25B78) the whole **group A checklist was run — all 22
     items now have a conclusion** (see the E5 section of
-    [docs/verification-checklist.md](../docs/verification-checklist.md)). Three findings
+    [docs/verification-checklist.md](../../verification-checklist.md)). Three findings
     worth keeping:
     - **the bundled curl does not trust the keychain** (exit 60) -- the keychain covers
       Safari/Chrome; for curl the CA has to go into `/etc/ssl/cert.pem`;

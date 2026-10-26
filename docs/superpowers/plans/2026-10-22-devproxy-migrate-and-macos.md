@@ -1596,7 +1596,7 @@ devproxy setup --rollback ~/.local/state/devproxy/backups/2026-10-22T12-00-00Z
 - Linux（systemd user scope、setcap、systemd-resolved）
 - macOS（launchd、/etc/resolver、系统钥匙串）
 
-真机验证清单见 [docs/verification-checklist.md](docs/verification-checklist.md)。
+真机验证清单见 [docs/verification-checklist.md](../../verification-checklist.md)。
 ```
 
 - [ ] **Step 2: 瘦身为转发壳的 Justfile**
