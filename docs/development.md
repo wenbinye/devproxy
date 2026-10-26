@@ -1,6 +1,5 @@
 # 开发与 CI
 
-## 开发与 CI
 
 单元测试基本上是**封闭的**：不碰真实系统、不需要 caddy 二进制、不需要网络，
 也不会写进你的家目录（`HOME` 在测试里被指向临时目录）。
@@ -25,9 +24,9 @@ CI 在 `.github/workflows/ci.yml`：push 到 `main`、提 PR 或手动触发时�
 
 根目录的 `devp` 脚本**已删除** —— 它是 `devproxy` 的 1.0 前身：直接 PATCH 现役
 Caddy 的 Admin API 注册路由，注册的东西新工具既看不见也删不掉。它的来龙去脉
-记在 [docs/legacy-devp.md](docs/legacy-devp.md)。`Justfile` 现在只是转发到
+记在 [legacy-devp.md](legacy-devp.md)。`Justfile` 现在只是转发到
 `uv run devproxy` 的兼容壳（跑的是**当前源码**，不是已安装的那份）。
-### 代码结构
+## 代码结构
 
 ```
 src/devproxy/

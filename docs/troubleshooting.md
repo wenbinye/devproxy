@@ -1,6 +1,7 @@
 # 故障排查
 
-## 故障排查
+## 常见症状
+
 
 - **`devproxy up` 报「就绪超时」**：应用多半没读 `PORT`。改用 `sh -c '... $PORT ...'`，
   或用 `--port N` 显式指定端口（此时应用必须自己绑这个端口）。
@@ -33,7 +34,7 @@
   （Linux `systemctl --user stop caddy`，macOS `launchctl bootout system/com.devproxy.caddy`），
   或者用 `--config` 指向一份用别的端口的 Caddyfile。
 
-真机验证清单见 [docs/verification-checklist.md](docs/verification-checklist.md) ——
+真机验证清单见 [verification-checklist.md](verification-checklist.md) ——
 里面列了自动化测试覆盖不到、必须在真实机器上逐条跑的行为。
 
 ---

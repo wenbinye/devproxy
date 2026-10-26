@@ -187,7 +187,7 @@ Caddy 的内部 CA **在第一次加载 `tls internal` 站点时**才生成 —�
 
 | 文档 | 内容 |
 |---|---|
-| [docs/commands.md](docs/commands.md) | 全部选项、退出码 |
+| [docs/commands.md](docs/commands.md) | 全部命令、选项、退出码 |
 | [docs/apps.md](docs/apps.md) | 应用接入：`expose`、`$PORT` 的两种写法、注意事项 |
 | [docs/dns-and-certs.md](docs/dns-and-certs.md) | DNS 路由、证书信任（含 Firefox）、`doctor` 与 `setup` 分工 |
 | [docs/configuration.md](docs/configuration.md) | `config.toml` 全部配置项、域名后缀白名单、storage 留档 |
@@ -197,4 +197,5 @@ Caddy 的内部 CA **在第一次加载 `tls internal` 站点时**才生成 —�
 | [docs/troubleshooting.md](docs/troubleshooting.md) | 故障排查 |
 | [docs/development.md](docs/development.md) | 开发与 CI、代码结构 |
 
+按场景找文档：[docs/README.md](docs/README.md)。
 真机验证清单：[docs/verification-checklist.md](docs/verification-checklist.md)。

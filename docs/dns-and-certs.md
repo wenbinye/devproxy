@@ -1,7 +1,6 @@
 # DNS 与证书
 
-## DNS 与证书
-### DNS
+## DNS
 
 | 平台 | 机制 | dnsmasq 监听 |
 |---|---|---|
@@ -40,7 +39,7 @@ dnsmasq 的配置是**增量合并**的：你的 `~/.config/dnsmasq/dnsmasq.conf
 域名条目、`filter-AAAA` 等都会保留，工具只保证 `port=`、`address=/.<后缀>/`、
 `listen-address=127.0.0.1`、`bind-interfaces`、`no-resolv` 与缺失的全局上游存在。
 它**只监听回环地址**，不会在局域网里变成一个开放递归解析器。
-### `doctor` 与 `setup` 各查什么
+## `doctor` 与 `setup` 各查什么
 
 - **`devproxy doctor` 只做静态检查**：DNS 路由文件在不在、服务在不在跑、CA 在不在、
   单元是否指向本工具的 Caddyfile 与二进制。**它不做 DNS 解析** —— 不发起任何
@@ -55,7 +54,7 @@ dnsmasq 的配置是**增量合并**的：你的 `~/.config/dnsmasq/dnsmasq.conf
 resolvectl query foo.test          # Linux
 dscacheutil -q host -a name foo.test   # macOS
 ```
-### 证书：精确站点块，不是通配符
+## 证书：精确站点块，不是通配符
 
 每条路由渲染成**一个精确的站点块**：
 
@@ -88,7 +87,7 @@ codeup.test {
 **Linux 上装入 NSS 库后必须完全退出并重启 Chrome** —— 关窗口不算，要从托盘退出进程；
 Chrome 只在启动时读取 NSS 库。
 
-#### Firefox 要单独信任（工具不替你装）
+### Firefox 要单独信任（工具不替你装）
 
 **Firefox 有自己的证书库**（`~/.mozilla/firefox/<profile>/cert9.db`）——
 它既不读 NSS 库，也不读系统信任库。因此 `devproxy trust` 跑完之后，

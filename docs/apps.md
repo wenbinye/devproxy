@@ -1,7 +1,6 @@
 # 应用接入
 
-## 应用接入
-### 服务已经在跑？给它开域名就行
+## 服务已经在跑？给它开域名就行
 
 不是所有服务都由 devproxy 启动 —— 数据库管理台、mock 服务、docker 里的东西，
 往往早就在跑了。这类用 `expose`：
@@ -27,7 +26,7 @@ devproxy expose datahub --port 9002
   mode = "expose"     # 不起进程，只给已在跑的服务开域名
   port = 9002
   ```
-### 两种应用，两种写法
+## 两种应用，两种写法
 
 **1. 原生读 `PORT` 环境变量的应用**（Next.js / CRA 等）——直接写命令：
 
@@ -53,7 +52,7 @@ devproxy up codeup-api -- sh -c 'gunicorn app:app --bind 127.0.0.1:$PORT'
 **`--` 是必须的**：`--` 之前是 devproxy 自己的参数（`name`、`--port`、`--ready-timeout`），
 `--` 之后的一切**原样**交给子进程，devproxy 不解析。这样应用自己的 `--port`
 不会被 devproxy 抢走。缺少 `--` 时工具直接报错退出（码 2）。
-### 应用侧的其它注意点
+## 应用侧的其它注意点
 
 - **Host 校验放行**：请求的 Host 头是 `<name>.test`。Vite 需要 `server.allowedHosts`、
   Django 需要 `ALLOWED_HOSTS` 里加上该域名。
