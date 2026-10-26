@@ -36,9 +36,17 @@ def test_render_single_route():
         "\n"
         "codeup.test {\n"
         "\ttls internal\n"
-        "\treverse_proxy 127.0.0.1:42133\n"
+        "\treverse_proxy 127.0.0.1:42133 {\n"
+        "\t\theader_up X-Forwarded-Port 443\n"
+        "\t}\n"
         "}\n"
     )
+
+
+def test_render_header_up_uses_configured_https_port():
+    """https_port 改了，X-Forwarded-Port 也要跟着改。"""
+    out = render_caddyfile(RouteTable(routes=[_route()]), https_port=8443)
+    assert "header_up X-Forwarded-Port 8443" in out
 
 
 def test_render_two_routes_separated_by_blank_line():

@@ -77,7 +77,7 @@ class RouteStore:
             try:
                 table = load_table(paths.routes_json)
                 fn(table)
-                rendered = render_caddyfile(table)
+                rendered = render_caddyfile(table, self.config.https_port)
 
                 ok, msg = self._validate(rendered)
                 if not ok:

@@ -190,15 +190,25 @@ def check_renderable(route: Route) -> None:
         )
 
 
-def render_caddyfile(table: RouteTable) -> str:
+DEFAULT_HTTPS_PORT = 443
+
+
+def render_caddyfile(table: RouteTable, https_port: int = DEFAULT_HTTPS_PORT) -> str:
     """渲染成 Caddyfile 片段：一个路由 = 一个精确站点块。
 
     刻意不用通配块与 on-demand —— 精确块让未注册域名拿不到证书。
+
+    header_up 补 X-Forwarded-Port：Caddy 默认**不发**这个头，应用看不到
+    客户端实际连的端口，就会回落到自己的监听端口 —— 端口动态分配时
+    （每次 sync 都变）应用拼出的绝对 URL（如 SSO 的 redirect_uri）带着
+    一个已失效的端口。写死配置值即可：应用可见的请求只可能来自
+    https_port（http_port 的请求会被 Caddy 自动重定向到 https）。
     """
     for route in table.routes:
         check_renderable(route)
     blocks = [
-        f"{r.domain} {{\n\ttls internal\n\treverse_proxy {r.upstream}\n}}"
+        f"{r.domain} {{\n\ttls internal\n\treverse_proxy {r.upstream} {{"
+        f"\n\t\theader_up X-Forwarded-Port {https_port}\n\t}}\n}}"
         for r in table.routes
     ]
     if not blocks:
