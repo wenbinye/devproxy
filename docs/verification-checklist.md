@@ -506,6 +506,43 @@ completed over non-interactive SSH (sudo on that machine needs a password):
   and `devproxy trust` has **not** been run in the graphical interface — all items in
   groups A / E that need graphical authorization remain unverified.
 
+### E5. Second real-machine round (2026-10-26)
+
+Trigger: the unit suite entered CI on macOS and turned up three platform gaps (all fixed
+— see `docs/milestones/0.1/TODO.md` #5). With the CI green, group A was run against the
+machine again.
+
+Setup: `my-mac` (WenbindeMBP, macOS 26.1 / 25B78, Intel x86_64). `devproxy` was
+re-installed from the **public GitHub repo** (it had been installed from the internal
+Codeup mirror on 2026-10-23, so it was still the pre-translation build); `uv` comes from
+**mise** (`mise activate zsh` in `~/.zshrc` — a non-interactive SSH session does not read
+it, so commands run as `zsh -lic "…"`). Elevation was driven through `sudo -S` with the
+password piped from a local `.env.local` (never in argv, never echoed).
+
+| Item | Result |
+|---|---|
+| A1 plist keys | ✅ all eight present: Description / EnvironmentVariables / KeepAlive / Label / ProgramArguments / RunAtLoad / StandardErrorPath / StandardOutPath |
+| A2 + A20 `launchctl print` | ✅ exit 0, top-level `state = running`, pid, stdout/stderr paths (there is also an inner `state = active` — the "running" line is the one the code keys on) |
+| A5 `/etc/resolver/test` | ✅ `nameserver 127.0.0.1` + **`port 5300` — the `port` directive IS honoured by mDNSResponder** (the biggest open question of that group) |
+| A7 `security verify-cert` (untrusted cert) | ✅ same `CSSMERR_TP_NOT_TRUSTED`, exit 1 |
+| A8 root binds 80/443 | ✅ caddy (root, pid 29141) LISTENs on **both** 80 and 443. Note: a plain user's `lsof` cannot see root processes — this check needs sudo |
+| A9 `dscacheutil -q host` | ✅ output carries `name/ipv6_address` and `name/ip_address` blocks, as the code expects |
+| A10 bundled curl | ❌ **does not trust the keychain**: `curl https://demo.test` → exit 60 "unable to get local issuer certificate". An unregistered domain correctly gets no certificate (TLS alert) ✓. To make curl trust it, the CA has to go into `/etc/ssl/cert.pem` (the keychain only covers Safari/Chrome) |
+| A11 brew's dnsmasq | ✅ `/usr/local/sbin/dnsmasq` → Cellar 2.91 (the Intel-Mac location) |
+| A13 `devproxy logs <service>` | ✅ still following after 3 s — it never ends on its own. Ctrl-C needs a real terminal, so that half stays unverified here |
+| A14 + A16 sudo timestamp cache | ✅ **hits within one session** (second `sudo -n` succeeds); ✗ **does not hit across sessions** — the cache is per-tty, so every new SSH session asks again |
+| A15 plist permissions | ✅ `-rw-r--r-- root wheel` |
+| A17 `devproxy doctor` | ✅ English wording, exit code **3** while the CA is untrusted, hint `devproxy trust` |
+| A18 plain user reads the plist | ✅ readable |
+| A19 log directory | ✅ the directory itself is **user-owned** (the tool creates it); caddy (root) only writes files into it; `caddy.log` is root-owned but 0644 |
+| A21 root files in the home dir | ✅ `root.crt` is **user-owned**; `caddy.log` is root-owned but readable — the user can delete both |
+| A22 dnsmasq config | ✅ written by this tool (`port=5300`, `address=/.test/…`); Homebrew's own config is not involved |
+| A6 keychain trust | ❌ **still impossible without a graphical session**: `security add-trusted-cert -d -r trustRoot` fails with `SecTrustSettingsSetTrustSettings: The authorization was denied since no user interaction was possible` **even with sudo**. The certificate does land in the keychain, but the **trust flag** does not — so `verify-cert` still reports NOT_TRUSTED and `doctor` still reports the cert missing. Same conclusion as E2b, now pinned to the trust-settings step |
+
+Still open: **A3** (`launchctl bootstrap` / `bootout`) and **A4** (`kickstart -k`),
+**A12** (BSD `install -d` / `cp`) — they restart a launchd job or write under
+`/etc/resolver`, so they were not run unattended.
+
 ## F. Real-machine checks for new features (12 items)
 
 Commands and guards added after 2026-10-23. Unit tests cover the logic branches, but the

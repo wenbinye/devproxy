@@ -413,6 +413,41 @@ devproxy: 1 个步骤失败：把 CA 根证书加入系统钥匙串（…）
 - 那台 Mac 至今仍未装上 `devproxy` 本体（只跑测试脚手架），也**没有在图形界面里**
   执行过 `devproxy trust` —— A / E 组里需要图形授权的项仍全部未验证。
 
+### E5. 第二轮真机（2026-10-26）
+
+起因：单元套件进了 CI 的 macOS 矩阵，翻出三处平台缺口（已修，见
+`docs/milestones/0.1/TODO.md` #5）。CI 绿了之后，把 A 组又在那台机器上跑了一遍。
+
+环境：`my-mac`（WenbindeMBP，macOS 26.1 / 25B78，Intel x86_64）。
+`devproxy` 已从**公开的 GitHub 仓库**重装（10-23 那次装的是内网 Codeup 镜像，
+还是英文化之前的版本）；`uv` 来自 **mise**（`~/.zshrc` 里有 `mise activate zsh` ——
+非交互 SSH 不读它，所以命令要用 `zsh -lic "…"` 跑）。提权走 `sudo -S`，密码从本地
+`.env.local` 经管道递过去（不进 argv、不回显）。
+
+| 项 | 结论 |
+|---|---|
+| A1 plist 的 8 个键 | ✅ 全在：Description / EnvironmentVariables / KeepAlive / Label / ProgramArguments / RunAtLoad / StandardErrorPath / StandardOutPath |
+| A2 + A20 `launchctl print` | ✅ exit 0、顶层 `state = running`、pid、stdout/stderr 路径（内层还有个 `state = active`；代码认的是顶层那行） |
+| A5 `/etc/resolver/test` | ✅ `nameserver 127.0.0.1` + **`port 5300` —— `port` 指令被 mDNSResponder 认了**（这一组最大的疑问，答案是：认） |
+| A7 `security verify-cert`（不受信证书） | ✅ 同样 `CSSMERR_TP_NOT_TRUSTED`，exit 1 |
+| A8 root 能绑 80/443 | ✅ caddy（root，pid 29141）**同时** LISTEN 80 与 443。注意：**普通用户的 lsof 看不到 root 进程**，这条要 sudo 才查得到 |
+| A9 `dscacheutil -q host` | ✅ 输出里有 `name/ipv6_address` 与 `name/ip_address` 块，与代码预期一致 |
+| A10 自带 curl | ❌ **不认钥匙串信任**：`curl https://demo.test` → exit 60「unable to get local issuer certificate」。未注册域名正确拿不到证书（TLS alert）✓。要让 curl 信任，CA 得进 `/etc/ssl/cert.pem`（钥匙串只管 Safari/Chrome） |
+| A11 Homebrew 的 dnsmasq | ✅ `/usr/local/sbin/dnsmasq` → Cellar 2.91（Intel Mac 的位置） |
+| A13 `devproxy logs <服务>` | ✅ 3 秒后仍在跟随 —— 它不会自己结束。Ctrl-C 需要真终端，这半条在这里验不了 |
+| A14 + A16 sudo 时间戳缓存 | ✅ **同一会话内命中**（第二次 `sudo -n` 直接过）；✗ **跨会话不命中** —— 缓存按 tty 记，每开一个新 SSH 会话都要再输一次 |
+| A15 plist 权限 | ✅ `-rw-r--r-- root wheel` |
+| A17 `devproxy doctor` | ✅ 英文文案；CA 未信任时退出码 **3**；提示 `devproxy trust` |
+| A18 普通用户读 plist | ✅ 读得到 |
+| A19 日志目录归属 | ✅ 目录本身是**用户属主**（工具建的）；caddy（root）只往里写文件；`caddy.log` 是 root 属主但 0644 |
+| A21 家目录里的 root 文件 | ✅ `root.crt` 是**用户属主**；`caddy.log` root 属主但可读 —— 两个用户都删得掉 |
+| A22 dnsmasq 配置 | ✅ 本工具写的（`port=5300`、`address=/.test/…`）；Homebrew 自己那份没掺和 |
+| A6 钥匙串信任 | ❌ **仍然没法非交互完成**：`security add-trusted-cert -d -r trustRoot` 即使有 sudo 也报 `SecTrustSettingsSetTrustSettings: The authorization was denied since no user interaction was possible`。证书确实进了钥匙串，但**信任标志没设上** —— `verify-cert` 仍报 NOT_TRUSTED，`doctor` 仍报 cert 缺失。与 E2b 同一个结论，现在定位到了「设信任标志」这一步 |
+
+仍未跑：**A3**（`launchctl bootstrap` / `bootout`）、**A4**（`kickstart -k`）、
+**A12**（BSD `install -d` / `cp`）—— 它们要重启 launchd 作业或往 `/etc/resolver` 下写东西，
+没有在无人值守的情况下执行。
+
 ## F. 新增功能的真机检查（12 项）
 
 2026-10-23 之后新增的命令与护栏。单元测试覆盖了逻辑分支，但**真机上的副作用**
