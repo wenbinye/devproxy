@@ -4,6 +4,13 @@
   <img src="assets/icon-256.png" width="128" alt="devproxy 图标：多个本地服务汇聚到一把 HTTPS 挂锁，指向 .test 域名">
 </p>
 
+<p align="center">
+  <a href="https://pypi.org/project/devproxy/"><img alt="PyPI" src="https://img.shields.io/pypi/v/devproxy.svg"></a>
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-blue.svg"></a>
+  <img alt="Python" src="https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue.svg">
+  <img alt="Platform" src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS-lightgrey.svg">
+</p>
+
 本地开发环境一键部署与域名网关。把本地跑起来的服务用 `https://<name>.test` 暴露出去，
 开发者只记域名，不记端口。
 
@@ -201,3 +208,18 @@ Caddy 的内部 CA **在第一次加载 `tls internal` 站点时**才生成 —�
 
 按场景找文档：[docs/README.md](docs/README.md)。
 真机验证清单：[docs/verification-checklist.md](docs/verification-checklist.md)。
+
+---
+
+## 参与
+
+| 文件 | 什么时候看 |
+|---|---|
+| [CONTRIBUTING.md](CONTRIBUTING.md) | 提 PR 之前：开发环境、检查清单、代码风格 |
+| [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | 参与社区的行为准则 |
+| [SECURITY.md](SECURITY.md) | 报安全问题（**不要**开公开 issue）；以及这个工具会改你系统的边界 |
+| [CHANGELOG.md](CHANGELOG.md) | 每个版本的用户可见变化 |
+
+## 许可
+
+[MIT](LICENSE) © 2026 Ye Wenbin

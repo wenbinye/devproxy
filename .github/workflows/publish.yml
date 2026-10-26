@@ -1,0 +1,31 @@
+name: Publish
+
+# 发版：打 tag 或发 GitHub Release 时构建并上传到 PyPI。
+# 用 PyPI 的 **trusted publishing**（OIDC）：不需要在仓库里存 API token，
+# PyPI 侧按「仓库 + workflow 文件名 + 环境名」授权。
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/devproxy
+    permissions:
+      id-token: write # trusted publishing 需要的唯一权限
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: 装依赖（按锁文件）
+        run: uv sync --locked --all-groups
+      - name: 发版前跑一遍测试
+        run: uv run pytest -q --ignore=tests/test_integration.py
+      - name: 构建 sdist 与 wheel
+        run: uv build
+      - name: 上传到 PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

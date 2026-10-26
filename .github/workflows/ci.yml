@@ -11,30 +11,47 @@ on:
   workflow_dispatch:
 
 jobs:
-  unit:
+  lint:
+    # 风格与类型：**阻断**。规则集见 pyproject 的 [tool.ruff] / [tool.mypy]。
+    # 依赖按 uv.lock 装（--locked：锁文件与 pyproject 不一致就直接失败）。
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: 装依赖（按锁文件）
+        run: uv sync --locked --all-groups
+      - name: ruff check
+        run: uv run ruff check src/ tests/
+      - name: ruff format --check
+        run: uv run ruff format --check src/ tests/
+      - name: mypy
+        run: uv run mypy
+
+  test:
+    # Linux 与 macOS 都要跑：平台层（systemd / launchd、证书信任、
+    # DNS 路由）两端的实现不同，只跑 Linux 会漏掉一整边。
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, macos-latest]
         python-version: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v6
         with:
-          python-version: ${{ matrix.python-version }}
-
-      - name: 安装 NSS 工具（certutil）
+          enable-cache: true
+      - name: 装 NSS 工具（certutil）
         # NSS 库判定的用例（tests/test_nss_real_certutil.py）要在真库上跑：
         # NSS 按 (issuer, serial) 去重这条规则只有真 certutil 才有。
+        # macOS 上没有 libnss3-tools，那组用例会自己跳过。
+        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libnss3-tools
-
-      - name: 安装依赖
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install "typer>=0.12" "rich>=13" "pytest>=8"
-
+      - name: 装依赖（按锁文件）
+        run: uv sync --locked --all-groups
       - name: 单元测试
         # tests/test_integration.py 需要真实的 caddy 二进制与真实网络，
         # 属于「真机验证」，不进 CI。
-        run: python -m pytest -q --ignore=tests/test_integration.py
+        run: uv run pytest -q --ignore=tests/test_integration.py
