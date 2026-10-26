@@ -1,5 +1,6 @@
 import json
 from dataclasses import replace
+import os
 from pathlib import Path
 
 import pytest
@@ -118,7 +119,10 @@ def test_up_without_separator_is_rejected(env, monkeypatch):
     res = CliRunner().invoke(app, ["up", "codeup", "npx", "vite"])
     # Wrong command syntax -> usage error (2), not a runtime failure
     assert res.exit_code == 2, res.output
-    assert "--" in res.output
+    assert "--" in res.output, (
+        f"env COLUMNS={os.environ.get('COLUMNS')!r} NO_COLOR={os.environ.get('NO_COLOR')!r} "
+        f"FORCE_COLOR={os.environ.get('FORCE_COLOR')!r}; output lines: {res.output.splitlines()!r}"
+    )
 
 
 def test_up_without_command_is_rejected(env, monkeypatch):

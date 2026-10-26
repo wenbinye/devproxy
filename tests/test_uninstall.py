@@ -797,7 +797,11 @@ def test_cli_uninstall_help_lists_options():
     result = CliRunner().invoke(app, ["uninstall", "--help"])
     assert result.exit_code == 0, result.output
     for option in ("--dry-run", "--yes", "--purge", "--remove-ca"):
-        assert option in result.output
+        assert option in result.output, (
+            f"missing {option}; env COLUMNS={os.environ.get('COLUMNS')!r} "
+            f"NO_COLOR={os.environ.get('NO_COLOR')!r} FORCE_COLOR={os.environ.get('FORCE_COLOR')!r}; "
+            f"output lines: {result.output.splitlines()!r}"
+        )
 
     top = CliRunner().invoke(app, ["--help"])
     assert top.exit_code == 0, top.output
