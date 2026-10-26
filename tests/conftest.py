@@ -2,13 +2,22 @@ import os
 
 import pytest
 
+# CLI 的输出断言不能依赖「跑测试的这台机器」的渲染环境，两层都要钉死：
+#
+# 1) typer 自己渲染 help / 用法错误时，会用 highlighter 给 `--help` 这类选项名
+#    **拆词上样式**；即便设了 NO_COLOR，「粗体」这类属性仍会发出转义序列，
+#    把 `--dry-run` 拆成 `-` + `-dry` + `-run` 三段 —— `option in output` 直接失效。
+#    关掉整个 color system，渲染出来的就是纯文本。这几个常量就是 typer
+#    留给调用方覆盖的。
+# 2) Rich 从环境推导宽度：有终端时取真实宽度，没有时退回 80 列，帮助表与
+#    错误面板会被截断。钉成 200。
+import typer.rich_utils as _rich_utils
+
 from devproxy.core.paths import Paths
 
-# CLI 的输出断言不能依赖「跑测试的这台机器」的渲染环境：
-#   - 有终端/设了 FORCE_COLOR 时 Click 会给 `--help` 这类选项上色，
-#     把 `--` 拆成两段带转义序列的片段，`"--" in output` 直接失效；
-#   - 没有终端时 Rich 退回 80 列，帮助表与错误面板会被截断。
-# 在 import 任何会构造 Console 的模块之前钉死这两个变量。
+_rich_utils.COLOR_SYSTEM = None
+_rich_utils.FORCE_TERMINAL = False
+
 os.environ["NO_COLOR"] = "1"
 os.environ["COLUMNS"] = "200"
 os.environ.pop("FORCE_COLOR", None)
@@ -73,9 +82,3 @@ def deterministic_console(monkeypatch):
     for console in (_runtime.console, _runtime.err_console):
         console.no_color = True
         console.width = 200
-
-    # Click 自己的着色（错误/用法提示里的选项高亮）由这两个变量控制
-    monkeypatch.delenv("FORCE_COLOR", raising=False)
-    monkeypatch.delenv("CLICOLOR_FORCE", raising=False)
-    monkeypatch.setenv("NO_COLOR", "1")
-    monkeypatch.setenv("COLUMNS", "200")
