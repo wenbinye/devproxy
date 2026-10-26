@@ -519,12 +519,19 @@ def test_worker_runs_app_in_project_dir(monkeypatch, tmp_path):
     project_dir.mkdir()
     marker = tmp_path / "cwd.txt"
     code = (
-        "import http.server,os,pathlib,threading,time;"
-        "pathlib.Path(os.environ['MARKER']).write_text(os.getcwd());"
-        "s=http.server.HTTPServer(('127.0.0.1',int(os.environ['PORT'])),"
-        "http.server.SimpleHTTPRequestHandler);"
-        "threading.Thread(target=s.serve_forever,daemon=True).start();"
-        "time.sleep(0.5)"
+        "import os,pathlib,socket\n"
+        "pathlib.Path(os.environ['MARKER']).write_text(os.getcwd())\n"
+        "s=socket.socket();s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)\n"
+        "s.bind(('127.0.0.1',int(os.environ['PORT'])));s.listen(8)\n"
+        # Wait for the runner's readiness probe instead of sleeping a fixed
+        # 0.5s: on a loaded machine the child can be gone before the runner
+        # notices the port is up, and the run fails for a reason that has
+        # nothing to do with the behaviour under test.
+        "s.settimeout(5)\n"
+        "try:\n"
+        "    c,_=s.accept();c.close()\n"
+        "except OSError:\n"
+        "    pass\n"
     )
     paths = Paths(tmp_path / "config", tmp_path / "state", tmp_path / "data")
     paths.ensure_files()
