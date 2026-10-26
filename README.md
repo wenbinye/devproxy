@@ -110,16 +110,11 @@ The script picks the latest release, verifies its sha256 and drops the CLI into
 `~/.local/bin` — it never needs sudo (`devproxy setup` elevates on demand, when it
 must).
 
-**Once it is on PyPI**, the usual suspects work too:
+**Or from PyPI / the source repository:**
 
 ```bash
-uv tool install devproxy     # or: pipx install devproxy
-```
-
-**From the source repository** (any version, no release needed):
-
-```bash
-uv tool install 'git+https://github.com/wenbinye/devproxy.git'
+uv tool install devproxy                                      # latest release
+uv tool install 'git+https://github.com/wenbinye/devproxy.git@main'   # from source
 ```
 
 To pin a branch / tag / commit:

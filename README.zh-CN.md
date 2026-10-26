@@ -107,17 +107,15 @@ curl -fsSL https://raw.githubusercontent.com/wenbinye/devproxy/main/scripts/inst
 脚本会取最新 release、校验 sha256、把 CLI 装进 `~/.local/bin` —— **全程不需要 sudo**
 （需要提权时由 `devproxy setup` 自己在需要的那一步提）。
 
-**发布到 PyPI 之后**，常规装法也可以用：
+**或者从 PyPI / 源码仓库装：**
 
 ```bash
-uv tool install devproxy     # 或者：pipx install devproxy
+uv tool install devproxy                                              # 最新 release
+uv tool install 'git+https://github.com/wenbinye/devproxy.git@main'   # 从源码
 ```
 
-**从源码仓库装**（任意版本，不需要 release）：
-
-```bash
-uv tool install 'git+https://github.com/wenbinye/devproxy.git'
-```
+> 已发布到 PyPI（v0.1.0）。镜像源（如公司内网的 pip 镜像）同步会有延迟，
+> 装不到就加 `--index-url https://pypi.org/simple/`。
 
 想钉住分支 / 标签 / 提交：
 
@@ -147,9 +145,6 @@ git clone https://github.com/wenbinye/devproxy.git
 cd devproxy
 uv tool install -e .
 ```
-
-发布到 PyPI 之后，`uv tool install devproxy` 才可用 —— 在那之前这条命令会失败
-（PyPI 上没有这个包，且这个名字将来可能与别的包冲突）。
 
 依赖：Python ≥ 3.11（uv 会自动挑一个合适的解释器），运行时依赖只有 `typer` 与 `rich`。
 
