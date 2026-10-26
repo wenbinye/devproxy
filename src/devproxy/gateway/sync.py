@@ -104,11 +104,16 @@ def app_process_alive(route: Route) -> bool:
     """
     if route.mode != MODE_UP or route.pid is None:
         return True
-    if not os.path.exists(f"/proc/{route.pid}"):
+    from devproxy.gateway.runner import pid_is_running
+    from devproxy.gateway.runner import proc_start_time
+
+    # Not "/proc/{pid}": macOS has no /proc at all, and a hardcoded check there
+    # calls every **running** app dead -- sync then tears down and rebuilds an
+    # app that is working fine. The platform-agnostic probe (Linux: /proc,
+    # macOS: ps) is what the rest of the process handling already uses.
+    if not pid_is_running(route.pid):
         return False
     if route.proc_start is not None:
-        from devproxy.gateway.runner import proc_start_time
-
         return proc_start_time(route.pid) == route.proc_start
     return True
 
@@ -116,7 +121,7 @@ def app_process_alive(route: Route) -> bool:
 def build_sync_plan(project: ProjectFile, existing: list[Route], prune: bool = False) -> SyncPlan:
     """Turn declarations and current state into a plan.
 
-    This reads /proc to determine whether up-mode apps are still alive
+    This reads the process table to determine whether up-mode apps are still alive
     (calling it a "pure function" is outdated: a dead app with a leftover
     route record is the most common bad state, and it must be detected here).
     """

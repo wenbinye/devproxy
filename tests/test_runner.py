@@ -64,13 +64,29 @@ def _runner(paths, alive=True):
 
 
 # Start a child that really listens on $PORT and exits after 0.5s -- this also verifies PORT injection
-_LISTEN_AND_EXIT = (
-    "import http.server,os,threading,time;"
-    "s=http.server.HTTPServer(('127.0.0.1',int(os.environ['PORT'])),"
-    "http.server.SimpleHTTPRequestHandler);"
-    "threading.Thread(target=s.serve_forever,daemon=True).start();"
-    "time.sleep(0.5)"
-)
+# Holds the port open, waits for the runner's readiness probe to connect, then exits.
+#
+# A fixed "sleep 0.5s" instead of this loses the race on a loaded machine: the
+# child can be gone before the runner notices the port is up, and the run fails
+# with "child exited first" -- a property of the machine, not of the code under
+# test.
+#
+# A plain socket, not an HTTP server: an HTTP server's own accept() would take
+# the probe's connection and this accept would then wait for the timeout.
+_LISTEN_AND_EXIT = """
+import os, socket
+
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(('127.0.0.1', int(os.environ['PORT'])))
+s.listen(8)
+s.settimeout(5)
+try:
+    c, _ = s.accept()
+    c.close()
+except OSError:
+    pass
+"""
 
 
 def _process_running(pid: int) -> bool:
@@ -640,12 +656,18 @@ def test_run_kills_grandchildren_after_leader_already_exited(paths, tmp_path):
     runner = _runner(paths)
     marker = tmp_path / "grandchild-left.pid"
     child_code = (
-        "import os,socket,subprocess,sys,time;"
-        "s=socket.socket();s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1);"
-        "s.bind(('127.0.0.1',int(os.environ['PORT'])));s.listen(8);"
-        "g=subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)']);"
-        f"open({str(marker)!r},'w').write(str(g.pid));"
-        "time.sleep(0.5)"
+        "import os,socket,subprocess,sys\n"
+        "s=socket.socket();s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)\n"
+        "s.bind(('127.0.0.1',int(os.environ['PORT'])));s.listen(8)\n"
+        # Wait for the readiness probe (same reason as _LISTEN_AND_EXIT: a fixed
+        # sleep loses the race on a loaded machine), then fork the grandchild.
+        "s.settimeout(5)\n"
+        "try:\n"
+        "    c,_=s.accept();c.close()\n"
+        "except OSError:\n"
+        "    pass\n"
+        "g=subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)'])\n"
+        f"open({str(marker)!r},'w').write(str(g.pid))\n"
     )
     rc = runner.run("codeup", [sys.executable, "-c", child_code])
     assert rc == 0

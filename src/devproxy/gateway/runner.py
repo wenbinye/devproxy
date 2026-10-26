@@ -48,6 +48,12 @@ HEARTBEAT_INTERVAL = 30.0
 # signal a pgid that may have been reused).
 _HAS_WAITID = hasattr(os, "waitid") and hasattr(os, "WNOWAIT")
 
+# macOS has no WNOWAIT, so the exit status cannot be read without reaping.
+# This marker says "it exited, but the code only becomes readable after the
+# cleanup phase reaps the leader". Outside the real range: a signal death is
+# -1..-64.
+_EXIT_CODE_PENDING = -999
+
 
 class _RouteGone(Exception):
     """The route is gone from the route table (the user ran down, or a new up
@@ -189,7 +195,27 @@ def _route_live(admin: CaddyAdmin, domain: str) -> bool:
     return _config_hosts_contains(body, domain)
 
 
-def _pid_is_running(pid: int) -> bool:
+def _process_state(pid: int) -> str:
+    """The first character of the process state ("R"/"S"/"Z"/...); "" when unknown.
+
+    `ps` does **not** reap, so asking it keeps an exited child a zombie --
+    exactly what the process-group cleanup needs: the pgid must stay pinned
+    until after the group has been signaled, otherwise the pid could be reused
+    and a blind killpg would hit an unrelated group.
+    """
+    try:
+        proc = subprocess.run(
+            ["ps", "-o", "stat=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return proc.stdout.strip()[:1]
+
+
+def pid_is_running(pid: int) -> bool:
     """Whether the process exists and is not a zombie (a zombie counts as
     exited).
 
@@ -200,24 +226,24 @@ def _pid_is_running(pid: int) -> bool:
     try:
         stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
     except OSError:
-        try:
-            proc = subprocess.run(
-                ["ps", "-o", "stat=", "-p", str(pid)],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return False
-        state = proc.stdout.strip()
-        return bool(state) and not state.startswith("Z")
+        state = _process_state(pid)
+        return bool(state) and state != "Z"
     fields = stat.rsplit(")", 1)[1].split()
     return bool(fields) and fields[0] != "Z"
 
 
 def _leader_status(proc: subprocess.Popen) -> int | None:
     """Non-blocking read of the leader's exit status without reaping
-    (WNOWAIT); None = still running."""
+    (WNOWAIT); None = still running.
+
+    On platforms without WNOWAIT (macOS) the status cannot be read without
+    reaping, and **reaping here would be wrong**: the leader must stay a
+    zombie until the process group has been cleaned up, otherwise the pgid
+    loses its protection and a blind killpg could hit an unrelated group.
+    So we ask `ps` instead (it does not reap) and report
+    _EXIT_CODE_PENDING -- the real code becomes readable once the cleanup
+    phase reaps the leader.
+    """
     if proc.returncode is not None:
         return proc.returncode
     if _HAS_WAITID:
@@ -230,17 +256,22 @@ def _leader_status(proc: subprocess.Popen) -> int | None:
         if info.si_code == getattr(os, "CLD_EXITED", None):
             return info.si_status
         return -info.si_status
-    return proc.poll()
+    if _process_state(proc.pid) == "Z":
+        return _EXIT_CODE_PENDING
+    return None
 
 
 def _wait_leader(proc: subprocess.Popen) -> int:
     """Wait for the leader to exit, leaving reaping to the cleanup phase (the
     pid is not reused while it is a zombie)."""
+    # On macOS every poll spawns `ps` (the leader's state cannot be read
+    # without reaping it), so poll less often there.
+    interval = 0.1 if _HAS_WAITID else 0.3
     while True:
         status = _leader_status(proc)
         if status is not None:
             return status
-        time.sleep(0.1)
+        time.sleep(interval)
 
 
 def _wait_exit_unreaped(proc: subprocess.Popen, timeout: float) -> bool:
@@ -252,10 +283,14 @@ def _wait_exit_unreaped(proc: subprocess.Popen, timeout: float) -> bool:
     group cleanup.
     """
     if not _HAS_WAITID:
-        try:
-            proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            pass
+        # No WNOWAIT: wait for the zombie state with ps (which does not reap),
+        # so the leader stays unreaped and the pgid stays pinned until the
+        # caller has signaled the group.
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if _process_state(proc.pid) == "Z":
+                return True
+            time.sleep(0.05)
         return False
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -339,7 +374,7 @@ def _wait_group_gone(pid: int, expected_start: str, timeout: float) -> bool:
     or its identity changed."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if not _pid_is_running(pid):
+        if not pid_is_running(pid):
             return True
         if proc_start_time(pid) != expected_start:
             return True
@@ -380,7 +415,7 @@ def kill_pid_group(pid: int, proc_start: str | None = None, timeout: float = 5.0
             file=sys.stderr,
         )
         return False
-    if not _pid_is_running(pid):
+    if not pid_is_running(pid):
         return False  # only a zombie remains; the port is already released
     try:
         os.killpg(pid, signal.SIGTERM)
@@ -389,7 +424,7 @@ def kill_pid_group(pid: int, proc_start: str | None = None, timeout: float = 5.0
     if _wait_group_gone(pid, proc_start, timeout):
         return True
     # SIGTERM timed out and the identity still matches -> escalate to SIGKILL
-    if proc_start_time(pid) != proc_start or not _pid_is_running(pid):
+    if proc_start_time(pid) != proc_start or not pid_is_running(pid):
         return True
     try:
         os.killpg(pid, signal.SIGKILL)
@@ -531,6 +566,11 @@ class UpRunner:
                 self._deregister(route)
             for s, handler in old_handlers.items():
                 signal.signal(s, handler)
+        if rc == _EXIT_CODE_PENDING:
+            # The exit code only becomes readable once the leader is reaped; on
+            # macOS the reaping had to wait for the group cleanup.
+            reaped = child.proc.returncode if child.proc is not None else None
+            rc = reaped if reaped is not None else 0
         # When killed by a signal wait() returns -n; map it to the shell
         # convention 128+n
         return 128 - rc if rc < 0 else rc
@@ -615,6 +655,8 @@ class UpRunner:
         while time.time() < deadline:
             status = _leader_status(proc)
             if status is not None:
+                if status == _EXIT_CODE_PENDING:
+                    raise UpError("child exited before it became ready; not registered")
                 raise UpError(f"child exited first (code={status}); not registered")
             if reachable(port, timeout=1):
                 return
