@@ -29,7 +29,7 @@ dependencies = [
 Homepage = "https://codeup.aliyun.com/msy/tools/devproxy"
 Repository = "https://codeup.aliyun.com/msy/tools/devproxy.git"
 Issues = "https://codeup.aliyun.com/msy/tools/devproxy/issues"
-Changelog = "https://codeup.aliyun.com/msy/tools/devproxy/blob/master/CHANGELOG.md"
+Changelog = "https://codeup.aliyun.com/msy/tools/devproxy/blob/main/CHANGELOG.md"
 
 [project.scripts]
 devproxy = "devproxy.cli:main"
