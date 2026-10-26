@@ -1,5 +1,9 @@
 # devproxy
 
+<p align="center">
+  <img src="assets/icon-256.png" width="128" alt="devproxy 图标：多个本地服务汇聚到一把 HTTPS 挂锁，指向 .test 域名">
+</p>
+
 本地开发环境一键部署与域名网关。把本地跑起来的服务用 `https://<name>.test` 暴露出去，
 开发者只记域名，不记端口。
 
