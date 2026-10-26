@@ -107,5 +107,16 @@
     Rich 按宽度折行，换个路径长度就折在别处（改成断言行为，不盯折行文本）；
     `test_sync` 的真 worker 用例断言的文案取决于本机有没有 Caddy（改成环境无关的形状断言）。
   - 现状：CI 在 Linux 与 macOS × Python 3.11/3.12/3.13 上全绿（2026-10-26）。
-    **但 A 组的真机条目仍然待跑** —— 套件跑在假平台、假家目录、假进程上，
-    真的 launchd / 钥匙串 / `/etc/resolver` 仍然没验过。
+  - **真机两轮（2026-10-26 与 10-27）**：SSH 到 `my-mac`（WenbindeMBP，macOS 26.1/25B78）
+    把 **A 组 22 条全部跑完，全部有结论**（结论见
+    [docs/zh-CN/verification-checklist.md](../docs/zh-CN/verification-checklist.md) 的 E5）。
+    三个真发现：
+    - **macOS 自带 curl 不认钥匙串里的信任**（exit 60）—— 钥匙串只管 Safari/Chrome；
+      要让 curl 信任，CA 得进 `/etc/ssl/cert.pem`。
+    - **`/etc/resolver/<suffix>` 里的 `port 5300` 被 mDNSResponder 认了** —— 当初最大的疑问。
+    - **sudo 时间戳缓存按 tty 记**：同一会话内命中、**跨会话不命中** —— 自动化时每开一个新
+      SSH 会话都得再喂一次密码。
+  - 另有一条定论：**`security add-trusted-cert -d` 有 sudo 也设不上信任标志**
+    （`SecTrustSettingsSetTrustSettings` 要用户交互）—— 证书进得了钥匙串、信任标志设不上；
+    要让浏览器真信任，只能在**图形终端**里跑一次 `devproxy trust`。
+  - 顺带把那台机器的 devproxy 从内网 Codeup 镜像换成公开 GitHub 仓库（之前是英文化前的旧版）。

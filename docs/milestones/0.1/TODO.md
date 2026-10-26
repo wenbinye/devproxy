@@ -110,28 +110,54 @@ Tracks the work items of this milestone. Format:
     a real-machine simulation of `_DEVPROXY_COMPLETE=complete_bash` covering subcommands /
     options / route names / prefix filtering / the `--` boundary; full suite 1080 passed.
 
-- [x] #5: **macOS 进 CI，并修掉它翻出来的三处平台缺口**（2026-10-26, registered and done by Claude）：
-  - 起因：仓库第一次在 GitHub Actions 上跑，CI 加了 macOS 矩阵 —— 头一天就红了三个用例。
-    查下来是**三处真的平台缺口**，不是测试写错。
-  - **#5-1 `app_process_alive` 硬编码读 `/proc/{pid}`**（`gateway/sync.py`）：macOS 没有
-    /proc，于是**每一个活着的应用都被判成「已死」**，sync 会把还在跑的应用拆了重建。
-    这是 macOS 用户的实际故障，不只是测试问题；在 Linux 上也是错的，只是 /proc 恰好存在
-    把它掩盖了。改用平台无关的 `pid_is_running`（Linux 走 /proc、macOS 走 ps）。
-  - **#5-2 macOS 上进程组清理整组被跳过**（`gateway/runner.py`）：macOS 没有 `WNOWAIT`，
-    `proc.poll()` 会顺手回收 leader，pgid 于是失去保护（pid 可能被复用），代码按
-    「宁可漏杀也不误杀」的原则放弃整组 —— 结果孙子进程留在后台。改成**回收之前先清组**：
-    没有 WNOWAIT 时用 `ps` 看僵尸态（ps 不回收，leader 一直是僵尸，pgid 一直有保护），
-    清完组再回收；退出码在回收之后才读得到，用 `_EXIT_CODE_PENDING` 标记这个
-    「已知退出、码待读」的状态。
-  - **#5-3 两个测试在跟机器的忙闲赛跑**：子进程用 `sleep(0.5)` 撑到「就绪」被看见，
-    慢机器上这半秒根本不够，子进程先退出，run 报 "child exited first"（是机器的忙闲，
-    不是被测行为）。改成**等就绪探针真的连上来再退**（用裸 socket：HTTP server 自己的
-    accept 会把探针的连接抢走）。
-  - 顺带修掉 CI 暴露的**渲染环境假设**：设了 `FORCE_COLOR` 的环境里 typer 给选项名
-    逐字符上样式，把 `--dry-run` 拆成三段，断言恒假（`NO_COLOR` 只去色不去粗体，
-    最后是把 `typer.rich_utils.COLOR_SYSTEM` 置 None 才拿到纯文本）；一条提示文本被
-    Rich 按宽度折行，换个路径长度就折在别处（改成断言行为，不盯折行文本）；
-    `test_sync` 的真 worker 用例断言的文案取决于本机有没有 Caddy（改成环境无关的形状断言）。
-  - 现状：CI 在 Linux 与 macOS × Python 3.11/3.12/3.13 上全绿（2026-10-26）。
-    **但 A 组的真机条目仍然待跑** —— 套件跑在假平台、假家目录、假进程上，
-    真的 launchd / 钥匙串 / `/etc/resolver` 仍然没验过。
+- [x] #5: **macOS in CI, and the three platform gaps it turned up**（2026-10-26, registered and done by Claude）：
+  - Why: the repository ran in GitHub Actions for the first time with a macOS matrix, and
+    three tests were red on day one. They turned out to be **three real platform gaps**,
+    not broken tests.
+  - **#5-1 `app_process_alive` read `/proc/{pid}` directly** (`gateway/sync.py`): macOS has
+    no /proc, so **every running app looked dead** and sync tore down and rebuilt apps
+    that were working. That is a real fault for macOS users, not just a test problem --
+    and it was wrong on Linux too, where /proc merely happens to exist and hid it. Now it
+    uses the platform-agnostic `pid_is_running` (/proc on Linux, `ps` on macOS).
+  - **#5-2 the process-group cleanup was skipped entirely on macOS**
+    (`gateway/runner.py`): macOS has no `WNOWAIT`, so `proc.poll()` reaps the leader and
+    the pgid loses its protection (the pid may be reused) -- the code, following "rather
+    miss than misreport", gave up on the whole group, and grandchildren survived. Now the
+    group is signaled **before** the leader is reaped: without WNOWAIT the zombie state is
+    read with `ps` (ps does not reap, so the leader stays a zombie and the pgid stays
+    pinned), and the exit code only becomes readable after the reaping -- tracked by the
+    `_EXIT_CODE_PENDING` marker.
+  - **#5-3 two tests raced the machine's load**: the child process used `sleep(0.5)` to
+    stay alive until the readiness probe saw it, which is not enough on a loaded machine --
+    the child was gone before the runner noticed the port was up, and the run failed with
+    "child exited first" (a property of the machine, not of the behaviour under test).
+    They now **wait for the readiness probe to actually connect** (a plain socket: an
+    HTTP server's own accept would take the probe's connection).
+  - Also fixed: the **rendering assumptions** CI exposed -- in an environment with
+    `FORCE_COLOR` set, typer styles option names character by character, splitting
+    `--dry-run` into three pieces and making the assertion permanently false (`NO_COLOR`
+    only drops colour, not bold; the fix was `typer.rich_utils.COLOR_SYSTEM = None`, which
+    yields plain text); one hint is wrapped by Rich according to the console width, so it
+    wraps in a different place on a different path length (assert the behaviour, not the
+    wrapped text); and the real-worker test asserted wording that depends on whether the
+    machine happens to run Caddy (now a shape assertion that holds either way).
+  - **Two real-machine rounds (2026-10-26 and 10-27)**: over SSH to `my-mac`
+    (WenbindeMBP, macOS 26.1 / 25B78) the whole **group A checklist was run — all 22
+    items now have a conclusion** (see the E5 section of
+    [docs/verification-checklist.md](../docs/verification-checklist.md)). Three findings
+    worth keeping:
+    - **the bundled curl does not trust the keychain** (exit 60) -- the keychain covers
+      Safari/Chrome; for curl the CA has to go into `/etc/ssl/cert.pem`;
+    - **the `port 5300` directive in `/etc/resolver/<suffix>` IS honoured** by
+      mDNSResponder -- that was the group's biggest open question;
+    - **the sudo timestamp cache is per-tty**: it hits within one session but **not across
+      sessions**, so automation has to feed the password again for every new SSH session.
+  - One more settled conclusion: **`security add-trusted-cert -d` cannot set the trust
+    flag without a graphical session**, even with sudo
+    (`SecTrustSettingsSetTrustSettings: The authorization was denied since no user
+    interaction was possible`) -- the certificate lands in the keychain, the trust flag does
+    not. Making the browser actually trust it requires running `devproxy trust` in the
+    Mac's own terminal.
+  - Side effect: that machine's devproxy was re-installed from the **public GitHub repo**
+    (it had come from the internal Codeup mirror, so it was still the pre-translation
+    build).
