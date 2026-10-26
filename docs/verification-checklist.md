@@ -12,7 +12,7 @@
 | C. 迁移检测的残留风险 | 1 | `migrate.detect_legacy()`「读不到遗留单元 ⇒ 视为没有遗留环境」 |
 | **小计（A+B+C）** | **28** | |
 | D. Linux 真机检查 | 8 | 单元测试覆盖不到的 Linux 侧行为（不计入 28） |
-| F. 新增功能的真机检查 | 11 | 2026-10-23 起新增的 `uninstall` / `up`（原 sync）/ `run` / 域名后缀护栏 / 子进程超时（F10 已于 2026-10-25 用 ubuntu:24.04 容器验证） |
+| F. 新增功能的真机检查 | 12 | 2026-10-23 起新增的 `uninstall` / `up`（原 sync）/ `run` / 域名后缀护栏 / 子进程超时 / `logs --edit`（F10 已于 2026-10-25 用 ubuntu:24.04 容器验证） |
 
 约定：
 
@@ -517,6 +517,16 @@ devproxy: 1 个步骤失败：把 CA 根证书加入系统钥匙串（…）
 > 在密码提示上死循环，两小时往重定向文件写了 **200GB×2**，把 `/home` 撑到 100%。
 > 修法是给普通子进程调用加超时（`platform/linux.py` 的 `_run`，超时返回 124）。
 > **已在本机实测**（那次事故本身），无需再验；这里记一笔是为了别把它当"没发生过"。
+
+### F12. `logs --edit` 用编辑器打开日志
+
+- 检查：① `EDITOR=vim devproxy logs <路由名> --edit`，改点什么保存退出；
+  ② `devproxy logs caddy --edit`；③ `env -u EDITOR -u VISUAL devproxy logs <路由名> --edit`；
+  ④ `devproxy logs --edit`（不给名字）；⑤ `devproxy logs --list --edit`。
+- 预期：① 编辑器**接管终端**打开的是该路由的日志文件（`~/.local/state/devproxy/logs/routes/<名字>.log`），
+  保存后文件内容确实变了；② 服务日志**报错退 2** 并提示改用跟随（journalctl 里的日志不是文件）；
+  ③ 退 2 并提示 `export EDITOR=vim`（**不猜**用哪个编辑器）；④ 退 2 并说明要给名字；
+  ⑤ 退 2（`--list` 与 `--edit` 互斥）。
 
 ---
 

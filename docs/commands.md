@@ -86,6 +86,8 @@ devproxy ls
 devproxy ps
 ```
 
+- **按应用名升序** —— 路由表是集合，输出稳定可预期（与注册顺序无关）。
+
 ## logs
 
 跟随日志：服务本身（`caddy` / `dnsmasq`）或 **sync 起的应用**。
@@ -96,12 +98,21 @@ devproxy logs caddy
 devproxy logs dnsmasq
 devproxy logs my-app       # sync 起的应用
 devproxy logs --list       # 列出能跟的目标，不跟随
+devproxy logs my-app --edit   # 用 $EDITOR 打开日志文件
 ```
+
+| 选项 | 说明 |
+|---|---|
+| `--list` | 列出能跟的目标，不跟随。路由日志**逐条给出完整路径**（不用自己拼） |
+| `--edit` | 用 `$EDITOR`（没有就 `$VISUAL`）打开该路由的日志文件 |
 
 - 只读，不改任何东西；**Ctrl-C 退出**（命令自己不会结束）。
 - 项目目录里裸跑 `devproxy logs` = 跟**本项目全部应用**，多个应用时每行带彩色标签
   （标签就是应用名）。
 - 路由日志从**末尾**开始跟（不倒历史）；文件被轮转会自动接上。
+- `--edit` 只对**路由日志**有效：服务日志（caddy / dnsmasq）是 journalctl 里的滚动日志，
+  不是文件，编辑器打不开 —— 会明确报错让你改用跟随。
+- `--edit` 与 `--list` 互斥；`EDITOR` 和 `VISUAL` 都没设时报错退出 2（**不猜**用哪个编辑器）。
 - 详见 [项目级配置 · 后台进程与日志](project-config.md#后台进程与日志)。
 
 ## init
@@ -239,7 +250,7 @@ devproxy uninstall               # 交互确认后执行
 |---|---|
 | 0 | 成功 |
 | 1 | 运行失败（子进程退出、reload 失败、路由表损坏、迁移被拒绝、`up` 发现路由与声明冲突、`run` 的 Caddy 配置校验失败……） |
-| 2 | 参数错误（非法路由名 / 非法端口、缺少 `--`、未知日志服务名、非法 `dns_backend`、非法 `--domain-suffix`、`up` 的配置文件缺失或非法、`run --config` 指定的文件不存在） |
+| 2 | 参数错误（非法路由名 / 非法端口、缺少 `--`、未知日志服务名、`logs --edit` 缺目标或没设 `EDITOR`、非法 `dns_backend`、非法 `--domain-suffix`、`up` 的配置文件缺失或非法、`run --config` 指定的文件不存在） |
 | 3 | 前置条件不满足（Caddy 未运行、主 Caddyfile 不存在、`doctor` 体检不通过） |
 | 4 | 需要提权但当前非交互（未加 `--yes`），**或用户在确认提示上选择了「否」** |
 

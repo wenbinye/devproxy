@@ -179,14 +179,24 @@ devproxy logs --list
   dnsmasq
 本项目（devproxy.toml：/home/me/work/xxl-job/devproxy.toml）：
   xxl-job-admin            8 MB
+    /home/me/.local/state/devproxy/logs/routes/xxl-job-admin.log
   xxl-job-executor        13 KB
-已声明但还没有日志：xxl-job-executor（跑一次 devproxy up）
+    /home/me/.local/state/devproxy/logs/routes/xxl-job-executor.log
+  已声明但还没有日志：xxl-job-executor（跑一次 devproxy up）
 ```
+
+每条下面那行是**完整路径** —— 不用自己拼 `~/.local/state/devproxy/logs/routes/<名字>.log`。
 
 看**单个**日志的信息（路径、大小、跟随命令）：
 
 ```bash
 devproxy logs codeup-api --list
+```
+
+想直接用编辑器翻日志（`$EDITOR`，没有就 `$VISUAL`）：
+
+```bash
+devproxy logs codeup-api --edit
 ```
 
 **日志会轮转**：单个文件超过 **10 MB** 就改名成 `.log.1`（覆盖上一份），当前文件从头写。
