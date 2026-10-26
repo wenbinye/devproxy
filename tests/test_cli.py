@@ -178,6 +178,36 @@ def test_ls_lists_routes(env, monkeypatch):
     assert "codeup.test" in res.output
 
 
+def test_ls_sorts_routes_by_name(env, monkeypatch):
+    """ls 按应用名升序 —— 与注册顺序无关，输出稳定可预期。"""
+    _patch_ctx(monkeypatch, env)
+    state = env / "state"
+    state.mkdir(parents=True, exist_ok=True)
+    (state / "routes.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "domain_suffix": "test",
+                "routes": [
+                    {
+                        "name": name,
+                        "domain": f"{name}.test",
+                        "port": 42100 + i,
+                        "mode": "up",
+                        "upstream": f"127.0.0.1:{42100 + i}",
+                    }
+                    for i, name in enumerate(["zebra", "alpha", "mike"])
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    res = CliRunner().invoke(app, ["ls"])
+    assert res.exit_code == 0, res.output
+    positions = [res.output.index(f"{name}.test") for name in ("alpha", "mike", "zebra")]
+    assert positions == sorted(positions), f"应按名字升序：\n{res.output}"
+
+
 def test_config_shows_effective_config(env, monkeypatch):
     _patch_ctx(monkeypatch, env)
     res = CliRunner().invoke(app, ["config"])

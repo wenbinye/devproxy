@@ -48,7 +48,13 @@ class RouteStore:
         self.caddy = caddy
 
     def list(self) -> list[Route]:
-        return load_table(self.paths.routes_json).routes
+        """所有已注册路由，按名字升序。
+
+        路由表是**集合**：routes.json 里的先后只是写入顺序，不代表任何含义
+        （先注册再注销，顺序就变了）。读出来就排好序，输出才稳定可预期 ——
+        `devproxy ls` 每次长得一样，而不是随注册历史抖动。
+        """
+        return sorted(load_table(self.paths.routes_json).routes, key=lambda r: r.name)
 
     def get(self, name: str) -> Route | None:
         return next((r for r in self.list() if r.name == name), None)
