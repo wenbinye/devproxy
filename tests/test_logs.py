@@ -347,3 +347,127 @@ def test_logs_list_with_broken_project_file_falls_back(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     assert "按全部路由列出" in result.output
     assert "web" in result.output
+
+
+# -- --list 的完整路径 ----------------------------------------------------
+
+
+def test_logs_list_shows_full_path(log_dir):
+    """--list 里能直接看到每个日志文件的完整路径 —— 不用自己拼。"""
+    result = _invoke(["logs", "--list"])
+    assert result.exit_code == 0, result.output
+    expected = str(log_dir.log_dir / "routes" / "myapp.log")
+    assert expected in result.output, f"应显示完整路径：\n{result.output}"
+
+
+def test_logs_list_in_project_shows_full_path(project_scope):
+    """项目模式同样给完整路径（表头给的是 devproxy.toml，不是日志目录）。"""
+    result = _invoke(["logs", "--list"])
+    assert result.exit_code == 0, result.output
+    expected = str(project_scope[1].log_dir / "routes" / "web.log")
+    assert expected in result.output, f"应显示完整路径：\n{result.output}"
+
+
+# -- --edit ---------------------------------------------------------------
+
+
+class _RecordingPlatform:
+    """只记 open_in_editor 调用的假平台。"""
+
+    def __init__(self, code: int = 0, error: Exception | None = None) -> None:
+        self.calls: list[tuple[Path, str]] = []
+        self.code = code
+        self.error = error
+
+    def open_in_editor(self, path: Path, editor: str) -> int:
+        self.calls.append((path, editor))
+        if self.error is not None:
+            raise self.error
+        return self.code
+
+
+def test_logs_edit_opens_route_log_with_editor(log_dir, monkeypatch):
+    """--edit 用 $EDITOR 打开路由日志文件。"""
+    platform = _RecordingPlatform()
+    monkeypatch.setattr("devproxy.cli._shared._platform", lambda: platform)
+    monkeypatch.setenv("EDITOR", "vim")
+    monkeypatch.delenv("VISUAL", raising=False)
+
+    result = _invoke(["logs", "myapp", "--edit"])
+    assert result.exit_code == 0, result.output
+    assert platform.calls == [(log_dir.log_dir / "routes" / "myapp.log", "vim")]
+
+
+def test_logs_edit_falls_back_to_visual(log_dir, monkeypatch):
+    """EDITOR 没设就用 VISUAL。"""
+    platform = _RecordingPlatform()
+    monkeypatch.setattr("devproxy.cli._shared._platform", lambda: platform)
+    monkeypatch.delenv("EDITOR", raising=False)
+    monkeypatch.setenv("VISUAL", "nano")
+
+    result = _invoke(["logs", "myapp", "--edit"])
+    assert result.exit_code == 0, result.output
+    assert platform.calls == [(log_dir.log_dir / "routes" / "myapp.log", "nano")]
+
+
+def test_logs_edit_without_editor_exits_2(log_dir, monkeypatch):
+    """EDITOR 与 VISUAL 都没设 → 按参数错误退 2，并告诉用户怎么设。"""
+    monkeypatch.delenv("EDITOR", raising=False)
+    monkeypatch.delenv("VISUAL", raising=False)
+
+    result = _invoke(["logs", "myapp", "--edit"])
+    assert result.exit_code == 2, result.output
+    assert "EDITOR" in result.output
+
+
+def test_logs_edit_rejects_service_logs(monkeypatch):
+    """服务日志不是文件，编辑器打不开 —— 明确报错，不猜。"""
+    monkeypatch.setenv("EDITOR", "vim")
+    result = _invoke(["logs", "caddy", "--edit"])
+    assert result.exit_code == 2, result.output
+    assert "跟随" in result.output
+
+
+def test_logs_edit_rejects_unknown_route(log_dir, monkeypatch):
+    """没有这个路由的日志 → 退 2。"""
+    monkeypatch.setenv("EDITOR", "vim")
+    result = _invoke(["logs", "nope", "--edit"])
+    assert result.exit_code == 2, result.output
+    assert "myapp" in result.output, "应列出可用的路由日志"
+
+
+def test_logs_edit_without_name_exits_2(log_dir, monkeypatch):
+    """--edit 必须指定打开哪个日志。"""
+    monkeypatch.setenv("EDITOR", "vim")
+    result = _invoke(["logs", "--edit"])
+    assert result.exit_code == 2, result.output
+    assert "--edit" in result.output
+
+
+def test_logs_edit_rejects_list_together(log_dir, monkeypatch):
+    """--list 与 --edit 互斥。"""
+    monkeypatch.setenv("EDITOR", "vim")
+    result = _invoke(["logs", "--list", "--edit"])
+    assert result.exit_code == 2, result.output
+
+
+def test_logs_edit_reports_editor_failure(log_dir, monkeypatch):
+    """编辑器退出码非 0 → 报出来（退 1，运行失败）。"""
+    platform = _RecordingPlatform(code=3)
+    monkeypatch.setattr("devproxy.cli._shared._platform", lambda: platform)
+    monkeypatch.setenv("EDITOR", "vim")
+
+    result = _invoke(["logs", "myapp", "--edit"])
+    assert result.exit_code == 1, result.output
+    assert "3" in result.output
+
+
+def test_logs_edit_reports_missing_editor(log_dir, monkeypatch):
+    """编辑器不存在 → 干净报错，不抛 traceback。"""
+    platform = _RecordingPlatform(error=FileNotFoundError("no such file: 'vim'"))
+    monkeypatch.setattr("devproxy.cli._shared._platform", lambda: platform)
+    monkeypatch.setenv("EDITOR", "vim")
+
+    result = _invoke(["logs", "myapp", "--edit"])
+    assert result.exit_code == 1, result.output
+    assert "vim" in result.output

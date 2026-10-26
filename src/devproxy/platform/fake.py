@@ -10,6 +10,7 @@ copy 一律经过 `FakePlatform._sandbox_target()`，把 /etc、/usr/local/share
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import tempfile
 from pathlib import Path
@@ -285,6 +286,11 @@ class FakePlatform:
 
     def tail_service_log(self, name: str) -> None:
         pass
+
+    def open_in_editor(self, path: Path, editor: str) -> int:
+        """假平台不真的开编辑器，只把这次调用记下来。"""
+        self.commands.append(["editor", *shlex.split(editor), str(path)])
+        return 0
 
     def enable_linger(self) -> tuple[int, str]:
         self.linger = True

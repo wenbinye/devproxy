@@ -212,6 +212,14 @@ class Platform(Protocol):
 
     def tail_service_log(self, name: str) -> None: ...
 
+    def open_in_editor(self, path: Path, editor: str) -> int:
+        """用编辑器打开文件，返回编辑器的退出码。
+
+        编辑器要**继承 stdio**（它得接管终端）—— 与 tail_service_log 同一路子。
+        `editor` 是命令字符串（可能带参数，如 "code -w"），由调用方拼词。
+        编辑器不存在时抛 FileNotFoundError。
+        """
+
     def enable_linger(self) -> tuple[int, str]:
         """`loginctl enable-linger <user>`：让 user unit 开机自启、无需登录。"""
 

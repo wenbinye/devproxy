@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from rich.markup import escape
@@ -144,6 +145,57 @@ def _print_one(service: str) -> None:
     raise typer.Exit(EXIT_USAGE)
 
 
+def _resolve_editor() -> str:
+    """用哪个编辑器：$EDITOR 优先，其次 $VISUAL。
+
+    两个都没设置就报错退出 —— **不猜**。猜错了（硬塞一个 nano / vi）比报错更糟：
+    用户看到的是编辑器突然接管了终端，却不知道是自己没配好。
+    """
+    editor = (os.environ.get("EDITOR") or os.environ.get("VISUAL") or "").strip()
+    if not editor:
+        s.err_console.print(
+            "devproxy: 不知道用哪个编辑器打开日志 —— 没有设置 EDITOR（或 VISUAL）。\n"
+            "   例：export EDITOR=vim   然后重跑 devproxy logs <名字> --edit"
+        )
+        raise typer.Exit(EXIT_USAGE)
+    return editor
+
+
+def _edit_log(service: str) -> None:
+    """`logs <名字> --edit`：用 $EDITOR 打开日志文件。"""
+    if service in _SERVICE_LOGS:
+        s.err_console.print(
+            f"devproxy: {service} 是服务日志，不是文件，编辑器打不开"
+            f"（用 devproxy logs {service} 跟随）"
+        )
+        raise typer.Exit(EXIT_USAGE)
+
+    known = _known_route_logs()
+    if service not in known:
+        s.err_console.print(
+            f"devproxy: 没有叫 {service} 的日志"
+            f"（可选：{' / '.join(_SERVICE_LOGS)}，或路由名）"
+        )
+        if known:
+            s.err_console.print(f"   可用的路由日志：{'、'.join(known)}")
+        raise typer.Exit(EXIT_USAGE)
+
+    editor = _resolve_editor()
+    paths, _, _, _ = s.build_context()
+    path = route_log_path(paths, service)
+    try:
+        code = s._platform().open_in_editor(path, editor)
+    except FileNotFoundError as e:
+        s.err_console.print(f"devproxy: 打不开编辑器 {editor}：{escape(str(e))}")
+        raise typer.Exit(EXIT_FAIL)
+    except OSError as e:
+        s.err_console.print(f"devproxy: 打开日志失败：{escape(str(e))}")
+        raise typer.Exit(EXIT_FAIL)
+    if code != 0:
+        s.err_console.print(f"devproxy: 编辑器 {editor} 退出码 {code}")
+        raise typer.Exit(EXIT_FAIL)
+
+
 def _print_list(project_names: set[str] | None, project_path: Path | None) -> None:
     """列出能跟的日志目标。
 
@@ -172,17 +224,21 @@ def _print_list(project_names: set[str] | None, project_path: Path | None) -> No
         return
 
     # 标题行不带长路径（Rich 80 列会折行，名字与大小就对不齐）；
-    # 项目的完整路径单独成行，折了也不影响表格
+    # 每个日志的完整路径单独成行 —— 折了也不影响上面对齐，
+    # 用户要复制路径（喂给编辑器、tail、grep）时也不用自己拼
     if in_project:
-        s.console.print(f"本项目（devproxy.toml：{project_path}）：")
+        s.console.print(f"本项目（devproxy.toml：{project_path}）：", soft_wrap=True)
     else:
-        s.console.print("路由日志（~/.local/state/devproxy/logs/routes/）：")
+        s.console.print("路由日志：")
     for path in files:
         try:
             size = _format_size(path.stat().st_size)
         except OSError:
             size = "?"
         s.console.print(f"  {path.stem:<20} {size:>8}")
+        # soft_wrap：不折行。路径被 Rich 折成两行就没法复制了（终端自己会软换行，
+        # 但流里仍是一整行）
+        s.console.print(f"    {path}", soft_wrap=True)
 
     # 项目里声明了、但还没起过（没有日志文件）的路由也提示一下
     if in_project:
@@ -201,14 +257,30 @@ def logs(
     list_all: bool = typer.Option(
         False, "--list", help="列出能跟的日志目标（项目里只列本项目的），不跟随"
     ),
+    edit: bool = typer.Option(
+        False, "--edit", help="用 $EDITOR 打开日志文件（只对路由日志有效）"
+    ),
 ) -> None:
     """跟踪日志：服务（caddy / dnsmasq）或路由（sync 起的应用）。"""
+    if list_all and edit:
+        s.err_console.print("devproxy: --list 与 --edit 不能同时用")
+        raise typer.Exit(EXIT_USAGE)
+
     if list_all:
         if service:
             _print_one(service)
             raise typer.Exit(0)
         project_names, project_path = _declared_route_names()
         _print_list(project_names, project_path)
+        raise typer.Exit(0)
+
+    if edit:
+        if not service:
+            s.err_console.print(
+                "devproxy: --edit 要指定打开哪个日志（devproxy logs <名字> --edit）"
+            )
+            raise typer.Exit(EXIT_USAGE)
+        _edit_log(service)
         raise typer.Exit(0)
 
     if service is None:

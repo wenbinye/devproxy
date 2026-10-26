@@ -207,6 +207,25 @@ def test_linux_tail_service_log_streams_to_terminal(monkeypatch):
     assert "capture_output" not in recorded["kwargs"], "不得捕获输出，须流式写到终端"
 
 
+def test_linux_open_in_editor_splits_command_and_streams(monkeypatch, tmp_path):
+    """编辑器命令按 shell 词法拆开，文件路径跟在最后；且必须继承 stdio。"""
+    recorded = {}
+
+    class _Done:
+        returncode = 0
+
+    def fake_run(argv, **kwargs):
+        recorded["argv"] = list(argv)
+        recorded["kwargs"] = kwargs
+        return _Done()
+
+    monkeypatch.setattr(linux_mod.subprocess, "run", fake_run)
+    target = tmp_path / "myapp.log"
+    assert LinuxPlatform().open_in_editor(target, "code -w") == 0
+    assert recorded["argv"] == ["code", "-w", str(target)]
+    assert "capture_output" not in recorded["kwargs"], "不得捕获输出，编辑器要接管终端"
+
+
 def test_linux_service_mutations_raise_on_failure(
     monkeypatch, tmp_path, allow_platform_mutation
 ):

@@ -6,6 +6,7 @@ import getpass
 import ipaddress
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -624,6 +625,11 @@ class LinuxPlatform:
     def tail_service_log(self, name: str) -> None:
         """流式跟随服务日志：继承终端 stdio（不捕获），Ctrl-C 自然传播。"""
         subprocess.run(["journalctl", "--user", "-u", name, "-f"])
+
+    def open_in_editor(self, path: Path, editor: str) -> int:
+        """用编辑器打开文件：继承 stdio（编辑器要接管终端），返回退出码。"""
+        argv = shlex.split(editor) + [str(path)]
+        return subprocess.run(argv).returncode
 
     def enable_linger(self) -> tuple[int, str]:
         """启用 linger。
