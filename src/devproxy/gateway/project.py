@@ -22,6 +22,7 @@ otherwise users are left guessing at "a pile of TOML".
 
 from __future__ import annotations
 
+import re
 import tomllib
 from dataclasses import dataclass
 from dataclasses import field
@@ -30,6 +31,7 @@ from pathlib import Path
 from devproxy.core.config import READY_TIMEOUT_MAX
 from devproxy.core.config import READY_TIMEOUT_MIN
 from devproxy.gateway.names import InvalidNameError
+from devproxy.gateway.names import route_name_from_port_env
 from devproxy.gateway.names import validate_name
 
 PROJECT_FILE_NAME = "devproxy.toml"
@@ -166,7 +168,41 @@ def _parse(path: Path, data: dict) -> ProjectFile:
             )
         seen[route.name] = index
         routes.append(route)
+    _check_port_references(path, routes)
     return ProjectFile(path=Path(path), routes=routes)
+
+
+# A command may use a sibling route's port: $DEVPROXY_API_PORT (or
+# ${DEVPROXY_API_PORT}). Only the shell form is recognized -- that is the
+# form that gets a number substituted at start time.
+_PORT_ENV_RE = re.compile(r"\$\{?(DEVPROXY_[A-Z0-9_]*_PORT)\b")
+
+
+def referenced_port_vars(command: list[str] | None) -> list[str]:
+    """The DEVPROXY_<NAME>_PORT variables a command actually uses."""
+    if not command:
+        return []
+    return sorted(set(_PORT_ENV_RE.findall(" ".join(command))))
+
+
+def _check_port_references(path: Path, routes: list[ProjectRoute]) -> None:
+    """Reject a command that asks for a port no route of this file provides.
+
+    devproxy exports the ports of the routes declared in the same file, so a
+    command referencing a route that is not declared here would silently get
+    an empty value. Better to say so while the file is being read.
+    """
+    declared = {r.name for r in routes}
+    for route in routes:
+        for var in referenced_port_vars(route.command):
+            target = route_name_from_port_env(var)
+            if target is None or target in declared:
+                continue
+            raise ProjectFileError(
+                f"{path}: route {route.name!r} uses ${var}, but no route "
+                f"{target!r} is declared in this file (devproxy only exports "
+                f"the ports of this project's routes)"
+            )
 
 
 def _parse_route(path: Path, index: int, item: object) -> ProjectRoute:
@@ -489,6 +525,11 @@ def render_project_file(routes: list[ProjectRoute], *, notes: list[str] | None =
         "# expanded automatically. Apps that need a port argument must wrap it in",
         "# sh -c so the shell expands it after port allocation:",
         '#   command = ["sh", "-c", "npx vite --port $PORT --host 127.0.0.1"]',
+        "#",
+        "# Each app also gets the port of every other route as",
+        "# DEVPROXY_<NAME>_PORT (name uppercased, dashes to underscores), so a",
+        "# frontend can point at its API without hardcoding a port:",
+        '#   command = ["sh", "-c", "BACKEND_PORT=$DEVPROXY_API_PORT npm run dev"]',
     ]
     for note in notes or []:
         lines.append(f"# {note}")

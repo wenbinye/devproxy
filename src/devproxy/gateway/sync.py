@@ -31,12 +31,15 @@ from devproxy.core.config import Config
 from devproxy.core.logs import rotate_at_start
 from devproxy.core.paths import Paths
 from devproxy.gateway.names import domain_for
+from devproxy.gateway.names import port_env_name
 from devproxy.gateway.project import MODE_EXPOSE
 from devproxy.gateway.project import MODE_UP
 from devproxy.gateway.project import ProjectFile
 from devproxy.gateway.project import ProjectRoute
+from devproxy.gateway.project import referenced_port_vars
 from devproxy.gateway.routes import Route
 from devproxy.gateway.routes import RouteTableError
+from devproxy.gateway.runner import alloc_port
 from devproxy.gateway.runner import kill_pid_group
 from devproxy.gateway.runner import reachable
 from devproxy.gateway.store import RouteStore
@@ -184,13 +187,26 @@ def execute_sync_plan(
     def record(outcome: SyncOutcome) -> None:
         outcomes[outcome.name] = outcome
 
+    # 0) Port allocation happens here, in one place, before anything starts:
+    # dynamic ports only help when a frontend can *find* its API's port, and
+    # that is only knowable if every port of this batch is chosen up front.
+    # The map is exported to every app as DEVPROXY_<NAME>_PORT.
+    known_ports, allocated = _plan_ports(project, plan, store)
+    _apply_env_drift(plan, known_ports)
+
     # 1) up mode: start all background workers first (in parallel), then wait
     # for each to become ready.
     workers: list[tuple[ProjectRoute, subprocess.Popen, Path]] = []
     for declared in plan.create_up:
         log_path = route_log_path(paths, declared.name)
         try:
-            proc = _spawn_worker(project, declared, log_path)
+            proc = _spawn_worker(
+                project,
+                declared,
+                log_path,
+                port=allocated[declared.name],
+                extra_env=_sibling_env(known_ports),
+            )
         except OSError as e:
             record(SyncOutcome(declared.name, "failed", f"cannot start background process: {e}"))
             continue
@@ -352,7 +368,91 @@ def prune_routes(store: RouteStore, routes: list[Route]) -> None:
             kill_pid_group(route.pid, route.proc_start)
 
 
-def _spawn_worker(project: ProjectFile, declared: ProjectRoute, log_path: Path) -> subprocess.Popen:
+def _plan_ports(
+    project: ProjectFile, plan: SyncPlan, store: RouteStore
+) -> tuple[dict[str, int], dict[str, int]]:
+    """Choose the port of every route this project touches, up front.
+
+    Returns (known_ports, allocated):
+
+    - known_ports: name -> port for every route of this project -- already
+      running ones (skip/conflict keep their port), new expose routes
+      (declared port), and new up routes (allocated here when the declaration
+      does not pin one). This map is what DEVPROXY_<NAME>_PORT exports to each
+      app. It is deliberately scoped to the project: a route of another
+      project has no business in this app's environment.
+    - allocated: the port chosen for each new up-mode route (the declaration's
+      port when it pins one). The worker is told to use exactly this port, so
+      the map stays consistent with what actually starts.
+    """
+    existing = {r.name: r for r in store.list()}
+    known: dict[str, int] = {}
+    for declared in project.routes:
+        current = existing.get(declared.name)
+        if current is not None and current.port:
+            known[declared.name] = current.port
+        elif declared.mode == MODE_EXPOSE and declared.port:
+            known[declared.name] = int(declared.port)
+    allocated: dict[str, int] = {}
+    for declared in plan.create_up:
+        port = int(declared.port) if declared.port else alloc_port()
+        allocated[declared.name] = port
+        known[declared.name] = port
+    return known, allocated
+
+
+def _sibling_env(known_ports: dict[str, int]) -> dict[str, str]:
+    """DEVPROXY_<NAME>_PORT for every route of the project (own name included:
+    it duplicates PORT, but keeps the map symmetric and shell-simple)."""
+    return {port_env_name(n): str(p) for n, p in known_ports.items()}
+
+
+def _apply_env_drift(plan: SyncPlan, known_ports: dict[str, int]) -> None:
+    """Turn "would skip" into "conflict" when a sibling's port changed.
+
+    An app that was started with DEVPROXY_API_PORT=32847 keeps that value in
+    its environment. When the API is restarted and gets another port, the
+    frontend is now pointing at a dead port -- and nothing about its own
+    declaration changed, so the ordinary conflict check stays silent. The
+    route table remembers what each app was started with, so the drift is
+    detected here and reported as a conflict: the user decides when to
+    restart (devproxy down <name> && devproxy up).
+    """
+    expected = _sibling_env(known_ports)
+    drifted: list[tuple[ProjectRoute, Route, str]] = []
+    for declared, current in list(plan.skip):
+        if not current.env:
+            # Started before devproxy exported sibling ports -- nothing to
+            # compare against, and no stale pointer either.
+            continue
+        # Only the variables the app actually uses matter: a route that never
+        # mentions $DEVPROXY_WEB_PORT does not care that the web route got
+        # another port.
+        used = referenced_port_vars(current.command)
+        if not used:
+            continue
+        changes = [
+            f"{key}: {current.env.get(key, '-')} -> {expected.get(key, '-')}"
+            for key in used
+            if current.env.get(key) != expected.get(key)
+        ]
+        if not changes:
+            continue
+        drifted.append((declared, current, "sibling port changed (" + ", ".join(changes) + ")"))
+    if not drifted:
+        return
+    plan.skip = [item for item in plan.skip if item not in [(d, c) for d, c, _ in drifted]]
+    plan.conflict.extend(drifted)
+
+
+def _spawn_worker(
+    project: ProjectFile,
+    declared: ProjectRoute,
+    log_path: Path,
+    *,
+    port: int,
+    extra_env: dict[str, str],
+) -> subprocess.Popen:
     """Start the background worker: it runs the app and stays with it.
 
     Independent session (start_new_session) -- it keeps staying with the app
@@ -362,11 +462,14 @@ def _spawn_worker(project: ProjectFile, declared: ProjectRoute, log_path: Path) 
     payload = {
         "name": declared.name,
         "command": list(declared.command or []),
-        "port": declared.port,
+        "port": port,
         "ready_timeout": declared.ready_timeout,
         "cwd": str(project.project_dir),
         "source": str(project.path),
         "log_path": str(log_path),
+        # Sibling ports (DEVPROXY_<NAME>_PORT) -- the app's own port is
+        # already in the payload as "port".
+        "extra_env": extra_env,
     }
     env = dict(os.environ)
     env[PAYLOAD_ENV] = json.dumps(payload)

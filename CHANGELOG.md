@@ -8,6 +8,31 @@ User-visible changes to devproxy. The format follows
 
 中文版：[CHANGELOG.zh-CN.md](CHANGELOG.zh-CN.md)
 
+## [Unreleased]
+
+### Added
+
+- **Sibling route ports**: every app of a project receives the port of every other
+  route of the same `devproxy.toml` as `DEVPROXY_<NAME>_PORT` (e.g. `api` →
+  `DEVPROXY_API_PORT`). The ports of a project are now allocated **before** any app
+  starts, so a frontend can point at its API without a hardcoded port:
+
+  ```toml
+  [[routes]]
+  name = "api"
+  command = ["sh", "-c", "uv run uvicorn app:app --port $PORT"]
+
+  [[routes]]
+  name = "web"
+  command = ["sh", "-c", "cd frontend && BACKEND_PORT=$DEVPROXY_API_PORT npm run dev"]
+  ```
+
+- A command that references a route the file does not declare is **rejected** while the
+  file is read (`route 'web' uses $DEVPROXY_API_PORT, but no route 'api' is declared`).
+- When a referenced sibling's port changed, the app holding the stale pointer is
+  reported as a **conflict** (`sibling port changed (DEVPROXY_API_PORT: 49435 -> 51717)`)
+  instead of silently proxying to a dead port.
+
 ## [0.1.0] - 2026-10-27
 
 ### Added

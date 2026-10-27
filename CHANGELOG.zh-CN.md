@@ -6,6 +6,30 @@
 
 > 0.1.0 之前没有正式发布，本文件从 0.1.0 起记。
 
+## [未发布]
+
+### 新增
+
+- **兄弟路由的端口**：同一份 `devproxy.toml` 里的每个应用，都会拿到其它路由的端口
+  环境变量 `DEVPROXY_<名字>_PORT`（`api` → `DEVPROXY_API_PORT`）。一个项目的端口现在
+  在**任何应用启动之前**就全部分配好，前端因此不必写死后端端口：
+
+  ```toml
+  [[routes]]
+  name = "api"
+  command = ["sh", "-c", "uv run uvicorn app:app --port $PORT"]
+
+  [[routes]]
+  name = "web"
+  command = ["sh", "-c", "cd frontend && BACKEND_PORT=$DEVPROXY_API_PORT npm run dev"]
+  ```
+
+- 命令里引用了本文件没有声明的路由，会在**读文件时**直接报错
+  （`route 'web' uses $DEVPROXY_API_PORT, but no route 'api' is declared`）。
+- 被引用的兄弟路由换了端口时，握着过期指针的应用会被报成**冲突**
+  （`sibling port changed (DEVPROXY_API_PORT: 49435 -> 51717)`），
+  而不是悄悄代理到一个死端口。
+
 ## [0.1.0]（2026-10-27）
 
 ### 新增

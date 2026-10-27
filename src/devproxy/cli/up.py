@@ -12,6 +12,7 @@ from devproxy.cli._shared import EXIT_USAGE
 from devproxy.core.config import READY_TIMEOUT_MAX
 from devproxy.core.config import READY_TIMEOUT_MIN
 from devproxy.gateway.names import InvalidNameError
+from devproxy.gateway.names import port_env_name
 from devproxy.gateway.names import validate_name
 from devproxy.gateway.routes import RouteTableError
 from devproxy.gateway.runner import PreconditionError
@@ -101,6 +102,14 @@ def up(
             port=port,
             ready_timeout=ready_timeout,
             on_ready=on_ready,
+            # Sibling routes that are already registered: their ports are
+            # known, so the app can be pointed at them (a frontend at its
+            # API) even in foreground mode.
+            extra_env={
+                port_env_name(r.name): str(r.port)
+                for r in store.list()
+                if r.port and r.name != name
+            },
         )
     except PreconditionError as e:
         # Caddy not running is an unmet precondition, not a runtime failure -- exit 3

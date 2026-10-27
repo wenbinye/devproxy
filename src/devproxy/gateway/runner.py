@@ -24,6 +24,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from dataclasses import field
 from pathlib import Path
 from types import FrameType
 from typing import Any
@@ -33,6 +34,7 @@ from devproxy.core.logs import RotatingLogWriter
 from devproxy.gateway.caddy import CaddyAdmin
 from devproxy.gateway.caddy import CaddyError
 from devproxy.gateway.names import domain_for
+from devproxy.gateway.names import port_env_name
 from devproxy.gateway.names import validate_name
 from devproxy.gateway.routes import Route
 from devproxy.gateway.routes import RouteTable
@@ -95,6 +97,11 @@ class UpRequest:
     # output inherits the current terminal (old behavior of foreground
     # `devproxy up`).
     log_path: Path | None = None
+    # Extra environment variables for the child. This is how a sibling
+    # route's port reaches an app that needs it (a frontend proxying to
+    # its API): devproxy exports DEVPROXY_<NAME>_PORT for every other
+    # route of the same project.
+    extra_env: dict[str, str] = field(default_factory=dict)
 
 
 def _start_log_pump(stream, path: Path) -> None:
@@ -490,6 +497,7 @@ class UpRunner:
         port: int | None = None,
         ready_timeout: int | None = None,
         on_ready: Callable[[str, int], None] | None = None,
+        extra_env: dict[str, str] | None = None,
     ) -> int:
         """CLI-compatible entry point; the real orchestration lives in
         `_execute`.
@@ -506,6 +514,7 @@ class UpRunner:
                 port=port,
                 ready_timeout=ready_timeout,
                 on_ready=on_ready,
+                extra_env=dict(extra_env or {}),
             )
         )
 
@@ -626,6 +635,14 @@ class UpRunner:
 
     def _spawn(self, req: UpRequest, port: int, child: _ChildHandle) -> subprocess.Popen:
         env = dict(os.environ, PORT=str(port))
+        # The app's own port under the same naming scheme the siblings
+        # use, so a command can refer to itself the same way it refers
+        # to the others.
+        env[port_env_name(req.name)] = str(port)
+        # Sibling route ports (DEVPROXY_<NAME>_PORT) and any other
+        # project-level variables. They are set **after** PORT, so a
+        # project cannot accidentally shadow the port devproxy assigned.
+        env.update(req.extra_env)
         try:
             # cwd=None behaves exactly as before (inherit the current working
             # directory); when cwd is set, place the child in that directory
@@ -681,6 +698,10 @@ class UpRunner:
             proc_start=child.start,
             created_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             source=req.source,
+            # What the app was actually started with -- the sibling ports it
+            # was told about. A later sync compares this with the current
+            # ports to spot a stale pointer.
+            env={port_env_name(req.name): str(port), **req.extra_env},
         )
 
     def _deregister(self, route: Route) -> None:

@@ -102,6 +102,54 @@ command = ["sh", "-c", "npx vite --port $PORT --host 127.0.0.1"]
 
 `sh` expands `$PORT` only after the child process has started, by which time devproxy has already
 written the port into the environment.
+
+### One route's port is available to the others
+
+`devproxy up` allocates **all** the ports of a project **before** starting anything, so one app
+can point at another without a hardcoded port. Every app receives the port of every other
+route **of the same project file** as an environment variable:
+
+| Route | Variable |
+|---|---|
+| `api` | `DEVPROXY_API_PORT` |
+| `pp-api` | `DEVPROXY_PP_API_PORT` |
+
+The name is uppercased and dashes become underscores. An app's own port is available under the
+same name: inside the `api` route, `DEVPROXY_API_PORT` is the same value as `$PORT`.
+
+```toml
+[[routes]]
+name = "api"
+command = ["sh", "-c", "uv run uvicorn app:app --port $PORT"]
+
+[[routes]]
+name = "web"
+command = ["sh", "-c", "cd frontend && BACKEND_PORT=$DEVPROXY_API_PORT npm run dev"]
+```
+
+This is what makes dynamic ports usable for a frontend/backend pair: the frontend proxies to the
+port the backend actually got, and two checkouts of the same project can run side by side.
+
+**A reference to a route this file does not declare is an error** -- the variable would be
+empty, so the file is rejected while it is read:
+
+```
+devproxy.toml: route 'web' uses $DEVPROXY_API_PORT, but no route 'api' is declared in this file
+```
+
+**When a sibling's port changes, the app that uses it is reported as a conflict.** The frontend
+holds the port the API had when it started; if the API is restarted on another port, the
+frontend would silently proxy to a dead port. devproxy remembers what each app was started with
+and says so instead of pretending everything is fine:
+
+```
+⚠️  conflict web → https://web.test -- sibling port changed (DEVPROXY_API_PORT: 49435 -> 51717)
+   Fix: run devproxy down web and then devproxy up again
+```
+
+Only the routes whose command actually mentions the variable are checked -- a route that never
+reads `$DEVPROXY_API_PORT` does not care that the API moved.
+
 ### How to use it
 
 ```bash

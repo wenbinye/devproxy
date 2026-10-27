@@ -51,6 +51,11 @@ class Route:
     # `devproxy up` / `devproxy expose` -- `devproxy up --prune` never touches
     # them (processes the user started should not be removed by a file).
     source: str | None = None
+    # The DEVPROXY_<NAME>_PORT values this app was started with (its own port
+    # included). Recorded so a later sync can tell that a sibling's port
+    # changed -- the app is then running with a stale pointer, which is a
+    # conflict the user has to resolve, not something to fix silently.
+    env: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         d = {
@@ -70,6 +75,8 @@ class Route:
             d["created_at"] = self.created_at
         if self.source is not None:
             d["source"] = self.source
+        if self.env:
+            d["env"] = dict(self.env)
         return d
 
     @classmethod
@@ -85,6 +92,7 @@ class Route:
             proc_start=d.get("proc_start"),
             created_at=d.get("created_at", ""),
             source=d.get("source"),
+            env=dict(d.get("env") or {}),
         )
 
 

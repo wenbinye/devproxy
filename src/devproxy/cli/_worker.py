@@ -100,6 +100,7 @@ def main(argv: list[str] | None = None) -> int:
         cwd=Path(cwd) if cwd else None,
         source=payload.get("source"),
         log_path=Path(log_path) if log_path else None,
+        extra_env={str(k): str(v) for k, v in (payload.get("extra_env") or {}).items()},
     )
     try:
         paths, config, store, admin = build_context()

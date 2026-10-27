@@ -98,7 +98,7 @@ def test_separator_is_split_and_passed_through(env, monkeypatch):
     _patch_ctx(monkeypatch, env)
     captured = {}
 
-    def fake_run(self, name, cmd, port=None, ready_timeout=None, on_ready=None):
+    def fake_run(self, name, cmd, port=None, ready_timeout=None, on_ready=None, extra_env=None):
         captured["name"] = name
         captured["cmd"] = cmd
         captured["port"] = port
@@ -298,7 +298,7 @@ def test_up_prints_trust_hint_when_ca_not_trusted(env, monkeypatch):
     paths, cfg, _ = _patch_ctx(monkeypatch, env)
     _write_ca(Path(cfg.storage))
 
-    def fake_run(self, name, cmd, port=None, ready_timeout=None, on_ready=None):
+    def fake_run(self, name, cmd, port=None, ready_timeout=None, on_ready=None, extra_env=None):
         if on_ready is not None:
             on_ready("codeup.test", 8080)
         return 0

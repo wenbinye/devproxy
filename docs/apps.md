@@ -61,6 +61,32 @@ process starts.
 `--ready-timeout`); everything after `--` is passed to the child process **verbatim**, and
 devproxy does not parse it. This keeps the app's own `--port` from being stolen by devproxy.
 Without `--`, the tool exits with an error (code 2).
+
+## One app pointing at another
+
+In a `devproxy.toml` the ports of the whole project are allocated **before** any app starts,
+and every app receives the port of the project's other routes as an environment variable --
+`DEVPROXY_<NAME>_PORT` (route `api` → `DEVPROXY_API_PORT`, dashes become underscores). A
+frontend therefore never has to hardcode the API's port:
+
+```toml
+[[routes]]
+name = "api"
+command = ["sh", "-c", "uv run uvicorn app:app --port $PORT"]
+
+[[routes]]
+name = "web"
+command = ["sh", "-c", "cd frontend && BACKEND_PORT=$DEVPROXY_API_PORT npm run dev"]
+```
+
+`BACKEND_PORT` is the *project's* variable -- read the frontend's proxy config to find which
+one it builds the API target from. The referenced route must be declared in the same file,
+otherwise the variable would be empty and devproxy rejects the file.
+
+When a referenced sibling is restarted on another port, the app still holding the old one is
+reported as a conflict (`sibling port changed (DEVPROXY_API_PORT: 49435 -> 51717)`) --
+restart it with `devproxy down <name>` and `devproxy up`.
+
 ## Other caveats on the app side
 
 - **Allow the Host header**: the request's Host header is `<name>.test`. Vite needs

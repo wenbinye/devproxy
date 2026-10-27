@@ -10,6 +10,7 @@ from devproxy.gateway.project import PROJECT_FILE_NAME
 from devproxy.gateway.project import ProjectFileError
 from devproxy.gateway.project import find_project_file
 from devproxy.gateway.project import load_project_file
+from devproxy.gateway.project import referenced_port_vars
 from devproxy.gateway.project import resolve_project_file
 
 VALID = """
@@ -284,3 +285,38 @@ def test_missing_file_is_reported(tmp_path):
     with pytest.raises(ProjectFileError) as cm:
         load_project_file(tmp_path / "absent.toml")
     assert "does not exist" in str(cm.value)
+
+
+def test_sibling_port_reference_to_undeclared_route_is_rejected(tmp_path):
+    """A command asking for a port no route of this file provides would get
+    an empty value -- say so while the file is read."""
+    path = _write(
+        tmp_path / PROJECT_FILE_NAME,
+        '[[routes]]\nname = "web"\ncommand = ["sh", "-c", "BACKEND_PORT=$DEVPROXY_API_PORT npm run dev"]\n',
+    )
+    with pytest.raises(ProjectFileError) as cm:
+        load_project_file(path)
+    assert "DEVPROXY_API_PORT" in str(cm.value)
+    assert "api" in str(cm.value)
+
+
+def test_sibling_port_reference_to_declared_route_is_accepted(tmp_path):
+    path = _write(
+        tmp_path / PROJECT_FILE_NAME,
+        '[[routes]]\nname = "api"\ncommand = ["npm", "run", "api"]\n\n'
+        '[[routes]]\nname = "web"\ncommand = ["sh", "-c", "BACKEND_PORT=$DEVPROXY_API_PORT npm run dev"]\n',
+    )
+    project = load_project_file(path)
+    assert [r.name for r in project.routes] == ["api", "web"]
+
+
+def test_referenced_port_vars_reads_both_shell_forms(tmp_path):
+    path = _write(
+        tmp_path / PROJECT_FILE_NAME,
+        '[[routes]]\nname = "api"\ncommand = ["npm", "run", "api"]\n\n'
+        '[[routes]]\nname = "web"\n'
+        'command = ["sh", "-c", "A=$DEVPROXY_API_PORT B=${DEVPROXY_WEB_PORT}"]\n',
+    )
+    project = load_project_file(path)
+    web = project.get("web")
+    assert referenced_port_vars(web.command) == ["DEVPROXY_API_PORT", "DEVPROXY_WEB_PORT"]

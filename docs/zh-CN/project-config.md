@@ -99,6 +99,52 @@ command = ["sh", "-c", "npx vite --port $PORT --host 127.0.0.1"]
 ```
 
 `sh` 在子进程启动后才展开 `$PORT`，那时 devproxy 已经把端口写进环境变量了。
+
+### 一个路由的端口，别的路由也拿得到
+
+`devproxy up` 会**先**把本项目所有路由的端口一次分配完，再启动任何应用 —— 所以一个应用
+可以指向另一个应用，而不必写死端口。每个应用都会拿到**同一个项目文件里**其它路由的端口
+环境变量：
+
+| 路由 | 变量 |
+|---|---|
+| `api` | `DEVPROXY_API_PORT` |
+| `pp-api` | `DEVPROXY_PP_API_PORT` |
+
+名字统一大写，短杠换成下划线。应用自己的端口也用同样的名字：在 `api` 路由里，
+`DEVPROXY_API_PORT` 和 `$PORT` 是同一个值。
+
+```toml
+[[routes]]
+name = "api"
+command = ["sh", "-c", "uv run uvicorn app:app --port $PORT"]
+
+[[routes]]
+name = "web"
+command = ["sh", "-c", "cd frontend && BACKEND_PORT=$DEVPROXY_API_PORT npm run dev"]
+```
+
+这正是动态端口能用在前后端组合上的原因：前端代理到后端**实际拿到的**端口，
+同一份代码的两个 checkout 也能同时跑。
+
+**引用了本文件没有声明的路由 = 报错**。那个变量会是空的，所以读文件时就会拒绝：
+
+```
+devproxy.toml: route 'web' uses $DEVPROXY_API_PORT, but no route 'api' is declared in this file
+```
+
+**兄弟路由换了端口，用到它的那个应用会被报成冲突**。前端记住的是后端启动时给的端口；
+后端重启后换了端口，前端就会悄悄代理到一个死端口。devproxy 记得每个应用启动时拿到的是什么，
+于是把它说出来，而不是假装一切正常：
+
+```
+⚠️  conflict web → https://web.test -- sibling port changed (DEVPROXY_API_PORT: 49435 -> 51717)
+   Fix: run devproxy down web and then devproxy up again
+```
+
+只检查命令里**真正用到**那个变量的路由 —— 根本没读 `$DEVPROXY_API_PORT` 的应用，不关心
+后端换没换端口。
+
 ### 怎么用
 
 ```bash

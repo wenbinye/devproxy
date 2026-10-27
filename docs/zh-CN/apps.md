@@ -52,6 +52,30 @@ devproxy up codeup-api -- sh -c 'gunicorn app:app --bind 127.0.0.1:$PORT'
 **`--` 是必须的**：`--` 之前是 devproxy 自己的参数（`name`、`--port`、`--ready-timeout`），
 `--` 之后的一切**原样**交给子进程，devproxy 不解析。这样应用自己的 `--port`
 不会被 devproxy 抢走。缺少 `--` 时工具直接报错退出（码 2）。
+
+## 一个应用指向另一个应用
+
+在 `devproxy.toml` 里，整个项目的端口会在任何应用启动**之前**分配完，每个应用都会拿到
+本项目其它路由的端口环境变量 —— `DEVPROXY_<名字>_PORT`（`api` → `DEVPROXY_API_PORT`，
+短杠换成下划线）。前端因此完全不必写死后端端口：
+
+```toml
+[[routes]]
+name = "api"
+command = ["sh", "-c", "uv run uvicorn app:app --port $PORT"]
+
+[[routes]]
+name = "web"
+command = ["sh", "-c", "cd frontend && BACKEND_PORT=$DEVPROXY_API_PORT npm run dev"]
+```
+
+`BACKEND_PORT` 是**项目自己的**变量名 —— 去前端的代理配置里看它用哪个变量拼 API 地址。
+被引用的路由必须在同一个文件里声明，否则变量会是空值，devproxy 会直接拒绝这个文件。
+
+被引用的兄弟路由重启后换了端口时，还握着旧端口的应用会被报成冲突
+（`sibling port changed (DEVPROXY_API_PORT: 49435 -> 51717)`），
+用 `devproxy down <名字>` 再 `devproxy up` 重启它。
+
 ## 应用侧的其它注意点
 
 - **Host 校验放行**：请求的 Host 头是 `<name>.test`。Vite 需要 `server.allowedHosts`、

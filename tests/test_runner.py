@@ -231,6 +231,42 @@ def test_run_injects_port_and_registers_route(paths):
     assert table["routes"][0]["command"][0] == sys.executable
 
 
+def test_run_injects_sibling_port_env(paths, tmp_path):
+    """The child must see the sibling route's port (DEVPROXY_<NAME>_PORT) and
+    its own under the same name -- that is how a frontend finds its API."""
+    paths.ensure_files()
+    runner = _runner(paths)
+    marker = tmp_path / "env.txt"
+    code = (
+        "import os, pathlib, socket\n"
+        "pathlib.Path(os.environ['MARKER']).write_text(\n"
+        "    os.environ.get('DEVPROXY_API_PORT', '') + '|' + os.environ.get('DEVPROXY_CODEUP_PORT', '')\n"
+        ")\n"
+        "s = socket.socket()\n"
+        "s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n"
+        "s.bind(('127.0.0.1', int(os.environ['PORT'])))\n"
+        "s.listen(8)\n"
+        "s.settimeout(5)\n"
+        "try:\n"
+        "    c, _ = s.accept()\n"
+        "    c.close()\n"
+        "except OSError:\n"
+        "    pass\n"
+    )
+    os.environ["MARKER"] = str(marker)
+    try:
+        runner.run(
+            "codeup",
+            [sys.executable, "-c", code],
+            extra_env={"DEVPROXY_API_PORT": "41001"},
+        )
+    finally:
+        os.environ.pop("MARKER", None)
+    sibling, own = marker.read_text(encoding="utf-8").split("|")
+    assert sibling == "41001"
+    assert own.isdigit() and int(own) > 0, "the route must know its own port too"
+
+
 def test_run_cleans_up_route_when_child_exits(paths):
     """The route must be deregistered after the child exits."""
     paths.ensure_files()
