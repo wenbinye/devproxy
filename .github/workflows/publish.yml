@@ -18,7 +18,7 @@ jobs:
       id-token: write # the only permission trusted publishing needs
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
       - name: Install dependencies (from the lock file)
