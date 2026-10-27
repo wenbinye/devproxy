@@ -28,3 +28,6 @@ caddy.service
 
 # 录制 demo 的中间产物
 demo/
+
+# 推广物料草稿（不上仓库）
+.promo/
