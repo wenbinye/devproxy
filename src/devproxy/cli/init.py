@@ -62,21 +62,21 @@ def init(
     except InvalidNameError as e:
         s.fail(f"invalid route name {route_name!r}: {e}", EXIT_USAGE)
 
+    # The config is read (never written) for the domain suffix: the generated
+    # commands embed the routes' domains, and those must match the suffix the
+    # machine really uses.
+    _, config, _, _ = s.build_context()
+    suffix = getattr(config, "domain_suffix", None) or "test"
+
     if command or from_route:
         argv, notes = _resolve_command(root, command, from_route)
         routes = [ProjectRoute(name=route_name, mode=MODE_UP, command=argv)]
     else:
-        routes, notes = suggest_routes(root)
-        # An explicit --name wins over the guessed names only when there is
-        # exactly one route; with several, the name is the *API's* prefix and
-        # the web route is derived from it.
-        if len(routes) == 1:
-            routes = [ProjectRoute(name=route_name, mode=MODE_UP, command=routes[0].command)]
-        else:
-            routes[0] = ProjectRoute(name=route_name, mode=MODE_UP, command=routes[0].command)
-            routes[1] = ProjectRoute(
-                name=f"{route_name}-web", mode=MODE_UP, command=routes[1].command
-            )
+        # The names must be known **before** the commands are generated: the
+        # frontend command embeds the route names and the domain, so renaming
+        # the routes afterwards would leave the file pointing at names that no
+        # longer exist.
+        routes, notes = suggest_routes(root, api_name=route_name, suffix=suffix)
 
     content = render_project_file(routes, notes=notes)
     try:
@@ -86,8 +86,7 @@ def init(
 
     s.console.print(f"✔ Generated {target}")
     for route in routes:
-        domain = f"{route.name}.<suffix>"
-        s.console.print(f"  Route {route.name} → https://{domain}")
+        s.console.print(f"  Route {route.name} → https://{route.name}.{suffix}")
         if route.command:
             s.console.print(f"    command: {' '.join(route.command)}", soft_wrap=True)
         else:

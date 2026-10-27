@@ -55,9 +55,10 @@ devproxy up codeup-api -- sh -c 'gunicorn app:app --bind 127.0.0.1:$PORT'
 
 ## 一个应用指向另一个应用
 
-在 `devproxy.toml` 里，整个项目的端口会在任何应用启动**之前**分配完，每个应用都会拿到
-本项目其它路由的端口环境变量 —— `DEVPROXY_<名字>_PORT`（`api` → `DEVPROXY_API_PORT`，
-短杠换成下划线）。前端因此完全不必写死后端端口：
+在 `devproxy.toml` 里，整个项目的端口会在任何应用启动**之前**定下来，每个应用都会拿到
+本项目所有路由的端口环境变量 —— `DEVPROXY_<名字>_PORT`（`api` → `DEVPROXY_API_PORT`，
+短杠换成下划线）；自己的端口也用同样的名字（在 `api` 里，`DEVPROXY_API_PORT` 和
+`$PORT` 是同一个值）。前端因此完全不必写死后端端口：
 
 ```toml
 [[routes]]
@@ -72,9 +73,16 @@ command = ["sh", "-c", "cd frontend && BACKEND_PORT=$DEVPROXY_API_PORT npm run d
 `BACKEND_PORT` 是**项目自己的**变量名 —— 去前端的代理配置里看它用哪个变量拼 API 地址。
 被引用的路由必须在同一个文件里声明，否则变量会是空值，devproxy 会直接拒绝这个文件。
 
-被引用的兄弟路由重启后换了端口时，还握着旧端口的应用会被报成冲突
-（`sibling port changed (DEVPROXY_API_PORT: 49435 -> 51717)`），
-用 `devproxy down <名字>` 再 `devproxy up` 重启它。
+被引用的兄弟路由重启后换了端口时，还握着旧端口的那个应用会被报成冲突
+（`sibling port changed (DEVPROXY_API_PORT: 49435 -> 51717)`）—— devproxy 不会替你重启：
+用 `devproxy down <名字>` 再 `devproxy up`（项目模式）重启它。
+
+这是项目模式（`devproxy.toml`）。前台模式（`devproxy up <名字> -- CMD`）同样会注入
+`DEVPROXY_<名字>_PORT`，但取自**已注册的全部路由** —— 路由表是全局的，别的项目的路由
+也会进来。前台模式没有漂移检测，也没有「引用了未声明的路由」这种报错 —— 那个路由还没
+注册时，变量就是空的。
+
+完整语义见[项目级配置 · 一个路由的端口，别的路由也拿得到](project-config.md#一个路由的端口别的路由也拿得到)。
 
 ## 应用侧的其它注意点
 

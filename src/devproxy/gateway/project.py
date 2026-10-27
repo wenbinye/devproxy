@@ -454,7 +454,9 @@ _VITE_CONFIG_FILES = (
 )
 
 
-def suggest_routes(root: Path, *, suffix: str = "test") -> tuple[list[ProjectRoute], list[str]]:
+def suggest_routes(
+    root: Path, *, api_name: str | None = None, suffix: str = "test"
+) -> tuple[list[ProjectRoute], list[str]]:
     """Guess the **routes** of a project -- not just one command.
 
     A repository with a frontend next to the API needs two routes, and the
@@ -462,10 +464,17 @@ def suggest_routes(root: Path, *, suffix: str = "test") -> tuple[list[ProjectRou
     route of the same file as DEVPROXY_<NAME>_PORT, so the generated file can
     wire them together without a hardcoded port.
 
+    `api_name` overrides the API route's name (the `--name` of `devproxy init`)
+    and `suffix` is the configured domain suffix -- both must be decided
+    **before** the commands are built: the generated frontend command embeds
+    the route names (its domain in the allowed-hosts variable) and the API's
+    port variable name, so renaming the routes afterwards would leave the file
+    pointing at names that no longer exist.
+
     Returns (routes, notes). The notes explain every guess, so the user can
     see what was assumed (and the file carries the same notes as comments).
     """
-    api_name = route_name_from_dir(root)
+    api_name = api_name or route_name_from_dir(root)
     frontend = _detect_frontend(root)
     if frontend is None:
         command, reason = suggest_command(root)

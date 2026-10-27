@@ -25,11 +25,13 @@
   ```
 
 - 命令里引用了本文件没有声明的路由，会在**读文件时**直接报错
-  （`route 'web' uses $DEVPROXY_API_PORT, but no route 'api' is declared`）。
+  （`route 'web' uses $DEVPROXY_API_PORT, but no route 'api' is declared in this file
+  (devproxy only exports the ports of this project's routes)`）。
 - 被引用的兄弟路由换了端口时，握着过期指针的应用会被报成**冲突**
   （`sibling port changed (DEVPROXY_API_PORT: 49435 -> 51717)`），
   而不是悄悄代理到一个死端口。
-- `devproxy init` 在「前端 + 后端」的仓库里会生成**两条路由**并自动接线：前端命令
+- `devproxy init` 在「前端 + 后端」的仓库里会生成**两条路由**并自动接线：前端在
+  `frontend/` / `web/` / `client/` / `ui/` 里找，生成 `<API 名>-web` 路由；前端命令
   拿到 API 的动态端口（注入到它自己的配置读取的那个变量里），外加自己的域名
   （`__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS`，否则 Vite 6 对陌生 Host 头回 403）。
 
@@ -37,7 +39,7 @@
 
 - `devproxy init` 不再生成 devproxy 自己拒绝加载的文件：没有可猜命令的项目会得到
   `command = []`，`devproxy up` 直接报错「command must be a non-empty array」。
-  现在写入的是一个监听 `$PORT` 的占位命令，文件永远可加载、可启动。
+  现在写入的是一个占位命令（`python3 -m http.server`，监听 `$PORT`），文件永远可加载、可启动。
 - 项目的 dev 脚本跑的是 vite 时（`"dev": "vite --port 5174"`），`devproxy init`
   改为直接调用 vite：给脚本追加 `--port $PORT` 并不能可靠覆盖写死的端口，
   而命令行参数一定可以。

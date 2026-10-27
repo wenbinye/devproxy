@@ -16,7 +16,8 @@ User-visible changes to devproxy. The format follows
   the API, and wires them together: the frontend's command receives the API's dynamic
   port (`DEVPROXY_<API>_PORT`) in the variable its own config reads, plus its domain in
   `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS` (Vite 6 answers 403 for unknown Host
-  headers).
+  headers). The frontend is looked for in `frontend/` / `web/` / `client/` / `ui/` and
+  becomes a `<api-name>-web` route.
 
 - **Sibling route ports**: every app of a project receives the port of every other
   route of the same `devproxy.toml` as `DEVPROXY_<NAME>_PORT` (e.g. `api` →
@@ -34,7 +35,8 @@ User-visible changes to devproxy. The format follows
   ```
 
 - A command that references a route the file does not declare is **rejected** while the
-  file is read (`route 'web' uses $DEVPROXY_API_PORT, but no route 'api' is declared`).
+  file is read (`route 'web' uses $DEVPROXY_API_PORT, but no route 'api' is declared in
+  this file (devproxy only exports the ports of this project's routes)`).
 - When a referenced sibling's port changed, the app holding the stale pointer is
   reported as a **conflict** (`sibling port changed (DEVPROXY_API_PORT: 49435 -> 51717)`)
   instead of silently proxying to a dead port.
@@ -44,7 +46,8 @@ User-visible changes to devproxy. The format follows
 - `devproxy init` no longer writes a file that devproxy itself refuses to load: a
   project with no guessable command got `command = []`, and `devproxy up` rejected it
   with "command must be a non-empty array". The generated file now contains a
-  placeholder command that listens on `$PORT`, so it is always loadable and startable.
+  placeholder command (`python3 -m http.server` on `$PORT`), so it is always loadable
+  and startable.
 - `devproxy init` calls vite directly when the project's dev script runs vite
   (`"dev": "vite --port 5174"`): appending `--port $PORT` to such a script does not
   reliably override the hardcoded port, while the CLI flag always does.

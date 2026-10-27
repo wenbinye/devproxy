@@ -254,14 +254,24 @@ def test_run_injects_sibling_port_env(paths, tmp_path):
         "    pass\n"
     )
     os.environ["MARKER"] = str(marker)
+    snapshots = []
     try:
         runner.run(
             "codeup",
             [sys.executable, "-c", code],
             extra_env={"DEVPROXY_API_PORT": "41001"},
+            on_ready=lambda domain, port: snapshots.append(
+                json.loads(paths.routes_json.read_text())
+            ),
         )
     finally:
         os.environ.pop("MARKER", None)
+    # The route table must record what the app was started with -- that record
+    # is what the drift check compares against later. Without it, a sibling's
+    # port change would go unnoticed.
+    recorded = snapshots[0]["routes"][0]["env"]
+    assert recorded["DEVPROXY_API_PORT"] == "41001"
+    assert recorded["DEVPROXY_CODEUP_PORT"] == str(snapshots[0]["routes"][0]["port"])
     sibling, own = marker.read_text(encoding="utf-8").split("|")
     assert sibling == "41001"
     assert own.isdigit() and int(own) > 0, "the route must know its own port too"

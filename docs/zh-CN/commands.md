@@ -138,10 +138,11 @@ devproxy init --from my-running-svc   # 从已注册的同名路由导入它的�
 **没有明确证据就不猜** —— 猜错比不猜更糟。详见
 [项目级配置 · 快速创建](project-config.md#快速创建devproxy-init)。
 
-**前端 + 后端的仓库会生成两条路由，并自动接线**：前端命令会拿到 API 的动态端口
-（注入到它自己的配置读取的那个变量里，从 vite 配置里找），外加路由域名
+**前端 + 后端的仓库会生成两条路由，并自动接线**：前端在 `frontend/`、`web/`、`client/`、
+`ui/` 里找（各自要有自己的 `package.json`），生成 `<API 名>-web` 路由。前端命令会拿到
+API 的动态端口（注入到它自己的配置读取的那个变量里，从 vite 配置里找），外加路由域名
 （`__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS`，否则 Vite 6 对陌生 Host 头回 403）。
-什么都猜不出来时，文件里写**占位命令**（监听 `$PORT` 的一个 python http.server）——
+什么都猜不出来时，文件里写**占位命令**（`python3 -m http.server`，监听 `$PORT`）——
 生成的文件永远可加载、可启动，不会出现 `command = []`。
 
 ## setup

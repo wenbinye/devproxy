@@ -29,15 +29,24 @@ devproxy init --from my-running-svc # 从已在跑的路由导入它的启动命
 ```bash
 $ devproxy init
 ✔ Generated /home/me/work/my-app/devproxy.toml
-  Route name: my-app  →  https://my-app.<suffix>
-  Start command: npm run dev
+  Route my-app → https://my-app.test
+    command: sh -c npm run dev -- --port $PORT
+  Route my-app-web → https://my-app-web.test
+    command: sh -c cd frontend && BACKEND_PORT=$DEVPROXY_MY_APP_PORT npm run dev
   package.json has a dev script -- confirm this is the start command you want
+  the frontend's config reads BACKEND_PORT -- the API's dynamic port is injected into it
 
 Next steps:
-  1. Check that the start command above is right (usually it needs editing)
+  1. Check the commands above (placeholders must be replaced)
   2. devproxy setup    # once: installs Caddy, the DNS route, and CA trust
-  3. devproxy up       # start the service
+  3. devproxy up       # start everything this file declares
 ```
+
+「前端 + 后端」的仓库会生成**两条路由**：API 路由和一条接好线的 `<name>-web` 路由。
+前端只在 `frontend/`、`web/`、`client/`、`ui/` 里找（各自要有自己的 `package.json`）；
+只有当它的配置真的读了端口变量（名字等于 `PORT` 或以 `_PORT` 结尾，如
+`env.BACKEND_PORT`）时才会注入端口 —— 否则生成的命令里没有端口，文件会提示你手写
+`<端口变量>=$DEVPROXY_<API>_PORT`。
 
 文件已存在时会拒绝（退出码 2），要覆盖加 `--force`。
 
@@ -45,13 +54,14 @@ Next steps:
 
 | 依据 | 猜出来的命令 |
 |---|---|
-| `package.json` 有 `dev` / `start` 脚本 | `sh -c "npm run dev -- --port $PORT"` |
+| `package.json` 有 `dev` / `start` 脚本（不是 vite） | `sh -c "npm run dev -- --port $PORT"` |
+| `package.json` 有 `dev` / `start` 脚本且跑的是 vite | `sh -c "./node_modules/.bin/vite --host 127.0.0.1 --port $PORT"`（直接调 vite —— 只有命令行参数能可靠覆盖配置里写死的端口） |
 | `composer.json` + `artisan`（Laravel） | `sh -c "php artisan serve --port=$PORT"` |
 | `composer.json` + `public/index.php`（Symfony 等） | `sh -c "php -S 127.0.0.1:$PORT -t public"` |
 | `composer.json` + 根目录 `index.php` | `sh -c "php -S 127.0.0.1:$PORT"` |
 | `composer.json` 有 `serve` / `start` / `dev` 脚本 | `sh -c "composer serve"` ⚠ **端口不可控** |
 | `Makefile` 里真有 `dev` 目标 | `make dev` |
-| `pyproject.toml`（Python） | 不猜 —— 入口点看不出来 |
+| `pyproject.toml`（Python） | 不猜 —— 入口点看不出来；文件里放**占位命令**（`python3 -m http.server $PORT`） |
 
 > **猜出来的命令必须让应用监听 `$PORT`** —— devproxy 的就绪判定就是
 > 「应用在 `$PORT` 上可连接」。命令若把应用起在固定端口上，`devproxy up` 会一直等到
@@ -102,9 +112,10 @@ command = ["sh", "-c", "npx vite --port $PORT --host 127.0.0.1"]
 
 ### 一个路由的端口，别的路由也拿得到
 
-`devproxy up` 会**先**把本项目所有路由的端口一次分配完，再启动任何应用 —— 所以一个应用
-可以指向另一个应用，而不必写死端口。每个应用都会拿到**同一个项目文件里**其它路由的端口
-环境变量：
+`devproxy up` 会**先**把本项目所有路由的端口一次定下来，再启动任何应用 —— 写死了
+`port = 5173` 的路由保持不变，其余的自动分配 —— 所以一个应用可以指向另一个应用，
+而不必写死端口。每个应用都会拿到**同一个项目文件里**所有路由的端口环境变量
+（`expose` 模式的路由也算在内，它的端口同样被导出）：
 
 | 路由 | 变量 |
 |---|---|
@@ -130,20 +141,25 @@ command = ["sh", "-c", "cd frontend && BACKEND_PORT=$DEVPROXY_API_PORT npm run d
 **引用了本文件没有声明的路由 = 报错**。那个变量会是空的，所以读文件时就会拒绝：
 
 ```
-devproxy.toml: route 'web' uses $DEVPROXY_API_PORT, but no route 'api' is declared in this file
+/home/me/work/my-app/devproxy.toml: route 'web' uses $DEVPROXY_API_PORT, but no route 'api' is declared in this file (devproxy only exports the ports of this project's routes)
 ```
+
+（消息里的路径是 `devproxy.toml` 的绝对路径。）
 
 **兄弟路由换了端口，用到它的那个应用会被报成冲突**。前端记住的是后端启动时给的端口；
 后端重启后换了端口，前端就会悄悄代理到一个死端口。devproxy 记得每个应用启动时拿到的是什么，
 于是把它说出来，而不是假装一切正常：
 
 ```
-⚠️  conflict web → https://web.test -- sibling port changed (DEVPROXY_API_PORT: 49435 -> 51717)
+⚠️  conflict web → https://web.test -- sibling port changed (DEVPROXY_API_PORT: 49435 -> 51717); current: mode up, port 49436, command ['sh', '-c', '...'], pid 1234
    Fix: run devproxy down web and then devproxy up again
 ```
 
 只检查命令里**真正用到**那个变量的路由 —— 根本没读 `$DEVPROXY_API_PORT` 的应用，不关心
-后端换没换端口。
+后端换没换端口。用旧版 devproxy 启动的应用没有记录环境变量，不会被检查 —— 升级后请把
+它们重启一次。
+
+冲突只报告不动手：devproxy 不会杀进程、也不会自动重启，`devproxy up` 以退出码 1 结束。
 
 ### 怎么用
 

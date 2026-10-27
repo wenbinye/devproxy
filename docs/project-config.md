@@ -30,15 +30,25 @@ It will:
 ```bash
 $ devproxy init
 ✔ Generated /home/me/work/my-app/devproxy.toml
-  Route name: my-app  →  https://my-app.<suffix>
-  Start command: npm run dev
+  Route my-app → https://my-app.test
+    command: sh -c npm run dev -- --port $PORT
+  Route my-app-web → https://my-app-web.test
+    command: sh -c cd frontend && BACKEND_PORT=$DEVPROXY_MY_APP_PORT npm run dev
   package.json has a dev script -- confirm this is the start command you want
+  the frontend's config reads BACKEND_PORT -- the API's dynamic port is injected into it
 
 Next steps:
-  1. Check that the start command above is right (usually it needs editing)
+  1. Check the commands above (placeholders must be replaced)
   2. devproxy setup    # once: installs Caddy, the DNS route, and CA trust
-  3. devproxy up       # start the service
+  3. devproxy up       # start everything this file declares
 ```
+
+A repository with a frontend next to the API gets **two routes**: the API route and a
+`<name>-web` route wired to it. The frontend is looked for in `frontend/`, `web/`,
+`client/` or `ui/` (each with its own `package.json`); the port variable is injected only
+when the frontend's config really reads one (a name equal to `PORT` or ending in `_PORT`,
+e.g. `env.BACKEND_PORT`) -- otherwise the generated command carries no port and the file
+tells you to wire `<PORT_VAR>=$DEVPROXY_<API>_PORT` in by hand.
 
 If the file already exists it refuses (exit code 2); add `--force` to overwrite.
 
@@ -46,13 +56,14 @@ If the file already exists it refuses (exit code 2); add `--force` to overwrite.
 
 | Evidence | Command guessed |
 |---|---|
-| `package.json` has a `dev` / `start` script | `sh -c "npm run dev -- --port $PORT"` |
+| `package.json` has a `dev` / `start` script (not vite) | `sh -c "npm run dev -- --port $PORT"` |
+| `package.json` has a `dev` / `start` script running vite | `sh -c "./node_modules/.bin/vite --host 127.0.0.1 --port $PORT"` (vite is called directly: only the CLI flag reliably overrides a port written in the config) |
 | `composer.json` + `artisan` (Laravel) | `sh -c "php artisan serve --port=$PORT"` |
 | `composer.json` + `public/index.php` (Symfony etc.) | `sh -c "php -S 127.0.0.1:$PORT -t public"` |
 | `composer.json` + root-level `index.php` | `sh -c "php -S 127.0.0.1:$PORT"` |
 | `composer.json` has a `serve` / `start` / `dev` script | `sh -c "composer serve"` ⚠ **port not controllable** |
 | `Makefile` really has a `dev` target | `make dev` |
-| `pyproject.toml` (Python) | no guess -- the entry point is not visible |
+| `pyproject.toml` (Python) | no guess -- the entry point is not visible; the file gets a **placeholder** command (`python3 -m http.server $PORT`) |
 
 > **A guessed command must make the app listen on `$PORT`** -- devproxy's readiness check is
 > "the app is connectable on `$PORT`". If the command starts the app on a fixed port, `devproxy up`
@@ -105,9 +116,11 @@ written the port into the environment.
 
 ### One route's port is available to the others
 
-`devproxy up` allocates **all** the ports of a project **before** starting anything, so one app
-can point at another without a hardcoded port. Every app receives the port of every other
-route **of the same project file** as an environment variable:
+`devproxy up` chooses **all** the ports of a project **before** starting anything -- a route
+that pins `port = 5173` keeps it, the others get a free one -- so one app can point at another
+without a hardcoded port. Every app receives the port of every route **of the same project
+file** as an environment variable (expose-mode routes included -- their port is exported
+too):
 
 | Route | Variable |
 |---|---|
@@ -134,8 +147,10 @@ port the backend actually got, and two checkouts of the same project can run sid
 empty, so the file is rejected while it is read:
 
 ```
-devproxy.toml: route 'web' uses $DEVPROXY_API_PORT, but no route 'api' is declared in this file
+/home/me/work/my-app/devproxy.toml: route 'web' uses $DEVPROXY_API_PORT, but no route 'api' is declared in this file (devproxy only exports the ports of this project's routes)
 ```
+
+(The path in the message is the absolute path of your `devproxy.toml`.)
 
 **When a sibling's port changes, the app that uses it is reported as a conflict.** The frontend
 holds the port the API had when it started; if the API is restarted on another port, the
@@ -143,12 +158,17 @@ frontend would silently proxy to a dead port. devproxy remembers what each app w
 and says so instead of pretending everything is fine:
 
 ```
-⚠️  conflict web → https://web.test -- sibling port changed (DEVPROXY_API_PORT: 49435 -> 51717)
+⚠️  conflict web → https://web.test -- sibling port changed (DEVPROXY_API_PORT: 49435 -> 51717); current: mode up, port 49436, command ['sh', '-c', '...'], pid 1234
    Fix: run devproxy down web and then devproxy up again
 ```
 
 Only the routes whose command actually mentions the variable are checked -- a route that never
-reads `$DEVPROXY_API_PORT` does not care that the API moved.
+reads `$DEVPROXY_API_PORT` does not care that the API moved. Apps started by an older
+devproxy have no recorded environment and are never checked: after an upgrade, restart them
+once.
+
+A conflict is reported, never acted on: devproxy does not kill or restart anything, and
+`devproxy up` exits with code 1.
 
 ### How to use it
 

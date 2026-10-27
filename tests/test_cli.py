@@ -1137,3 +1137,24 @@ def test_trust_tolerates_component_without_firefox_note(env, monkeypatch):
     monkeypatch.setattr("devproxy.cli._shared.CertComponent", PlainCert)
     res = CliRunner().invoke(app, ["trust", "--yes"])
     assert res.exit_code == 0, res.output
+
+
+def test_up_injects_sibling_route_ports(env, monkeypatch):
+    """Foreground `devproxy up` also hands the app the ports of the routes that
+    are already registered -- that is how a frontend finds its API when the
+    two are started separately."""
+    _patch_ctx(monkeypatch, env)
+    _seed_route(env / "state", name="api", port=41001)
+    captured = {}
+
+    def fake_run(self, name, cmd, port=None, ready_timeout=None, on_ready=None, extra_env=None):
+        captured["extra_env"] = extra_env
+        return 0
+
+    monkeypatch.setattr("devproxy.cli._shared.UpRunner.run", fake_run)
+    res = CliRunner().invoke(app, ["up", "web", "--", "npm", "run", "dev"])
+    assert res.exit_code == 0, res.output
+    assert captured["extra_env"]["DEVPROXY_API_PORT"] == "41001"
+    assert "DEVPROXY_WEB_PORT" not in captured["extra_env"], (
+        "the route being started does not get its own name in the table"
+    )

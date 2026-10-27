@@ -64,10 +64,11 @@ Without `--`, the tool exits with an error (code 2).
 
 ## One app pointing at another
 
-In a `devproxy.toml` the ports of the whole project are allocated **before** any app starts,
-and every app receives the port of the project's other routes as an environment variable --
-`DEVPROXY_<NAME>_PORT` (route `api` → `DEVPROXY_API_PORT`, dashes become underscores). A
-frontend therefore never has to hardcode the API's port:
+In a `devproxy.toml` the ports of the whole project are chosen **before** any app starts,
+and every app receives the port of every route of the project as an environment variable --
+`DEVPROXY_<NAME>_PORT` (route `api` → `DEVPROXY_API_PORT`, dashes become underscores); its
+own port under the same name (`inside api`, `DEVPROXY_API_PORT` equals `$PORT`). A frontend
+therefore never has to hardcode the API's port:
 
 ```toml
 [[routes]]
@@ -83,9 +84,20 @@ command = ["sh", "-c", "cd frontend && BACKEND_PORT=$DEVPROXY_API_PORT npm run d
 one it builds the API target from. The referenced route must be declared in the same file,
 otherwise the variable would be empty and devproxy rejects the file.
 
-When a referenced sibling is restarted on another port, the app still holding the old one is
-reported as a conflict (`sibling port changed (DEVPROXY_API_PORT: 49435 -> 51717)`) --
-restart it with `devproxy down <name>` and `devproxy up`.
+When a referenced sibling is restarted on another port, the app that was started with the
+old port is reported as a conflict (`sibling port changed (DEVPROXY_API_PORT: 49435 -> 51717)`)
+-- devproxy does not restart it for you: run `devproxy down <name>` followed by `devproxy up`
+(project mode).
+
+This is the project mode (`devproxy.toml`). Foreground mode (`devproxy up <name> -- CMD`)
+also exports `DEVPROXY_<NAME>_PORT`, but from the **already-registered** routes -- and the
+route table is global, so routes of other projects come in too. Foreground mode has no drift
+check and no "undeclared route" error: if that route is not registered yet, the variable is
+simply empty.
+
+See [Project-level configuration · One route's port is available to the
+others](project-config.md#one-routes-port-is-available-to-the-others) for the full
+semantics.
 
 ## Other caveats on the app side
 

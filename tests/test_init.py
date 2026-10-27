@@ -7,6 +7,8 @@ covered by tests/test_sync.py.
 from __future__ import annotations
 
 import json
+import os
+import time
 from pathlib import Path
 
 import pytest
@@ -331,6 +333,9 @@ def test_suggest_command_php_wins_over_makefile(tmp_path):
 def _monorepo(tmp_path, *, vite_config: str | None, dev_script: str = "vite --port 5174"):
     root = tmp_path / "demo"
     root.mkdir()
+    # .git makes detect_project_root stop here (and keeps the test independent
+    # of where TMPDIR happens to live)
+    (root / ".git").mkdir()
     (root / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
     frontend = root / "frontend"
     frontend.mkdir()
@@ -340,6 +345,15 @@ def _monorepo(tmp_path, *, vite_config: str | None, dev_script: str = "vite --po
     if vite_config is not None:
         (frontend / "vite.config.ts").write_text(vite_config, encoding="utf-8")
     return root
+
+
+@pytest.fixture(autouse=True)
+def _isolated_devproxy_home(tmp_path, monkeypatch):
+    """init reads the machine's config (the domain suffix) and state -- keep
+    the developer's own files out of every test in this module."""
+    monkeypatch.setenv("DEVPROXY_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("DEVPROXY_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("DEVPROXY_DATA_DIR", str(tmp_path / "data"))
 
 
 def test_init_generates_loadable_file_for_python_project(tmp_path, monkeypatch):
@@ -393,7 +407,7 @@ def test_init_monorepo_without_a_port_env_var_still_loads(tmp_path, monkeypatch)
     web_cmd = " ".join(project.get("demo-web").command or [])
     assert "DEVPROXY" not in web_cmd
     assert "placeholder" not in web_cmd
-    assert "8012" in result.output or "hardcode" in result.output
+    assert "hardcodes the API address" in result.output
 
 
 def test_suggest_routes_without_a_frontend_is_one_route(tmp_path):
@@ -401,6 +415,93 @@ def test_suggest_routes_without_a_frontend_is_one_route(tmp_path):
         json.dumps({"scripts": {"dev": "next dev"}}), encoding="utf-8"
     )
     routes, notes = suggest_routes(tmp_path)
-    assert [r.name for r in routes] == ["tmp"] or len(routes) == 1
     assert len(routes) == 1
+    assert routes[0].name == route_name_from_dir(tmp_path)
     assert any("confirm" in n for n in notes)
+
+
+def test_init_with_explicit_name_wires_the_renamed_routes(tmp_path, monkeypatch):
+    """--name renames the routes, so the generated command must refer to the
+    **new** names -- otherwise the file points at routes that do not exist and
+    devproxy refuses to load it."""
+    root = _monorepo(
+        tmp_path,
+        vite_config=(
+            "export default defineConfig(({ mode }) => ({\n"
+            "  server: { proxy: { '/api': { target: `http://localhost:${env.BACKEND_PORT ?? '8012'}` } } },\n"
+            "}));\n"
+        ),
+    )
+    monkeypatch.chdir(root)
+    result = _invoke(["init", "--name", "foo"])
+    assert result.exit_code == 0, result.output
+    project = load_project_file(root / "devproxy.toml")  # must be loadable
+    assert [r.name for r in project.routes] == ["foo", "foo-web"]
+    web_cmd = " ".join(project.get("foo-web").command or [])
+    assert "__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=foo-web.test" in web_cmd
+    assert "BACKEND_PORT=$DEVPROXY_FOO_PORT" in web_cmd
+    assert "DEMO" not in web_cmd.upper()
+
+
+def test_init_uses_the_configured_domain_suffix(tmp_path, monkeypatch):
+    """The domain in the generated command must use the suffix the machine
+    really uses -- a hardcoded 'test' would give the frontend a Host header
+    Vite rejects."""
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.toml").write_text(
+        'domain_suffix = "dev"\nallowed_domain_suffixes = ["dev"]\n', encoding="utf-8"
+    )
+    root = _monorepo(tmp_path, vite_config=None)
+    monkeypatch.chdir(root)
+    result = _invoke(["init"])
+    assert result.exit_code == 0, result.output
+    text = (root / "devproxy.toml").read_text(encoding="utf-8")
+    assert "__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=demo-web.dev" in text
+    assert "demo-web.test" not in text
+
+
+def test_init_non_vite_frontend_uses_npm_run(tmp_path, monkeypatch):
+    """A frontend that is not vite (next, CRA) is started through its script."""
+    root = _monorepo(tmp_path, vite_config=None, dev_script="next dev")
+    monkeypatch.chdir(root)
+    result = _invoke(["init"])
+    assert result.exit_code == 0, result.output
+    project = load_project_file(root / "devproxy.toml")
+    web_cmd = " ".join(project.get("demo-web").command or [])
+    assert "npm run dev -- --port $PORT" in web_cmd
+    assert "__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS" not in web_cmd
+
+
+def test_placeholder_command_really_listens_on_port(tmp_path):
+    """The placeholder must be startable: devproxy's readiness check is
+    "connectable on $PORT", and the file is promised to be startable."""
+    import socket
+    import subprocess
+    import sys
+
+    from devproxy.gateway.project import PLACEHOLDER_COMMAND
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    proc = subprocess.Popen(
+        PLACEHOLDER_COMMAND,
+        env={**os.environ, "PORT": str(port)},
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        reachable = False
+        while time.monotonic() < deadline:
+            with socket.socket() as s:
+                s.settimeout(0.3)
+                if s.connect_ex(("127.0.0.1", port)) == 0:
+                    reachable = True
+                    break
+            time.sleep(0.1)
+        assert reachable, "the placeholder command must listen on $PORT"
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)

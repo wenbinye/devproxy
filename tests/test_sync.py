@@ -810,3 +810,99 @@ def test_sync_reports_the_drift_only_for_the_route_that_uses_the_port(
     assert res.exit_code == 1
     assert res.output.count("sibling port changed") == 1
     assert "conflict web" in res.output.replace("\u26a0\ufe0f  ", "")
+
+
+def test_up_route_with_pinned_port_uses_it_and_tells_siblings(ctx, env, project_dir, monkeypatch):
+    """A route that pins its port keeps it -- and the siblings get that port,
+    not a random one."""
+    paths, cfg, store, admin = ctx
+    (project_dir / "devproxy.toml").write_text(
+        '[[routes]]\nname = "api"\ncommand = ["npm", "run", "api"]\nport = 41001\n\n'
+        '[[routes]]\nname = "web"\ncommand = ["npm", "run", "web"]\n'
+    )
+    recorded: dict = {}
+    _stub_spawn(monkeypatch, store, recorded=recorded)
+    res = CliRunner().invoke(app, ["up"])
+    assert res.exit_code == 0, res.output
+    assert recorded["api"]["port"] == 41001
+    assert recorded["web"]["extra_env"]["DEVPROXY_API_PORT"] == "41001"
+
+
+def test_sync_reports_drift_when_the_sibling_is_restarted(ctx, env, project_dir, monkeypatch):
+    """The realistic case: the API is stopped and started again, and gets
+    another port. The frontend still holds the old one."""
+    paths, cfg, store, admin = ctx
+    (project_dir / "devproxy.toml").write_text(SIBLING_TOML)
+    recorded: dict = {}
+    _env_aware_spawn(monkeypatch, store, recorded=recorded)
+    assert CliRunner().invoke(app, ["up"]).exit_code == 0
+    old_port = recorded["api"]["port"]
+
+    # The API route is gone (the app was stopped) and comes back on a new port
+    store.mutate(lambda t: t.remove("api"))
+    new_port = old_port + 100
+    monkeypatch.setattr("devproxy.gateway.sync.alloc_port", lambda: new_port)
+    res = CliRunner().invoke(app, ["up"])
+    assert res.exit_code == 1, res.output
+    assert "sibling port changed" in res.output
+    assert f"DEVPROXY_API_PORT: {old_port} -> {new_port}" in res.output
+
+
+def test_legacy_route_without_env_is_not_a_conflict(ctx, env, project_dir, monkeypatch):
+    """A route table written by an older devproxy has no recorded environment.
+    Such a route must not be reported as a conflict (that would flood every
+    user who upgrades with a pile of false conflicts)."""
+    paths, cfg, store, admin = ctx
+    (project_dir / "devproxy.toml").write_text(SIBLING_TOML)
+    store.mutate(
+        lambda t: t.upsert(
+            Route(
+                name="api",
+                domain="api.test",
+                port=45671,
+                mode="up",
+                upstream="127.0.0.1:45671",
+                command=["npm", "run", "api"],
+            )
+        )
+    )
+    store.mutate(
+        lambda t: t.upsert(
+            Route(
+                name="web",
+                domain="web.test",
+                port=45672,
+                mode="up",
+                upstream="127.0.0.1:45672",
+                command=["sh", "-c", "BACKEND_PORT=$DEVPROXY_API_PORT npm run dev"],
+            )
+        )
+    )
+    res = CliRunner().invoke(app, ["up"])
+    assert res.exit_code == 0, res.output
+
+
+def test_spawn_worker_payload_carries_sibling_ports(monkeypatch, tmp_path):
+    """The real worker must receive the sibling ports in its payload -- the
+    stubs elsewhere bypass this boundary."""
+    from devproxy.gateway import sync as sync_module
+
+    captured = {}
+
+    class FakePopen:
+        def __init__(self, args, **kwargs):
+            captured["env"] = kwargs.get("env", {})
+
+    monkeypatch.setattr(sync_module.subprocess, "Popen", FakePopen)
+    project = _project(tmp_path, UP_TOML)
+    declared = project.routes[0]
+    sync_module._spawn_worker(
+        project,
+        declared,
+        tmp_path / "web.log",
+        port=41001,
+        extra_env={"DEVPROXY_API_PORT": "41001"},
+    )
+    payload = json.loads(captured["env"][sync_module.PAYLOAD_ENV])
+    assert payload["extra_env"] == {"DEVPROXY_API_PORT": "41001"}
+    assert payload["port"] == 41001

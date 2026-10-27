@@ -3,6 +3,12 @@
 ## 常见症状
 
 
+- **`devproxy up` 报 "conflict web ... sibling port changed (DEVPROXY_API_PORT: 49435 -> 51717)"**：
+  兄弟路由重启后换了端口，那个应用还握着旧的。用 `devproxy down <名字>` 再 `devproxy up`
+  重启它 —— 或者在 `devproxy.toml` 里把兄弟路由的端口写死，让它不再变动。
+- **`devproxy up` 报 "route 'web' uses $DEVPROXY_API_PORT, but no route 'api' is declared in this file"**：
+  命令引用了本文件没有声明的路由 —— devproxy 只导出本项目路由的端口。请把该路由声明在
+  同一个文件里。
 - **`devproxy up` 报「就绪超时」**：应用多半没读 `PORT`。改用 `sh -c '... $PORT ...'`，
   或用 `--port N` 显式指定端口（此时应用必须自己绑这个端口）。
 - **`up` 报「Caddy 未运行（Admin API 不可达）」**（退出码 3）：先跑 `devproxy setup`，
