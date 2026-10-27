@@ -67,6 +67,17 @@ def test_publish_workflow_exists():
     assert (REPO_ROOT / ".github" / "workflows" / "publish.yml").exists()
 
 
+def test_publish_workflow_is_idempotent_per_version():
+    """Re-publishing the same version must be skippable, not a failure.
+
+    PyPI accepts a version exactly once; re-running a release (for example 0.1.0 was
+    first published by hand with `uv publish`, then a GitHub Release was created for the
+    same tag) must recognise "this version is already on PyPI" and skip the upload.
+    """
+    text = (REPO_ROOT / ".github" / "workflows" / "publish.yml").read_text(encoding="utf-8")
+    assert "already on PyPI" in text, "the workflow must skip when the version is already on PyPI"
+
+
 def test_license_file_exists():
     """Declaring MIT requires the license text (otherwise it legally means all rights reserved)."""
     assert (REPO_ROOT / "LICENSE").exists(), "missing LICENSE file"

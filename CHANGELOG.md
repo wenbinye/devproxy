@@ -8,7 +8,7 @@ User-visible changes to devproxy. The format follows
 
 中文版：[CHANGELOG.zh-CN.md](CHANGELOG.zh-CN.md)
 
-## [Unreleased]
+## [0.1.0] - 2026-10-27
 
 ### Added
 
@@ -56,8 +56,3 @@ User-visible changes to devproxy. The format follows
   can no longer write to disk without bound (it once filled `/home` to 100%).
 - Domain-suffix allowlist: prevents hijacking all machine-wide resolution onto an
   unexpected suffix (such as `.com`).
-
-## [0.1.0]
-
-- First version: `setup` / `up` / `expose` / `down` / `ls` / `logs` / `trust` / `doctor` /
-  `config` / `selftest`.

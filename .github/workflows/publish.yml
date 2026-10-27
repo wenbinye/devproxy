@@ -25,7 +25,22 @@ jobs:
         run: uv sync --locked --all-groups
       - name: Run the tests before publishing
         run: uv run pytest -q --ignore=tests/test_integration.py
+      - name: Skip if this version is already on PyPI
+        # A version can only be uploaded once -- re-running a release (or tagging a
+        # commit whose version was published by hand, as 0.1.0 was) must not fail.
+        id: already
+        run: |
+          version=$(grep -m1 '^version' pyproject.toml | sed 's/.*"\(.*\)"/\1/')
+          if curl -fsSL "https://pypi.org/pypi/devproxy/json" |
+             python3 -c "import json,sys;d=json.load(sys.stdin);sys.exit(0 if '$version' in d['releases'] else 1)"; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            echo "devproxy $version is already on PyPI -- skipping the upload"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Build the sdist and wheel
+        if: steps.already.outputs.published != 'true'
         run: uv build
       - name: Upload to PyPI
+        if: steps.already.outputs.published != 'true'
         uses: pypa/gh-action-pypi-publish@release/v1
