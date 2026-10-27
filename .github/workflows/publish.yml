@@ -17,7 +17,7 @@ jobs:
     permissions:
       id-token: write # the only permission trusted publishing needs
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
