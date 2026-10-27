@@ -93,7 +93,11 @@ This is the project mode (`devproxy.toml`). Foreground mode (`devproxy up <name>
 also exports `DEVPROXY_<NAME>_PORT`, but from the **already-registered** routes -- and the
 route table is global, so routes of other projects come in too. Foreground mode has no drift
 check and no "undeclared route" error: if that route is not registered yet, the variable is
-simply empty.
+simply empty -- and devproxy says so on stderr:
+
+```
+warning: $DEVPROXY_API_PORT will be empty -- no registered route provides it (start that route first, or use a devproxy.toml)
+```
 
 See [Project-level configuration · One route's port is available to the
 others](project-config.md#one-routes-port-is-available-to-the-others) for the full

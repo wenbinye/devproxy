@@ -80,7 +80,11 @@ command = ["sh", "-c", "cd frontend && BACKEND_PORT=$DEVPROXY_API_PORT npm run d
 这是项目模式（`devproxy.toml`）。前台模式（`devproxy up <名字> -- CMD`）同样会注入
 `DEVPROXY_<名字>_PORT`，但取自**已注册的全部路由** —— 路由表是全局的，别的项目的路由
 也会进来。前台模式没有漂移检测，也没有「引用了未声明的路由」这种报错 —— 那个路由还没
-注册时，变量就是空的。
+注册时，变量就是空的，devproxy 会在 stderr 上提醒：
+
+```
+warning: $DEVPROXY_API_PORT will be empty -- no registered route provides it (start that route first, or use a devproxy.toml)
+```
 
 完整语义见[项目级配置 · 一个路由的端口，别的路由也拿得到](project-config.md#一个路由的端口别的路由也拿得到)。
 

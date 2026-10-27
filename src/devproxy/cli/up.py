@@ -14,6 +14,7 @@ from devproxy.core.config import READY_TIMEOUT_MIN
 from devproxy.gateway.names import InvalidNameError
 from devproxy.gateway.names import port_env_name
 from devproxy.gateway.names import validate_name
+from devproxy.gateway.project import referenced_port_vars
 from devproxy.gateway.routes import RouteTableError
 from devproxy.gateway.runner import PreconditionError
 from devproxy.gateway.runner import UpError
@@ -95,6 +96,30 @@ def up(
         s.console.print(f"✅ https://{domain}  (port {allocated})")
         s._print_trust_hint_if_needed(paths, config)
 
+    # Sibling routes that are already registered: their ports are known, so
+    # the app can be pointed at them (a frontend at its API) even in
+    # foreground mode. The route table is global here -- with no project file
+    # to consult, every registered route is a candidate.
+    sibling_env = {
+        port_env_name(r.name): str(r.port) for r in store.list() if r.port and r.name != name
+    }
+    # A variable the command uses but no registered route provides would
+    # expand to an empty string -- the app then points nowhere, and the
+    # failure shows up far away from the cause. Foreground mode does not read
+    # a project file, so this is a warning, not an error.
+    unresolved = [
+        var
+        for var in referenced_port_vars(cmd)
+        if var not in sibling_env and var != port_env_name(name)
+    ]
+    if unresolved:
+        s.err_console.print(
+            "warning: "
+            + ", ".join(f"${var}" for var in unresolved)
+            + " will be empty -- no registered route provides it "
+            "(start that route first, or use a devproxy.toml)"
+        )
+
     try:
         rc = runner.run(
             name,
@@ -102,14 +127,7 @@ def up(
             port=port,
             ready_timeout=ready_timeout,
             on_ready=on_ready,
-            # Sibling routes that are already registered: their ports are
-            # known, so the app can be pointed at them (a frontend at its
-            # API) even in foreground mode.
-            extra_env={
-                port_env_name(r.name): str(r.port)
-                for r in store.list()
-                if r.port and r.name != name
-            },
+            extra_env=sibling_env,
         )
     except PreconditionError as e:
         # Caddy not running is an unmet precondition, not a runtime failure -- exit 3

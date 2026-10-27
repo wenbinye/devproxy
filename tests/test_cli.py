@@ -1158,3 +1158,23 @@ def test_up_injects_sibling_route_ports(env, monkeypatch):
     assert "DEVPROXY_WEB_PORT" not in captured["extra_env"], (
         "the route being started does not get its own name in the table"
     )
+
+
+def test_up_warns_when_a_referenced_port_variable_is_empty(env, monkeypatch):
+    """A command that uses $DEVPROXY_API_PORT while no such route is
+    registered would get an empty value -- say so, the failure is far away
+    from the cause otherwise."""
+    _patch_ctx(monkeypatch, env)
+    captured = {}
+
+    def fake_run(self, name, cmd, port=None, ready_timeout=None, on_ready=None, extra_env=None):
+        captured["extra_env"] = extra_env
+        return 0
+
+    monkeypatch.setattr("devproxy.cli._shared.UpRunner.run", fake_run)
+    res = CliRunner().invoke(
+        app, ["up", "web", "--", "sh", "-c", "BACKEND_PORT=$DEVPROXY_API_PORT npm run dev"]
+    )
+    assert res.exit_code == 0, res.output
+    assert "DEVPROXY_API_PORT" in res.output
+    assert "will be empty" in res.output

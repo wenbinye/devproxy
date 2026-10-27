@@ -43,6 +43,14 @@ User-visible changes to devproxy. The format follows
 
 ### Fixed
 
+- `devproxy init` no longer replaces a dev script that runs **several** commands
+  (`concurrently 'vite …' 'node server.js'`) with a plain vite call -- the second
+  process was dropped without a word. Such a script is now started as-is, with a note
+  that the appended `--port` may not override a hardcoded port.
+- Foreground `devproxy up` warns when the command uses a `DEVPROXY_<NAME>_PORT` variable
+  that no registered route provides: the variable would expand to an empty string, and
+  the app would point nowhere.
+
 - `devproxy init` no longer writes a file that devproxy itself refuses to load: a
   project with no guessable command got `command = []`, and `devproxy up` rejected it
   with "command must be a non-empty array". The generated file now contains a

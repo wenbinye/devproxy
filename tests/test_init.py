@@ -505,3 +505,44 @@ def test_placeholder_command_really_listens_on_port(tmp_path):
     finally:
         proc.terminate()
         proc.wait(timeout=10)
+
+
+def test_init_keeps_a_dev_script_that_runs_more_than_vite(tmp_path, monkeypatch):
+    """A script like `concurrently 'vite …' 'node server.js'` must not be
+    replaced by a plain vite call -- that would silently drop the second
+    process."""
+    root = _monorepo(
+        tmp_path,
+        vite_config=None,
+        dev_script="concurrently 'vite --port 5174' 'node server.js'",
+    )
+    monkeypatch.chdir(root)
+    result = _invoke(["init"])
+    assert result.exit_code == 0, result.output
+    project = load_project_file(root / "devproxy.toml")
+    web_cmd = " ".join(project.get("demo-web").command or [])
+    assert "npm run dev -- --port $PORT" in web_cmd
+    assert "./node_modules/.bin/vite" not in web_cmd
+    assert "several commands" in result.output
+
+
+def test_init_warns_about_a_second_port_variable(tmp_path, monkeypatch):
+    """Two port variables in the config: only one can be wired automatically,
+    the other must be named instead of silently left empty."""
+    root = _monorepo(
+        tmp_path,
+        vite_config=(
+            "export default defineConfig(({ mode }) => ({\n"
+            "  server: { proxy: { '/api': { target: `http://localhost:${env.BACKEND_PORT}` },\n"
+            "                   '/ws': { target: `ws://localhost:${env.WS_PORT}` } } },\n"
+            "}));\n"
+        ),
+    )
+    monkeypatch.chdir(root)
+    result = _invoke(["init"])
+    assert result.exit_code == 0, result.output
+    project = load_project_file(root / "devproxy.toml")
+    web_cmd = " ".join(project.get("demo-web").command or [])
+    assert "BACKEND_PORT=$DEVPROXY_DEMO_PORT" in web_cmd
+    assert "WS_PORT" not in web_cmd, "only one variable can be wired"
+    assert "WS_PORT" in result.output, "the other variable must be named"

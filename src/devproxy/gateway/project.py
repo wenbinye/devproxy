@@ -315,6 +315,23 @@ def detect_project_root(start: Path | None = None) -> Path:
     return current
 
 
+def _is_plain_vite_script(script: str | None) -> bool:
+    """Is the dev script a single vite command?
+
+    `concurrently 'vite --port 5174' 'node server.js'` or `vite build &&
+    vite preview` contain more than the dev server: replacing them with a
+    direct vite call would silently drop the rest, so they go through
+    `npm run dev` instead (with the usual caveat about the appended --port).
+    """
+    if not script:
+        return False
+    stripped = script.strip()
+    if not stripped.startswith("vite"):
+        return False
+    rest = stripped[len("vite") :]
+    return not any(token in rest for token in ("&&", "||", ";", "&", "|"))
+
+
 def suggest_command(root: Path) -> tuple[list[str] | None, str]:
     """Guess a start command based on the project type. Returns (command, reason).
 
@@ -338,7 +355,7 @@ def suggest_command(root: Path) -> tuple[list[str] | None, str]:
             for name in ("dev", "start"):
                 if name in scripts:
                     script = scripts[name]
-                    if isinstance(script, str) and "vite" in script:
+                    if _is_plain_vite_script(script):
                         # A script that hardcodes a port ("vite --port 5174")
                         # cannot be overridden reliably by appending --port,
                         # so call vite directly: the CLI flag wins over the
@@ -525,18 +542,32 @@ def _frontend_command(
     """
     notes: list[str] = []
     script, script_name = _frontend_dev_script(frontend)
-    is_vite = "vite" in (script or "")
+    is_vite = _is_plain_vite_script(script)
+    if script and not is_vite and "vite" in script:
+        # The script runs vite among other commands -- starting only vite
+        # would silently drop the rest, so the script is kept and --port is
+        # appended, which may not override a hardcoded port. Say so.
+        notes.append(
+            "warning: the dev script runs several commands, so it is started as-is with "
+            "--port appended -- check that the port is really overridden"
+        )
 
     env_prefix = ""
     if is_vite:
         env_prefix += f"__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS={web_name}.{suffix} "
 
-    api_var = _api_port_env_name(frontend)
-    if api_var:
-        env_prefix += f"{api_var}=${port_env_name(api_name)} "
+    api_vars = _api_port_env_names(frontend)
+    if api_vars:
+        env_prefix += f"{api_vars[0]}=${port_env_name(api_name)} "
         notes.append(
-            f"the frontend's config reads {api_var} -- the API's dynamic port is injected into it"
+            f"the frontend's config reads {api_vars[0]} -- the API's dynamic port is injected into it"
         )
+        if len(api_vars) > 1:
+            notes.append(
+                "warning: the config also reads "
+                + ", ".join(api_vars[1:])
+                + " -- those stay empty; wire them to the same variable if they need the API port"
+            )
         if _vite_config_hardcodes_target(frontend):
             notes.append(
                 "warning: the vite config hardcodes the API address, so the injected port is "
@@ -577,12 +608,14 @@ def _frontend_dev_script(frontend: Path) -> tuple[str | None, str | None]:
     return None, None
 
 
-def _api_port_env_name(frontend: Path) -> str | None:
-    """The env var the frontend's config uses for the API's port.
+def _api_port_env_names(frontend: Path) -> list[str]:
+    """The env vars the frontend's config uses for ports.
 
     Looked for in the vite config ("env.BACKEND_PORT", "process.env.API_PORT") --
     that is where the proxy target is built. Only names that look like a port
-    are accepted, so an unrelated variable is never picked up.
+    are accepted, so an unrelated variable is never picked up. All of them are
+    returned: a config can read several (an API port and a websocket port),
+    and only the first one can be wired automatically.
     """
     for filename in _VITE_CONFIG_FILES:
         path = frontend / filename
@@ -595,8 +628,8 @@ def _api_port_env_name(frontend: Path) -> str | None:
         names = set(re.findall(r"(?:process\.env|env)\.([A-Z][A-Z0-9_]*)", text))
         ports = sorted(n for n in names if n == "PORT" or n.endswith("_PORT"))
         if ports:
-            return ports[0]
-    return None
+            return ports
+    return []
 
 
 def _vite_config_hardcodes_target(frontend: Path) -> bool:

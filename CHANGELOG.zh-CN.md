@@ -37,6 +37,12 @@
 
 ### 修复
 
+- `devproxy init` 不再把跑**多条命令**的 dev 脚本
+  （`concurrently 'vite …' 'node server.js'`）替换成单独调 vite —— 第二个进程被无声
+  丢掉了。现在这类脚本按原样启动，并提示追加的 `--port` 可能盖不住写死的端口。
+- 前台 `devproxy up` 在命令用到了没有路由提供的 `DEVPROXY_<名字>_PORT` 时会警告：
+  那个变量会展开成空串，应用会指向无处。
+
 - `devproxy init` 不再生成 devproxy 自己拒绝加载的文件：没有可猜命令的项目会得到
   `command = []`，`devproxy up` 直接报错「command must be a non-empty array」。
   现在写入的是一个占位命令（`python3 -m http.server`，监听 `$PORT`），文件永远可加载、可启动。
