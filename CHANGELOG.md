@@ -12,6 +12,12 @@ User-visible changes to devproxy. The format follows
 
 ### Added
 
+- `devproxy init` generates **two routes** for a repository that has a frontend next to
+  the API, and wires them together: the frontend's command receives the API's dynamic
+  port (`DEVPROXY_<API>_PORT`) in the variable its own config reads, plus its domain in
+  `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS` (Vite 6 answers 403 for unknown Host
+  headers).
+
 - **Sibling route ports**: every app of a project receives the port of every other
   route of the same `devproxy.toml` as `DEVPROXY_<NAME>_PORT` (e.g. `api` →
   `DEVPROXY_API_PORT`). The ports of a project are now allocated **before** any app
@@ -32,6 +38,16 @@ User-visible changes to devproxy. The format follows
 - When a referenced sibling's port changed, the app holding the stale pointer is
   reported as a **conflict** (`sibling port changed (DEVPROXY_API_PORT: 49435 -> 51717)`)
   instead of silently proxying to a dead port.
+
+### Fixed
+
+- `devproxy init` no longer writes a file that devproxy itself refuses to load: a
+  project with no guessable command got `command = []`, and `devproxy up` rejected it
+  with "command must be a non-empty array". The generated file now contains a
+  placeholder command that listens on `$PORT`, so it is always loadable and startable.
+- `devproxy init` calls vite directly when the project's dev script runs vite
+  (`"dev": "vite --port 5174"`): appending `--port $PORT` to such a script does not
+  reliably override the hardcoded port, while the CLI flag always does.
 
 ## [0.1.0] - 2026-10-27
 

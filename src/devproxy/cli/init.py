@@ -23,6 +23,7 @@ from devproxy.gateway.project import detect_project_root
 from devproxy.gateway.project import render_project_file
 from devproxy.gateway.project import route_name_from_dir
 from devproxy.gateway.project import suggest_command
+from devproxy.gateway.project import suggest_routes
 from devproxy.gateway.routes import RouteTableError
 from devproxy.gateway.routes import load_table
 
@@ -61,30 +62,43 @@ def init(
     except InvalidNameError as e:
         s.fail(f"invalid route name {route_name!r}: {e}", EXIT_USAGE)
 
-    argv, notes = _resolve_command(root, command, from_route)
+    if command or from_route:
+        argv, notes = _resolve_command(root, command, from_route)
+        routes = [ProjectRoute(name=route_name, mode=MODE_UP, command=argv)]
+    else:
+        routes, notes = suggest_routes(root)
+        # An explicit --name wins over the guessed names only when there is
+        # exactly one route; with several, the name is the *API's* prefix and
+        # the web route is derived from it.
+        if len(routes) == 1:
+            routes = [ProjectRoute(name=route_name, mode=MODE_UP, command=routes[0].command)]
+        else:
+            routes[0] = ProjectRoute(name=route_name, mode=MODE_UP, command=routes[0].command)
+            routes[1] = ProjectRoute(
+                name=f"{route_name}-web", mode=MODE_UP, command=routes[1].command
+            )
 
-    content = render_project_file(
-        [ProjectRoute(name=route_name, mode=MODE_UP, command=argv)],
-        notes=notes,
-    )
+    content = render_project_file(routes, notes=notes)
     try:
         target.write_text(content, encoding="utf-8")
     except OSError as e:
         s.fail(f"failed to write {target}: {e}", EXIT_FAIL)
 
     s.console.print(f"✔ Generated {target}")
-    s.console.print(f"  Route name: {route_name}  →  https://{route_name}.<suffix>")
-    if argv:
-        s.console.print(f"  Start command: {' '.join(argv)}")
-    else:
-        s.console.print("  Start command: (empty) -- fill in the real command")
+    for route in routes:
+        domain = f"{route.name}.<suffix>"
+        s.console.print(f"  Route {route.name} → https://{domain}")
+        if route.command:
+            s.console.print(f"    command: {' '.join(route.command)}", soft_wrap=True)
+        else:
+            s.console.print("    command: (empty) -- fill in the real command")
     for note in notes:
-        s.console.print(f"  {note}")
+        s.console.print(f"  {note}", soft_wrap=True)
     s.console.print("")
     s.console.print("Next steps:")
-    s.console.print("  1. Check that the start command above is right (usually it needs editing)")
+    s.console.print("  1. Check the commands above (placeholders must be replaced)")
     s.console.print("  2. devproxy setup    # once: installs Caddy, the DNS route, and CA trust")
-    s.console.print("  3. devproxy up       # start the service")
+    s.console.print("  3. devproxy up       # start everything this file declares")
     raise typer.Exit(EXIT_OK)
 
 

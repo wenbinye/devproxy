@@ -31,6 +31,7 @@ from pathlib import Path
 from devproxy.core.config import READY_TIMEOUT_MAX
 from devproxy.core.config import READY_TIMEOUT_MIN
 from devproxy.gateway.names import InvalidNameError
+from devproxy.gateway.names import port_env_name
 from devproxy.gateway.names import route_name_from_port_env
 from devproxy.gateway.names import validate_name
 
@@ -336,8 +337,22 @@ def suggest_command(root: Path) -> tuple[list[str] | None, str]:
         if isinstance(scripts, dict):
             for name in ("dev", "start"):
                 if name in scripts:
+                    script = scripts[name]
+                    if isinstance(script, str) and "vite" in script:
+                        # A script that hardcodes a port ("vite --port 5174")
+                        # cannot be overridden reliably by appending --port,
+                        # so call vite directly: the CLI flag wins over the
+                        # config file.
+                        return (
+                            [
+                                "sh",
+                                "-c",
+                                "./node_modules/.bin/vite --host 127.0.0.1 --port $PORT",
+                            ],
+                            f"package.json has a {name} script running vite",
+                        )
                     # --port is passed through to the dev server in the
-                    # script (vite/next both honor it)
+                    # script (next honors it)
                     return (
                         ["sh", "-c", f"npm run {name} -- --port $PORT"],
                         f"package.json has a {name} script",
@@ -413,6 +428,182 @@ def _suggest_php_command(
                     f" -- the app must listen on $PORT to be taken over{_ports_hint(ports)}",
                 )
     return None
+
+
+# -- Scaffolding: the routes of a project -------------------------------------
+
+# A command that certainly listens on $PORT, so the generated file is
+# **loadable and startable** even before the user edits it. A file with an
+# empty command is rejected by devproxy ("command must be a non-empty array"),
+# which would leave the user with a config that cannot even be parsed.
+PLACEHOLDER_COMMAND = [
+    "sh",
+    "-c",
+    "echo 'devproxy: this is a placeholder -- replace it with the real start command'; "
+    "python3 -m http.server $PORT",
+]
+
+# Where a frontend usually lives inside a repository that also holds the API.
+_FRONTEND_DIRS = ("frontend", "web", "client", "ui")
+
+_VITE_CONFIG_FILES = (
+    "vite.config.ts",
+    "vite.config.js",
+    "vite.config.mts",
+    "vite.config.mjs",
+)
+
+
+def suggest_routes(root: Path, *, suffix: str = "test") -> tuple[list[ProjectRoute], list[str]]:
+    """Guess the **routes** of a project -- not just one command.
+
+    A repository with a frontend next to the API needs two routes, and the
+    frontend has to know the API's port. devproxy exports the port of every
+    route of the same file as DEVPROXY_<NAME>_PORT, so the generated file can
+    wire them together without a hardcoded port.
+
+    Returns (routes, notes). The notes explain every guess, so the user can
+    see what was assumed (and the file carries the same notes as comments).
+    """
+    api_name = route_name_from_dir(root)
+    frontend = _detect_frontend(root)
+    if frontend is None:
+        command, reason = suggest_command(root)
+        notes: list[str] = []
+        if command is None:
+            notes.append(f"{reason} -- using a placeholder command; edit it before starting")
+            command = list(PLACEHOLDER_COMMAND)
+        else:
+            notes.append(f"{reason} -- confirm this is the start command you want")
+        return [ProjectRoute(name=api_name, mode=MODE_UP, command=command)], notes
+
+    web_name = f"{api_name}-web"
+    api_command, api_reason = suggest_command(root)
+    notes = []
+    if api_command is None:
+        notes.append(f"{api_reason} -- using a placeholder command; edit it before starting")
+        api_command = list(PLACEHOLDER_COMMAND)
+    else:
+        notes.append(f"{api_reason} -- confirm this is the start command you want")
+    web_command, web_notes = _frontend_command(frontend, web_name, api_name, suffix)
+    notes.extend(web_notes)
+    return [
+        ProjectRoute(name=api_name, mode=MODE_UP, command=api_command),
+        ProjectRoute(name=web_name, mode=MODE_UP, command=web_command),
+    ], notes
+
+
+def _detect_frontend(root: Path) -> Path | None:
+    """A frontend subproject next to the API (frontend/ with its own package.json)."""
+    for name in _FRONTEND_DIRS:
+        candidate = root / name
+        if (candidate / "package.json").is_file():
+            return candidate
+    return None
+
+
+def _frontend_command(
+    frontend: Path, web_name: str, api_name: str, suffix: str
+) -> tuple[list[str], list[str]]:
+    """The frontend's start command, wired to the API's dynamic port.
+
+    Two things have to be right for the frontend to reach the API:
+
+    - the API's port, injected as DEVPROXY_<API>_PORT into the variable the
+      project's own config reads (found in its vite config);
+    - the Host header, which Vite rejects unless the route's domain is
+      allowed (Vite 6 answers 403 otherwise).
+    """
+    notes: list[str] = []
+    script, script_name = _frontend_dev_script(frontend)
+    is_vite = "vite" in (script or "")
+
+    env_prefix = ""
+    if is_vite:
+        env_prefix += f"__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS={web_name}.{suffix} "
+
+    api_var = _api_port_env_name(frontend)
+    if api_var:
+        env_prefix += f"{api_var}=${port_env_name(api_name)} "
+        notes.append(
+            f"the frontend's config reads {api_var} -- the API's dynamic port is injected into it"
+        )
+        if _vite_config_hardcodes_target(frontend):
+            notes.append(
+                "warning: the vite config hardcodes the API address, so the injected port is "
+                "ignored -- change the config to read the variable, or pin the API's port"
+            )
+    else:
+        notes.append(
+            "the frontend's config does not read a port from the environment -- add "
+            f"<PORT_VAR>=${port_env_name(api_name)} to the command by hand "
+            "(and make the config read that variable)"
+        )
+        if _vite_config_hardcodes_target(frontend):
+            notes.append(
+                "warning: the vite config hardcodes the API address, so no injected port can "
+                "reach it -- change the config to read a port env var, or pin the API's port"
+            )
+
+    rel = frontend.name
+    if is_vite:
+        inner = "./node_modules/.bin/vite --host 127.0.0.1 --port $PORT"
+        notes.append(
+            "vite is called directly so that --port $PORT overrides the port in the config"
+        )
+    else:
+        inner = f"npm run {script_name or 'dev'} -- --port $PORT"
+    return ["sh", "-c", f"cd {rel} && {env_prefix}{inner}"], notes
+
+
+def _frontend_dev_script(frontend: Path) -> tuple[str | None, str | None]:
+    """The dev script of the frontend's package.json."""
+    scripts = _read_json_field(frontend / "package.json", "scripts")
+    if not isinstance(scripts, dict):
+        return None, None
+    for name in ("dev", "start", "serve"):
+        value = scripts.get(name)
+        if isinstance(value, str) and value.strip():
+            return value, name
+    return None, None
+
+
+def _api_port_env_name(frontend: Path) -> str | None:
+    """The env var the frontend's config uses for the API's port.
+
+    Looked for in the vite config ("env.BACKEND_PORT", "process.env.API_PORT") --
+    that is where the proxy target is built. Only names that look like a port
+    are accepted, so an unrelated variable is never picked up.
+    """
+    for filename in _VITE_CONFIG_FILES:
+        path = frontend / filename
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        names = set(re.findall(r"(?:process\.env|env)\.([A-Z][A-Z0-9_]*)", text))
+        ports = sorted(n for n in names if n == "PORT" or n.endswith("_PORT"))
+        if ports:
+            return ports[0]
+    return None
+
+
+def _vite_config_hardcodes_target(frontend: Path) -> bool:
+    """Does the vite config build the proxy target from a literal address?"""
+    for filename in _VITE_CONFIG_FILES:
+        path = frontend / filename
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        # "target: 'http://localhost:8012'" -- a literal host:port in the
+        # target line means no env var can influence it
+        return bool(re.search(r"target\s*:\s*[\"'`][^\"'`]*:\d{2,5}", text))
+    return False
 
 
 # These ports are unrelated to devproxy (the app is not taken over because of

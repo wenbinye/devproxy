@@ -19,6 +19,7 @@ from devproxy.gateway.project import load_project_file
 from devproxy.gateway.project import render_project_file
 from devproxy.gateway.project import route_name_from_dir
 from devproxy.gateway.project import suggest_command
+from devproxy.gateway.project import suggest_routes
 
 
 def _invoke(args: list[str]):
@@ -54,13 +55,29 @@ def test_route_name_from_dir_handles_empty():
 
 def test_suggest_command_from_package_json(tmp_path):
     (tmp_path / "package.json").write_text(
-        json.dumps({"scripts": {"dev": "vite"}}), encoding="utf-8"
+        json.dumps({"scripts": {"dev": "next dev"}}), encoding="utf-8"
     )
     argv, reason = suggest_command(tmp_path)
     # The port must be controllable: if the app does not listen on $PORT, devproxy's
     # readiness check can never pass
     assert argv == ["sh", "-c", "npm run dev -- --port $PORT"]
     assert "dev script" in reason
+
+
+def test_suggest_command_calls_vite_directly(tmp_path):
+    """A dev script that runs vite must be replaced by a direct vite call: the
+    script may hardcode a port ("vite --port 5174"), and an appended --port
+    does not always win."""
+    (tmp_path / "package.json").write_text(
+        json.dumps({"scripts": {"dev": "vite --port 5174"}}), encoding="utf-8"
+    )
+    argv, reason = suggest_command(tmp_path)
+    assert argv == [
+        "sh",
+        "-c",
+        "./node_modules/.bin/vite --host 127.0.0.1 --port $PORT",
+    ]
+    assert "vite" in reason
 
 
 def test_suggest_command_falls_back_to_start(tmp_path):
@@ -122,7 +139,7 @@ def test_init_creates_file_in_project_root(project):
 
 def test_init_guesses_command_from_project_type(project):
     (project / "package.json").write_text(
-        json.dumps({"scripts": {"dev": "vite"}}), encoding="utf-8"
+        json.dumps({"scripts": {"dev": "next dev"}}), encoding="utf-8"
     )
     result = _invoke(["init", "--name", "web"])
     assert result.exit_code == 0, result.output
@@ -306,3 +323,84 @@ def test_suggest_command_php_wins_over_makefile(tmp_path):
     argv, reason = suggest_command(tmp_path)
     assert argv is None
     assert "PHP" in reason
+
+
+# -- multi-route scaffolding (frontend + backend) ------------------------
+
+
+def _monorepo(tmp_path, *, vite_config: str | None, dev_script: str = "vite --port 5174"):
+    root = tmp_path / "demo"
+    root.mkdir()
+    (root / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+    frontend = root / "frontend"
+    frontend.mkdir()
+    (frontend / "package.json").write_text(
+        json.dumps({"scripts": {"dev": dev_script}}), encoding="utf-8"
+    )
+    if vite_config is not None:
+        (frontend / "vite.config.ts").write_text(vite_config, encoding="utf-8")
+    return root
+
+
+def test_init_generates_loadable_file_for_python_project(tmp_path, monkeypatch):
+    """A Python project has no guessable command -- but the file must still be
+    **loadable**. An empty command used to make `devproxy up` reject the very
+    file init had just written."""
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    result = _invoke(["init"])
+    assert result.exit_code == 0, result.output
+    project = load_project_file(tmp_path / "devproxy.toml")
+    assert len(project.routes) == 1
+    assert project.routes[0].command, "the command must not be empty"
+    assert "placeholder" in " ".join(project.routes[0].command)
+
+
+def test_init_generates_two_routes_for_a_monorepo(tmp_path, monkeypatch):
+    root = _monorepo(
+        tmp_path,
+        vite_config=(
+            "export default defineConfig(({ mode }) => ({\n"
+            "  server: { proxy: { '/api': { target: `http://localhost:${env.BACKEND_PORT ?? '8012'}` } } },\n"
+            "}));\n"
+        ),
+    )
+    monkeypatch.chdir(root)
+    result = _invoke(["init"])
+    assert result.exit_code == 0, result.output
+    project = load_project_file(root / "devproxy.toml")
+    assert [r.name for r in project.routes] == ["demo", "demo-web"]
+    api, web = project.routes
+    assert "placeholder" in " ".join(api.command)
+    web_cmd = " ".join(web.command)
+    assert "BACKEND_PORT=$DEVPROXY_DEMO_PORT" in web_cmd, "the API port must be injected"
+    assert "__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=demo-web.test" in web_cmd
+    assert "cd frontend" in web_cmd
+    assert "vite --host 127.0.0.1 --port $PORT" in web_cmd
+
+
+def test_init_monorepo_without_a_port_env_var_still_loads(tmp_path, monkeypatch):
+    """No env var in the vite config -> no injection, and the note says what
+    to add by hand; the file itself must stay valid."""
+    root = _monorepo(
+        tmp_path,
+        vite_config="export default defineConfig({ server: { proxy: { '/api': { target: 'http://localhost:8012' } } } });",
+    )
+    monkeypatch.chdir(root)
+    result = _invoke(["init"])
+    assert result.exit_code == 0, result.output
+    project = load_project_file(root / "devproxy.toml")
+    web_cmd = " ".join(project.get("demo-web").command or [])
+    assert "DEVPROXY" not in web_cmd
+    assert "placeholder" not in web_cmd
+    assert "8012" in result.output or "hardcode" in result.output
+
+
+def test_suggest_routes_without_a_frontend_is_one_route(tmp_path):
+    (tmp_path / "package.json").write_text(
+        json.dumps({"scripts": {"dev": "next dev"}}), encoding="utf-8"
+    )
+    routes, notes = suggest_routes(tmp_path)
+    assert [r.name for r in routes] == ["tmp"] or len(routes) == 1
+    assert len(routes) == 1
+    assert any("confirm" in n for n in notes)

@@ -131,6 +131,13 @@ devproxy init --from my-running-svc   # import the start command from an already
 
 The start command comes from, in priority order: `--command` > `--from` > a guess based on the project type (Node / PHP / Makefile). **No clear evidence means no guess** — guessing wrong is worse than not guessing. See [Project-level configuration · Quick start: `devproxy init`](project-config.md#quick-start-devproxy-init).
 
+**A repository with a frontend next to the API gets two routes**, wired together: the
+frontend's command receives the API's dynamic port (`DEVPROXY_<API>_PORT`) in whatever
+variable its own config reads (found in the vite config), plus the route's domain in
+`__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS` (Vite 6 answers 403 for unknown Host headers).
+When nothing can be guessed, the file gets a **placeholder** command that listens on
+`$PORT` — the generated file is always loadable and startable, never `command = []`.
+
 ## setup
 
 Deploy the local dev environment: Caddy + dnsmasq + DNS route + certificate trust + autostart. It is **idempotent** and can be run repeatedly.
