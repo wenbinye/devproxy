@@ -906,3 +906,23 @@ def test_spawn_worker_payload_carries_sibling_ports(monkeypatch, tmp_path):
     payload = json.loads(captured["env"][sync_module.PAYLOAD_ENV])
     assert payload["extra_env"] == {"DEVPROXY_API_PORT": "41001"}
     assert payload["port"] == 41001
+
+
+def test_sync_never_hands_the_same_port_to_two_routes(ctx, env, project_dir, monkeypatch):
+    """alloc_port() releases the socket before returning, so the OS may hand
+    out the same port twice in a row. Two routes on one port would make the
+    second app fail to bind -- the second allocation must be rejected."""
+    paths, cfg, store, admin = ctx
+    (project_dir / "devproxy.toml").write_text(
+        '[[routes]]\nname = "a"\ncommand = ["npm", "run", "a"]\n\n'
+        '[[routes]]\nname = "b"\ncommand = ["npm", "run", "b"]\n\n'
+        '[[routes]]\nname = "c"\ncommand = ["npm", "run", "c"]\n'
+    )
+    handed_out = [41001, 41001, 41001, 41002, 41003]
+    monkeypatch.setattr("devproxy.gateway.sync.alloc_port", lambda: handed_out.pop(0))
+    recorded: dict = {}
+    _stub_spawn(monkeypatch, store, recorded=recorded)
+    res = CliRunner().invoke(app, ["up"])
+    assert res.exit_code == 0, res.output
+    ports = [recorded[name]["port"] for name in ("a", "b", "c")]
+    assert len(set(ports)) == 3, f"two routes share a port: {ports}"

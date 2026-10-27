@@ -39,6 +39,7 @@ from devproxy.gateway.project import ProjectRoute
 from devproxy.gateway.project import referenced_port_vars
 from devproxy.gateway.routes import Route
 from devproxy.gateway.routes import RouteTableError
+from devproxy.gateway.runner import UpError
 from devproxy.gateway.runner import alloc_port
 from devproxy.gateway.runner import kill_pid_group
 from devproxy.gateway.runner import reachable
@@ -380,7 +381,10 @@ def _plan_ports(
       (declared port), and new up routes (allocated here when the declaration
       does not pin one). This map is what DEVPROXY_<NAME>_PORT exports to each
       app. It is deliberately scoped to the project: a route of another
-      project has no business in this app's environment.
+      project has no business in this app's environment. (Foreground
+      `devproxy up <name>` is different: with no project file to consult, it
+      exports the ports of **all registered** routes -- documented in
+      docs/apps.md.)
     - allocated: the port chosen for each new up-mode route (the declaration's
       port when it pins one). The worker is told to use exactly this port, so
       the map stays consistent with what actually starts.
@@ -394,11 +398,29 @@ def _plan_ports(
         elif declared.mode == MODE_EXPOSE and declared.port:
             known[declared.name] = int(declared.port)
     allocated: dict[str, int] = {}
+    # Every port that is already spoken for: the running routes, the pinned
+    # ones, and the ones handed out in this batch. alloc_port() releases the
+    # socket before returning, so the OS may hand out the same port twice --
+    # two routes on one port would make the second app fail to bind.
+    used = set(known.values())
     for declared in plan.create_up:
-        port = int(declared.port) if declared.port else alloc_port()
+        if declared.port:
+            port = int(declared.port)
+        else:
+            port = _free_port(used)
+        used.add(port)
         allocated[declared.name] = port
         known[declared.name] = port
     return known, allocated
+
+
+def _free_port(used: set[int]) -> int:
+    """A free port that is not already handed out in this batch."""
+    for _ in range(20):
+        port = alloc_port()
+        if port not in used:
+            return port
+    raise UpError("could not find a free port (the ephemeral port range is exhausted?)")
 
 
 def _sibling_env(known_ports: dict[str, int]) -> dict[str, str]:
