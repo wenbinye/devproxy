@@ -1,3 +1,4 @@
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,9 @@ def _component(tmp_path, platform=None):
     paths.ensure_files()
     cfg = Config(storage=str(paths.data_dir))
     platform = platform or FakePlatform()
+    # No legacy_dest injected: FakePlatform provides none, so the machine's
+    # own leftovers never influence the plan. Tests that need one use a
+    # platform that provides it (see _LegacyLeftoverPlatform).
     return CertComponent(platform, paths, cfg), platform, paths
 
 
@@ -1440,20 +1444,145 @@ def test_check_never_raises_when_firefox_probe_breaks(tmp_path, isolated_home, m
     assert "Firefox" not in status.hint
 
 
-def test_plan_reinstalls_when_the_installed_copy_is_not_world_readable(tmp_path):
-    """A 0600 staging copy (a leftover from the pre-644 install) counts as
-    "trusted" by fingerprint, but tools that walk the store directory get
-    "permission denied" reading it. plan must schedule a reinstall."""
-    comp, platform, paths = _component(tmp_path)
-    comp.system_dest = tmp_path / "ca" / "devproxy-local.crt"
+# -- the predecessor devp script's leftover in the staging directory --------
+
+
+class _LegacyLeftoverPlatform(FakePlatform):
+    """Provides a legacy CA path the way LinuxPlatform does, and answers
+    privilege_read with the legacy file's content."""
+
+    def __init__(self, legacy_path: Path, content: str):
+        super().__init__()
+        self._legacy = legacy_path
+        self._content = content
+
+    def legacy_system_ca(self):
+        return self._legacy
+
+    def privilege_read(self, path):
+        if path == self._legacy:
+            return self._content
+        return None
+
+
+def test_plan_removes_the_legacy_devp_ca_copy_when_trusted(tmp_path):
+    """The devp predecessor left a root-only copy of the CA in the staging
+    directory; once the CA is trusted by its current copy, plan offers to
+    remove the duplicate."""
+    legacy = tmp_path / "caddy-local.crt"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text("FAKE CA\n", encoding="utf-8")
+    platform = _LegacyLeftoverPlatform(legacy, "FAKE CA\n")
+    comp, platform, paths = _component(tmp_path, platform)
     ca = _write_ca(paths)
     _trust_both(platform, ca)
-    comp.system_dest.parent.mkdir(parents=True, exist_ok=True)
-    comp.system_dest.write_text("FAKE CA\n", encoding="utf-8")
-    comp.system_dest.chmod(0o600)
     actions = comp.plan()
-    assert any(a.command[0] == "install-system-ca" for a in actions)
+    cleanup = [a for a in actions if a.command and a.command[0] == "remove-legacy-system-ca"]
+    assert len(cleanup) == 1
+    assert cleanup[0].privileged is True
+    assert cleanup[0].command[1] == str(legacy)
 
-    # with the mode fixed there is genuinely nothing to do
-    comp.system_dest.chmod(0o644)
+
+def test_plan_skips_the_legacy_cleanup_without_a_leftover(tmp_path):
+    platform = _LegacyLeftoverPlatform(tmp_path / "caddy-local.crt", "FAKE CA\n")
+    comp, platform, paths = _component(tmp_path, platform)
+    ca = _write_ca(paths)
+    _trust_both(platform, ca)
     assert comp.plan() == []
+
+
+def test_plan_skips_the_legacy_cleanup_when_not_yet_trusted(tmp_path):
+    """The duplicate is only removed once the trust comes from the current
+    copy -- removing it earlier could take the CA out of the store."""
+    legacy = tmp_path / "caddy-local.crt"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    platform = _LegacyLeftoverPlatform(legacy, "FAKE CA\n")
+    comp, platform, paths = _component(tmp_path, platform)
+    _write_ca(paths)  # not trusted
+    actions = comp.plan()
+    assert not any(a.command and a.command[0] == "remove-legacy-system-ca" for a in actions)
+
+
+def test_apply_removes_the_legacy_copy_and_refreshes_the_store(tmp_path, monkeypatch):
+    _certutil_installed(monkeypatch)
+    # The fingerprint check needs a real certificate, not a fake PEM.
+    real_ca = tmp_path / "real" / "root.crt"
+    real_ca.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [
+            "openssl",
+            "req",
+            "-x509",
+            "-newkey",
+            "ec",
+            "-pkeyopt",
+            "ec_paramgen_curve:prime256v1",
+            "-keyout",
+            str(tmp_path / "real" / "root.key"),
+            "-out",
+            str(real_ca),
+            "-days",
+            "1",
+            "-nodes",
+            "-subj",
+            "/CN=devproxy legacy cleanup test CA",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    legacy = tmp_path / "caddy-local.crt"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text(real_ca.read_text(encoding="utf-8"), encoding="utf-8")
+    platform = _LegacyLeftoverPlatform(legacy, real_ca.read_text(encoding="utf-8"))
+    comp, platform, paths = _component(tmp_path, platform)
+    # The CA the component knows about must be the same certificate.
+    ca = paths.data_dir / "pki" / "authorities" / "local" / "root.crt"
+    ca.parent.mkdir(parents=True, exist_ok=True)
+    ca.write_text(real_ca.read_text(encoding="utf-8"), encoding="utf-8")
+    _trust_both(platform, ca)
+    comp.apply(comp.plan())
+    assert ["rm", "-f", str(legacy)] in platform.commands
+    assert ["update-ca-certificates"] in platform.commands
+
+
+def test_apply_refuses_to_remove_a_foreign_legacy_file(tmp_path, monkeypatch):
+    """A file that is not our CA may belong to something else -- the cleanup
+    must fail loudly instead of deleting someone else's certificate."""
+    _certutil_installed(monkeypatch)
+    real_ca = tmp_path / "real" / "root.crt"
+    real_ca.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [
+            "openssl",
+            "req",
+            "-x509",
+            "-newkey",
+            "ec",
+            "-pkeyopt",
+            "ec_paramgen_curve:prime256v1",
+            "-keyout",
+            str(tmp_path / "real" / "root.key"),
+            "-out",
+            str(real_ca),
+            "-days",
+            "1",
+            "-nodes",
+            "-subj",
+            "/CN=devproxy legacy cleanup test CA",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    legacy = tmp_path / "caddy-local.crt"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text("SOMEONE ELSE'S CA\n", encoding="utf-8")
+    platform = _LegacyLeftoverPlatform(legacy, "SOMEONE ELSE'S CA\n")
+    comp, platform, paths = _component(tmp_path, platform)
+    ca = paths.data_dir / "pki" / "authorities" / "local" / "root.crt"
+    ca.parent.mkdir(parents=True, exist_ok=True)
+    ca.write_text(real_ca.read_text(encoding="utf-8"), encoding="utf-8")
+    _trust_both(platform, ca)
+    with pytest.raises(RuntimeError) as cm:
+        comp.apply(comp.plan())
+    assert "does not contain this CA" in str(cm.value)
+    assert not any(c[:1] == ["rm"] for c in platform.commands)

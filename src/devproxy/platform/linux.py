@@ -13,6 +13,7 @@ import tempfile
 from pathlib import Path
 
 from devproxy.platform.base import CA_NICKNAME
+from devproxy.platform.base import LEGACY_SYSTEM_CA
 from devproxy.platform.base import RESOLVED_CONF
 from devproxy.platform.base import SYSTEM_DNSMASQ_CONF
 from devproxy.platform.base import SYSTEM_TRUST_DIR
@@ -793,6 +794,11 @@ class LinuxPlatform:
             return True
         code, _ = _run(["openssl", "verify", "-CApath", str(SYSTEM_TRUST_DIR), str(ca)])
         return code == 0
+
+    def legacy_system_ca(self) -> Path | None:
+        """The copy the predecessor `devp` script left in the staging
+        directory (see LEGACY_SYSTEM_CA); absent -> nothing to clean up."""
+        return LEGACY_SYSTEM_CA if LEGACY_SYSTEM_CA.exists() else None
 
     def nss_db_path(self) -> Path:
         """NSS database path as this platform sees it (**not a protocol method**).

@@ -219,6 +219,10 @@ class _SystemTrusted(LinuxPlatform):
     def ca_trusted(self, ca: Path) -> bool:
         return True
 
+    def legacy_system_ca(self) -> Path | None:
+        # The machine's real leftovers must not influence these tests.
+        return None
+
 
 def _component(tmp_path, home: Path, db: Path):
     paths = Paths(tmp_path / "config", tmp_path / "state", tmp_path / "data")

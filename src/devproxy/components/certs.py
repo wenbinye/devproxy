@@ -24,6 +24,8 @@ from devproxy.platform.base import SYSTEM_KEYCHAIN
 from devproxy.platform.base import Action
 from devproxy.platform.base import Platform
 from devproxy.platform.base import Status
+from devproxy.platform.base import file_fingerprints
+from devproxy.platform.base import pem_fingerprints
 
 CA_NAME = CA_NICKNAME
 
@@ -155,12 +157,23 @@ class CertComponent:
         config: Config,
         system_dest: Path | None = None,
         nss_dir: Path | None = None,
+        legacy_dest: Path | None = None,
     ):
-        """system_dest / nss_dir are injectable -- tests use tmp_path and never write the real system."""
+        """system_dest / nss_dir / legacy_dest are injectable -- tests use tmp_path and never
+        write the real system (nor read the machine's leftovers)."""
         self.platform = platform
         self.paths = paths
         self.config = config
         self.system_dest = Path(system_dest) if system_dest else SYSTEM_CA_DEST
+        # The legacy path comes from the platform (Linux knows its own
+        # leftovers); tests inject it. A platform without the provider has
+        # nothing to clean up -- and the machine's real leftovers never leak
+        # into tests.
+        platform_legacy = None
+        provider = getattr(platform, "legacy_system_ca", None)
+        if provider is not None:
+            platform_legacy = provider()
+        self.legacy_dest = Path(legacy_dest) if legacy_dest else platform_legacy
         # **`~` must be expanded here**: NSS_DIR is `Path("~/.pki/nssdb")` and
         # pathlib does not understand the tilde. Without expansion,
         # `(nss_dir / "cert9.db").exists()` checks "~/.pki/nssdb under the
@@ -341,28 +354,6 @@ class CertComponent:
     def _system_label(self) -> str:
         """Name of the system trust point (used in errors and hints)."""
         return "system keychain" if self._is_macos else "system trust store"
-
-    def _system_copy_readable(self) -> bool:
-        """Is the installed copy readable by every user, not just root?
-
-        Tools that walk the trust store directory follow the symlink in
-        /etc/ssl/certs back to this file: mise reads every *.pem there,
-        NODE_EXTRA_CA_CERTS users read it directly, and a root-only 0600
-        copy makes them fail with "permission denied" even though the
-        system itself trusts the CA. Installations before the mode was
-        pinned to 644 used `cp`, which carried the source file's 0600 over
-        -- such a leftover has to be reinstalled, not accepted as "already
-        trusted".
-        """
-        if self._is_macos or not self.system_dest.exists():
-            # macOS installs into the keychain (no staging file); a missing
-            # file is handled by the ordinary "not trusted yet" path.
-            return True
-        try:
-            mode = self.system_dest.stat().st_mode
-        except OSError:
-            return False
-        return bool(mode & 0o004)
 
     def _trust_probe_hint(self) -> str:
         """Where to investigate when the probe fails -- not "go run devproxy trust"."""
@@ -552,7 +543,7 @@ class CertComponent:
                         privileged=False,
                     )
                 )
-        if self._system_trusted().trusted is not True or not self._system_copy_readable():
+        if self._system_trusted().trusted is not True:
             actions.append(
                 Action(
                     description="install the CA root certificate into the system trust store and run update-ca-certificates",
@@ -561,6 +552,32 @@ class CertComponent:
                         "install-system-ca",
                         str(self.ca_path),
                         str(self.system_dest),
+                    ],
+                    privileged=True,
+                )
+            )
+        # The predecessor `devp` script left a copy of the CA in the staging
+        # directory under a different name, installed with `cp` -- so it is
+        # root-only and every tool that walks the trust store fails on it.
+        # It is only removed when our CA is already trusted (the trust then
+        # comes from the current copy, so removing the duplicate is a no-op
+        # for the store) and only when the file really is our certificate.
+        if (
+            self.legacy_dest is not None
+            and self._system_trusted().trusted is True
+            and self.legacy_dest.exists()
+        ):
+            actions.append(
+                Action(
+                    description=(
+                        "remove the root-only CA copy the predecessor devp script left "
+                        "in the system trust store"
+                    ),
+                    kind="run",
+                    command=[
+                        "remove-legacy-system-ca",
+                        str(self.legacy_dest),
+                        str(self.ca_path),
                     ],
                     privileged=True,
                 )
@@ -601,6 +618,7 @@ class CertComponent:
             "install-macos-ca": self._install_macos_ca,
             "install-system-ca": self._install_system_ca,
             "remove-stale-nss-ca": self._remove_stale_nss_ca,
+            "remove-legacy-system-ca": self._remove_legacy_system_ca,
             "install-nss-ca": self._install_nss_ca,
         }
         if not action.command:
@@ -667,6 +685,43 @@ class CertComponent:
             raise RuntimeError(
                 f"update-ca-certificates failed (the CA did not enter the system "
                 f"trust store): {msg}"
+            )
+
+    def _remove_legacy_system_ca(self, command: list[str]) -> None:
+        """Remove the CA copy the predecessor `devp` script left behind.
+
+        `devp` installed the CA as /usr/local/share/ca-certificates/caddy-local.crt
+        with `cp`, which carried the source file's 0600 over: the copy is
+        root-only, so every tool that walks the trust store directory (mise
+        reads every *.pem under /etc/ssl/certs) fails on it with "permission
+        denied" -- even though the system itself trusts the CA.
+
+        The file is removed only when its fingerprint matches **our** CA:
+        this machine's trust then comes from the current copy, so removing the
+        duplicate changes nothing. A file that is not our certificate belongs
+        to someone else and is never touched. update-ca-certificates drops the
+        stale /etc/ssl/certs symlink along with it.
+        """
+        legacy, ca_path = Path(command[1]), Path(command[2])
+        # Non-interactive read on purpose: a prompt here would hang doctor/trust.
+        legacy_text = self.platform.privilege_read(legacy)
+        if legacy_text is None:
+            raise RuntimeError(f"cannot read {legacy} even with elevation")
+        ours = file_fingerprints(ca_path)
+        if not ours or not (pem_fingerprints(legacy_text) & ours):
+            raise RuntimeError(
+                f"{legacy} does not contain this CA's certificate -- not removing a file "
+                "that does not belong to us"
+            )
+        elevated = self.platform.privilege()
+        code, msg = elevated.run(["rm", "-f", str(legacy)])
+        if code != 0:
+            raise RuntimeError(f"failed to remove {legacy}: {msg}")
+        code, msg = elevated.run(["update-ca-certificates"])
+        if code != 0:
+            raise RuntimeError(
+                f"update-ca-certificates failed after removing {legacy} "
+                f"(the stale symlink may still be there): {msg}"
             )
 
     def _remove_stale_nss_ca(self, command: list[str]) -> None:

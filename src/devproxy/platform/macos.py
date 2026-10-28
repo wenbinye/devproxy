@@ -383,6 +383,11 @@ class MacOSPlatform:
         code, _ = _run(["curl", "--noproxy", "*", "-fsS", "--max-time", "3", url])
         return code == 0
 
+    def legacy_system_ca(self) -> Path | None:
+        """macOS installs the CA into the keychain: no staging copy, nothing
+        left behind by the predecessor script."""
+        return None
+
     def ca_trusted(self, ca: Path) -> bool:
         """Whether the CA is **really in the system trust chain**.
 

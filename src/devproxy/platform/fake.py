@@ -354,6 +354,10 @@ class FakePlatform:
         """Default NSS database path as the fake platform sees it (**not a protocol method**)."""
         return _norm(self.nss_db)
 
+    def legacy_system_ca(self):
+        """No leftovers by default; tests that need one subclass and override."""
+        return None
+
     def nss_entries(self, ca: Path, nss_dir: Path | None = None) -> list[tuple[str, str]] | None:
         """Entries in the database whose content matches this CA; the fake platform is never "unable to determine" (returns [])."""
         db = self._nss_db_for(nss_dir)

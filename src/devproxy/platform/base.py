@@ -18,6 +18,13 @@ CA_NICKNAME = "devproxy Local CA"
 SYSTEM_CA_DEST = Path("/usr/local/share/ca-certificates/devproxy-local.crt")
 SYSTEM_TRUST_DIR = Path("/etc/ssl/certs")
 
+# The predecessor `devp` script installed the CA under this name with `cp`,
+# which carried the source file's 0600 over: the copy ended up root-only, and
+# tools that walk the trust store directory (mise reads every *.pem under
+# /etc/ssl/certs) fail on it with "permission denied". Recognized by name so
+# it can be cleaned up; see CertComponent's remove-legacy-system-ca action.
+LEGACY_SYSTEM_CA = Path("/usr/local/share/ca-certificates/caddy-local.crt")
+
 # **Template** for the default NSS database location: `~` is left unexpanded
 # (pathlib does not understand the tilde). New code should use `nss_db_dir()`;
 # `NSS_DIR` is kept only for compatibility with existing imports, and any
@@ -254,6 +261,11 @@ class Platform(Protocol):
         """Local HTTP(S) probe with an upper timeout bound; returns True on success (2xx/3xx)."""
 
     def ca_trusted(self, ca: Path) -> bool: ...
+
+    def legacy_system_ca(self) -> Path | None:
+        """A CA copy in the trust store's staging directory that an older
+        version (or the predecessor script) left behind, under a name no
+        longer used. None = nothing to clean up on this platform."""
 
     def privilege_read(self, path: Path) -> str | None:
         """Read a privileged file **non-interactively**; return None if unreadable.
