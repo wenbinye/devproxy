@@ -342,6 +342,28 @@ class CertComponent:
         """Name of the system trust point (used in errors and hints)."""
         return "system keychain" if self._is_macos else "system trust store"
 
+    def _system_copy_readable(self) -> bool:
+        """Is the installed copy readable by every user, not just root?
+
+        Tools that walk the trust store directory follow the symlink in
+        /etc/ssl/certs back to this file: mise reads every *.pem there,
+        NODE_EXTRA_CA_CERTS users read it directly, and a root-only 0600
+        copy makes them fail with "permission denied" even though the
+        system itself trusts the CA. Installations before the mode was
+        pinned to 644 used `cp`, which carried the source file's 0600 over
+        -- such a leftover has to be reinstalled, not accepted as "already
+        trusted".
+        """
+        if self._is_macos or not self.system_dest.exists():
+            # macOS installs into the keychain (no staging file); a missing
+            # file is handled by the ordinary "not trusted yet" path.
+            return True
+        try:
+            mode = self.system_dest.stat().st_mode
+        except OSError:
+            return False
+        return bool(mode & 0o004)
+
     def _trust_probe_hint(self) -> str:
         """Where to investigate when the probe fails -- not "go run devproxy trust"."""
         if self._is_macos:
@@ -530,7 +552,7 @@ class CertComponent:
                         privileged=False,
                     )
                 )
-        if self._system_trusted().trusted is not True:
+        if self._system_trusted().trusted is not True or not self._system_copy_readable():
             actions.append(
                 Action(
                     description="install the CA root certificate into the system trust store and run update-ca-certificates",

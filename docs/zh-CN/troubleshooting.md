@@ -3,6 +3,10 @@
 ## 常见症状
 
 
+- **mise（或其它工具）报 "Error loading CA root certificate: failed to read PEM ... Permission denied"（`/etc/ssl/certs/caddy-local.pem`）**：
+  装进系统信任库的 CA 副本不是全局可读的（devproxy 把权限钉死为 644 之前安装的残留）。
+  跑 `devproxy trust` —— 它会发现这份不可读的副本并用 `install -m 644` 重装。用
+  `ls -la /usr/local/share/ca-certificates/caddy-local.crt` 验证（应为 `-rw-r--r--`）。
 - **`devproxy up` 报 "conflict web ... sibling port changed (DEVPROXY_API_PORT: 49435 -> 51717)"**：
   兄弟路由重启后换了端口，那个应用还握着旧的。用 `devproxy down <名字>` 再 `devproxy up`
   重启它 —— 或者在 `devproxy.toml` 里把兄弟路由的端口写死，让它不再变动。

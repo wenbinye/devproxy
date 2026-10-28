@@ -3,6 +3,11 @@
 ## Common symptoms
 
 
+- **mise (or other tools) warn "Error loading CA root certificate: failed to read PEM ... Permission denied" at `/etc/ssl/certs/caddy-local.pem`**:
+  the installed CA copy is not world-readable (a leftover from installs before devproxy
+  pinned the mode to 644). Run `devproxy trust` -- it detects the unreadable copy and
+  reinstalls it with `install -m 644`. Verify with
+  `ls -la /usr/local/share/ca-certificates/caddy-local.crt` (expect `-rw-r--r--`).
 - **`devproxy up` reports "conflict web ... sibling port changed (DEVPROXY_API_PORT: 49435 -> 51717)"**:
   a sibling route was restarted on another port, and the app still holds the old one. Run
   `devproxy down <name>` and then `devproxy up` again -- or pin the sibling's `port` in

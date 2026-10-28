@@ -1438,3 +1438,22 @@ def test_check_never_raises_when_firefox_probe_breaks(tmp_path, isolated_home, m
     status = comp.check()
     assert status.ok is True
     assert "Firefox" not in status.hint
+
+
+def test_plan_reinstalls_when_the_installed_copy_is_not_world_readable(tmp_path):
+    """A 0600 staging copy (a leftover from the pre-644 install) counts as
+    "trusted" by fingerprint, but tools that walk the store directory get
+    "permission denied" reading it. plan must schedule a reinstall."""
+    comp, platform, paths = _component(tmp_path)
+    comp.system_dest = tmp_path / "ca" / "devproxy-local.crt"
+    ca = _write_ca(paths)
+    _trust_both(platform, ca)
+    comp.system_dest.parent.mkdir(parents=True, exist_ok=True)
+    comp.system_dest.write_text("FAKE CA\n", encoding="utf-8")
+    comp.system_dest.chmod(0o600)
+    actions = comp.plan()
+    assert any(a.command[0] == "install-system-ca" for a in actions)
+
+    # with the mode fixed there is genuinely nothing to do
+    comp.system_dest.chmod(0o644)
+    assert comp.plan() == []
