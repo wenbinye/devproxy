@@ -457,7 +457,7 @@ PLACEHOLDER_COMMAND = [
     "sh",
     "-c",
     "echo 'devproxy: this is a placeholder -- replace it with the real start command'; "
-    "python3 -m http.server $PORT",
+    "python3 -m http.server -b 127.0.0.1 $PORT",
 ]
 
 # Where a frontend usually lives inside a repository that also holds the API.
