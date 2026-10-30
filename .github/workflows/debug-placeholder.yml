@@ -1,0 +1,32 @@
+name: Debug placeholder on macOS
+
+on:
+  workflow_dispatch:
+
+jobs:
+  debug:
+    runs-on: macos-latest
+    steps:
+      - name: Run the placeholder command exactly as devproxy does
+        run: |
+          set -x
+          which python3; python3 --version
+          # 与 PLACEHOLDER_COMMAND 完全一致的形式
+          PORT=20945 sh -c "echo 'devproxy: placeholder'; python3 -m http.server \$PORT" > /tmp/out.txt 2>&1 &
+          CHILD=$!
+          sleep 3
+          echo "=== /tmp/out.txt:"; cat /tmp/out.txt
+          echo "=== listeners:"; lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null | grep -E "20945|python3" || echo "(none)"
+          echo "=== curl:"; curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:20945/ || true
+          echo "=== child alive:"; ps -p $CHILD -o pid,stat,command || echo "(gone)"
+          pkill -f "http.server 20945" || true
+          sleep 1
+          echo "=== after kill, file:"; cat /tmp/out.txt
+      - name: Compare with the system python3 directly
+        run: |
+          PORT=20946 /usr/bin/python3 -m http.server 20946 > /tmp/out2.txt 2>&1 &
+          CHILD=$!
+          sleep 3
+          echo "=== /tmp/out2.txt:"; cat /tmp/out2.txt
+          echo "=== curl:"; curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:20946/ || true
+          kill $CHILD 2>/dev/null || true
