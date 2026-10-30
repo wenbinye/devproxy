@@ -514,11 +514,12 @@ def test_placeholder_command_really_listens_on_port(tmp_path):
 
     from devproxy.gateway.project import PLACEHOLDER_COMMAND
 
-    # `python3` must be a working interpreter for the check to mean anything:
-    # on some CI images the system python3 is a stub that refuses to run, and
-    # then the test would measure the image, not the placeholder.
+    # The placeholder uses `python3` from the machine's PATH -- exactly what a
+    # user's `devproxy up` would resolve it to. Do **not** point PATH at this
+    # test process's interpreter: overriding it makes the child resolve to the
+    # venv's trampoline, which (observed on macOS runners) can hang before
+    # binding -- the test would then measure that, not the placeholder.
     env = {**os.environ}
-    env["PATH"] = str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", "")
 
     for _attempt in range(5):
         port = _pick_port()
