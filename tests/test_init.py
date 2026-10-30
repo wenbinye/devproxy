@@ -507,7 +507,12 @@ def _cmdline(pid: int) -> str:
 
 def test_placeholder_command_really_listens_on_port(tmp_path):
     """The placeholder must be startable: devproxy's readiness check is
-    "connectable on $PORT", and the file is promised to be startable."""
+    "connectable on $PORT", and the file is promised to be startable.
+
+    The port is picked by binding :0 and letting go again -- a port that
+    somebody else grabs in between is a real possibility on a busy CI
+    machine, so that case is retried instead of failing the build.
+    """
     import shutil
     import socket
     import subprocess
@@ -515,52 +520,83 @@ def test_placeholder_command_really_listens_on_port(tmp_path):
 
     from devproxy.gateway.project import PLACEHOLDER_COMMAND
 
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
     # `python3` must be a working interpreter for the check to mean anything:
     # on some CI images the system python3 is a stub that refuses to run, and
     # then the test would measure the image, not the placeholder.
-    env = {**os.environ, "PORT": str(port)}
+    env = {**os.environ}
     env["PATH"] = str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", "")
-    proc = subprocess.Popen(
-        PLACEHOLDER_COMMAND,
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        # Its own session: the shell's child (python3) must die with it, and
-        # must not keep the pipe open -- reading the pipe would then block.
-        start_new_session=True,
-    )
-    try:
-        deadline = time.monotonic() + 10
-        reachable = False
-        while time.monotonic() < deadline:
-            with socket.socket() as s:
-                s.settimeout(0.3)
-                if s.connect_ex(("127.0.0.1", port)) == 0:
-                    reachable = True
-                    break
-            if proc.poll() is not None:
-                break
-            time.sleep(0.1)
-        if not reachable:
-            # Diagnostics: what did the child actually run, and what did it say?
+
+    for _attempt in range(5):
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        child_env = {**env, "PORT": str(port)}
+        proc = subprocess.Popen(
+            PLACEHOLDER_COMMAND,
+            env=child_env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            # Its own session: the shell's child (python3) must die with it and
+            # must not keep the pipe open -- reading the pipe would block.
+            start_new_session=True,
+        )
+        try:
+            if _wait_for_port(port, proc):
+                return
+            output = _stop_and_read(proc)
+        finally:
             _kill_group(proc)
-            output = _drain(proc)
-            cmdline = _cmdline(proc.pid)
-            pytest.fail(
-                "the placeholder command must listen on $PORT\n"
-                f"  child output: {output!r}\n"
-                f"  child cmdline: {cmdline!r}\n"
-                f"  PORT in env: {env.get('PORT')!r}\n"
-                f"  python3 resolves to: "
-                f"{shutil.which('python3', path=env.get('PATH'))!r}"
-            )
-    finally:
-        _kill_group(proc)
-        proc.wait(timeout=10)
+        if "Address already in use" in output:
+            continue  # the port was taken by somebody else -- try another one
+        pytest.fail(
+            "the placeholder command must listen on $PORT\n"
+            f"  child output: {output!r}\n"
+            f"  PORT in env: {child_env.get('PORT')!r}\n"
+            f"  python3 resolves to: "
+            f"{shutil.which('python3', path=child_env.get('PATH'))!r}"
+        )
+    pytest.fail("the placeholder command never got a free port to bind")
+
+
+def _wait_for_port(port: int, proc) -> bool:
+    """Is the port connectable within a few seconds?"""
+    import socket
+
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        with socket.socket() as s:
+            s.settimeout(0.3)
+            if s.connect_ex(("127.0.0.1", port)) == 0:
+                return True
+        if proc.poll() is not None:
+            return False
+        time.sleep(0.1)
+    return False
+
+
+def _kill_group(proc) -> None:
+    """Stop the child and everything it started (the shell's own child)."""
+    if proc.poll() is not None:
+        return
+    try:
+        os.killpg(os.getpgid(proc.pid), 15)
+    except (OSError, ProcessLookupError):
+        try:
+            proc.terminate()
+        except OSError:
+            pass
+
+
+def _stop_and_read(proc) -> str:
+    """Kill the child, then read what it printed (the group kill closes the
+    pipe, so this cannot block forever)."""
+    _kill_group(proc)
+    try:
+        out, _ = proc.communicate(timeout=5)
+    except Exception:  # pragma: no cover -- diagnostics only
+        return ""
+    return out or ""
 
 
 def test_init_keeps_a_dev_script_that_runs_more_than_vite(tmp_path, monkeypatch):
