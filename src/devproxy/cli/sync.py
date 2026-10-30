@@ -25,6 +25,7 @@ from devproxy.gateway.store import RouteStoreError
 
 _STATUS_MARKS = {
     "created": "✅ created",
+    "restarted": "↻ restarted",
     "skipped": "➖ skipped",
     "conflict": "⚠️  conflict",
     "failed": "✗ failed",
@@ -89,6 +90,7 @@ def run_project_sync(*, file: Path | None = None, prune: bool = False, yes: bool
     failed = 0
     conflicts = 0
     created = 0
+    restarted = 0
     skipped = 0
     pruned = 0
     for outcome in outcomes:
@@ -99,12 +101,14 @@ def run_project_sync(*, file: Path | None = None, prune: bool = False, yes: bool
         if outcome.detail:
             line += f" -- {escape(outcome.detail)}"
         s.console.print(line)
-        if outcome.log_path is not None and outcome.status == "created":
+        if outcome.log_path is not None and outcome.status in ("created", "restarted"):
             s.console.print(f"   Log: {escape(str(outcome.log_path))}")
         if outcome.hint:
             s.console.print(f"   Fix: {escape(outcome.hint)}")
         if outcome.status == "created":
             created += 1
+        elif outcome.status == "restarted":
+            restarted += 1
         elif outcome.status == "skipped":
             skipped += 1
         elif outcome.status == "conflict":
@@ -121,17 +125,23 @@ def run_project_sync(*, file: Path | None = None, prune: bool = False, yes: bool
     if not outcomes:
         s.console.print("The file does not declare any routes.")
         raise typer.Exit(EXIT_OK)
-    if created == 0 and skipped and not conflicts and not failed and not pruned:
+    if created == 0 and restarted == 0 and skipped and not conflicts and not failed and not pruned:
         s.console.print(f"Everything is up to date ({skipped} declarations).")
         raise typer.Exit(EXIT_OK)
     s.console.print(
-        f"Sync complete: created {created}, skipped {skipped}, conflicts {conflicts}, "
-        f"failed {failed}, pruned {pruned}."
+        f"Sync complete: created {created}, restarted {restarted}, skipped {skipped}, "
+        f"conflicts {conflicts}, failed {failed}, pruned {pruned}."
     )
+    if restarted:
+        s.console.print(
+            f"{restarted} route(s) were restarted because a sibling route moved to another "
+            "port (their old pointer was dead)."
+        )
     if conflicts:
         s.err_console.print(
             f"{conflicts} route(s) disagree with the file -- conflicts were reported and "
-            "nothing was changed (this tool never kills and restarts processes on its own)."
+            "nothing was changed (devproxy never replaces a running app because its "
+            "*declaration* changed; that is your call)."
         )
     if failed:
         s.err_console.print(f"{failed} route(s) failed to start -- see the errors above.")

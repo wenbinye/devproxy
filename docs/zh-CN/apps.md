@@ -73,9 +73,9 @@ command = ["sh", "-c", "cd frontend && BACKEND_PORT=$DEVPROXY_API_PORT npm run d
 `BACKEND_PORT` 是**项目自己的**变量名 —— 去前端的代理配置里看它用哪个变量拼 API 地址。
 被引用的路由必须在同一个文件里声明，否则变量会是空值，devproxy 会直接拒绝这个文件。
 
-被引用的兄弟路由重启后换了端口时，还握着旧端口的那个应用会被报成冲突
-（`sibling port changed (DEVPROXY_API_PORT: 49435 -> 51717)`）—— devproxy 不会替你重启：
-用 `devproxy down <名字>` 再 `devproxy up`（项目模式）重启它。
+被引用的兄弟路由重启后换了端口时，还握着旧端口的那个应用会被 `devproxy up` **自动重启**
+（`↻ restarted web -- sibling port changed (DEVPROXY_API_PORT: 49435 -> 51717)`）——
+它此刻正指着一个死端口，留着它对谁都没用。重启沿用原来的端口。
 
 这是项目模式（`devproxy.toml`）。前台模式（`devproxy up <名字> -- CMD`）同样会注入
 `DEVPROXY_<名字>_PORT`，但取自**已注册的全部路由** —— 路由表是全局的，别的项目的路由

@@ -9,9 +9,9 @@
   于是所有遍历信任库目录的工具都会在这份文件上失败。跑 `devproxy trust`：它会按名字
   认出这份残留、核对指纹后删除（update-ca-certificates 会顺带清掉失效的符号链接）。
   验证：`ls /usr/local/share/ca-certificates/` 里不再有 `caddy-local.crt`。
-- **`devproxy up` 报 "conflict web ... sibling port changed (DEVPROXY_API_PORT: 49435 -> 51717)"**：
-  兄弟路由重启后换了端口，那个应用还握着旧的。用 `devproxy down <名字>` 再 `devproxy up`
-  重启它 —— 或者在 `devproxy.toml` 里把兄弟路由的端口写死，让它不再变动。
+- **`devproxy up` 报 "restarted web ... sibling port changed (DEVPROXY_API_PORT: 49435 -> 51717)"**：
+  兄弟路由重启后换了端口，那个应用还握着旧的 —— devproxy 已经用新端口把它重启了
+  （它此前正指着一个死端口）。这行只是告诉你发生了什么，不需要手工处理。
 - **`devproxy up` 报 "route 'web' uses $DEVPROXY_API_PORT, but no route 'api' is declared in this file"**：
   命令引用了本文件没有声明的路由 —— devproxy 只导出本项目路由的端口。请把该路由声明在
   同一个文件里。

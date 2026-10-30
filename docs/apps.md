@@ -85,9 +85,9 @@ one it builds the API target from. The referenced route must be declared in the 
 otherwise the variable would be empty and devproxy rejects the file.
 
 When a referenced sibling is restarted on another port, the app that was started with the
-old port is reported as a conflict (`sibling port changed (DEVPROXY_API_PORT: 49435 -> 51717)`)
--- devproxy does not restart it for you: run `devproxy down <name>` followed by `devproxy up`
-(project mode).
+old port is **restarted** by `devproxy up` (`↻ restarted web -- sibling port changed
+(DEVPROXY_API_PORT: 49435 -> 51717)`) -- it was pointing at a dead port, so leaving it
+running would serve nobody. The restart keeps the route's port.
 
 This is the project mode (`devproxy.toml`). Foreground mode (`devproxy up <name> -- CMD`)
 also exports `DEVPROXY_<NAME>_PORT`, but from the **already-registered** routes -- and the

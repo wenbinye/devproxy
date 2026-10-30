@@ -10,10 +10,10 @@
   directory fails on it. Run `devproxy trust`: it recognizes the leftover by name, checks
   its fingerprint, and removes it (update-ca-certificates drops the stale symlink with
   it). Verify: `ls /usr/local/share/ca-certificates/` no longer lists `caddy-local.crt`.
-- **`devproxy up` reports "conflict web ... sibling port changed (DEVPROXY_API_PORT: 49435 -> 51717)"**:
-  a sibling route was restarted on another port, and the app still holds the old one. Run
-  `devproxy down <name>` and then `devproxy up` again -- or pin the sibling's `port` in
-  `devproxy.toml` so it never moves.
+- **`devproxy up` reports "restarted web ... sibling port changed (DEVPROXY_API_PORT: 49435 -> 51717)"**:
+  a sibling route was restarted on another port, and the app still held the old one -- so
+  devproxy restarted it with the new port (it was pointing at a dead port). Nothing to do;
+  the line tells you what happened.
 - **`devproxy up` reports "route 'web' uses $DEVPROXY_API_PORT, but no route 'api' is declared in this file"**:
   the command references a route that this `devproxy.toml` does not declare -- devproxy only
   exports the ports of this project's own routes. Declare the route in the same file.

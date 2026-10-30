@@ -146,20 +146,29 @@ command = ["sh", "-c", "cd frontend && BACKEND_PORT=$DEVPROXY_API_PORT npm run d
 
 （消息里的路径是 `devproxy.toml` 的绝对路径。）
 
-**兄弟路由换了端口，用到它的那个应用会被报成冲突**。前端记住的是后端启动时给的端口；
+**兄弟路由换了端口，用到它的那个应用会被自动重启**。前端记住的是后端启动时给的端口；
 后端重启后换了端口，前端就会悄悄代理到一个死端口。devproxy 记得每个应用启动时拿到的是什么，
-于是把它说出来，而不是假装一切正常：
+发现漂移后用新端口把这个应用重启：
 
 ```
-⚠️  conflict web → https://web.test -- sibling port changed (DEVPROXY_API_PORT: 49435 -> 51717); current: mode up, port 49436, command ['sh', '-c', '...'], pid 1234
-   Fix: run devproxy down web and then devproxy up again
+↻ restarted web → https://web.test -- sibling port changed (DEVPROXY_API_PORT: 49435 -> 51717); port 49436
 ```
+
+这类应用是**坏的**，不是「和声明不一样」—— 留着它没有意义，而 `up` 的职责就是让机器与声明
+一致。重启**沿用原来的端口**（旧进程先被停掉），域名指向上游不变。
 
 只检查命令里**真正用到**那个变量的路由 —— 根本没读 `$DEVPROXY_API_PORT` 的应用，不关心
 后端换没换端口。用旧版 devproxy 启动的应用没有记录环境变量，不会被检查 —— 升级后请把
 它们重启一次。
 
-冲突只报告不动手：devproxy 不会杀进程、也不会自动重启，`devproxy up` 以退出码 1 结束。
+而**声明变了**（命令不同、文件里钉死了端口）仍然只报告不动手：这时候的问题是
+「要不要用这个新定义换掉正在跑的那个」，那是你的决定。devproxy 不会杀任何进程，
+`devproxy up` 以退出码 1 结束：
+
+```
+⚠️  conflict web → https://web.test -- command differs (current [...], expected [...])
+   Fix: run devproxy down web and then devproxy up again
+```
 
 ### 怎么用
 

@@ -38,8 +38,12 @@ User-visible changes to devproxy. The format follows
   file is read (`route 'web' uses $DEVPROXY_API_PORT, but no route 'api' is declared in
   this file (devproxy only exports the ports of this project's routes)`).
 - When a referenced sibling's port changed, the app holding the stale pointer is
-  reported as a **conflict** (`sibling port changed (DEVPROXY_API_PORT: 49435 -> 51717)`)
-  instead of silently proxying to a dead port.
+  **restarted** with the new port (`↻ restarted web -- sibling port changed
+  (DEVPROXY_API_PORT: 49435 -> 51717)`) instead of silently proxying to a dead port.
+  Such an app is broken, not "different from the declaration", so `up` converges it
+  instead of asking the user to run `down` + `up`. A *declaration* change (different
+  command, pinned port) is still only reported: replacing a running app because its
+  definition changed is the user's call.
 
 ### Fixed
 

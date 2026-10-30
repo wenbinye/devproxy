@@ -152,23 +152,33 @@ empty, so the file is rejected while it is read:
 
 (The path in the message is the absolute path of your `devproxy.toml`.)
 
-**When a sibling's port changes, the app that uses it is reported as a conflict.** The frontend
-holds the port the API had when it started; if the API is restarted on another port, the
-frontend would silently proxy to a dead port. devproxy remembers what each app was started with
-and says so instead of pretending everything is fine:
+**When a sibling's port changes, the app that uses it is restarted.** The frontend holds the
+port the API had when it started; if the API is restarted on another port, the frontend would
+silently proxy to a dead port. devproxy remembers what each app was started with, notices the
+drift, and restarts that app with the new port:
 
 ```
-⚠️  conflict web → https://web.test -- sibling port changed (DEVPROXY_API_PORT: 49435 -> 51717); current: mode up, port 49436, command ['sh', '-c', '...'], pid 1234
-   Fix: run devproxy down web and then devproxy up again
+↻ restarted web → https://web.test -- sibling port changed (DEVPROXY_API_PORT: 49435 -> 51717); port 49436
 ```
+
+Such an app is **broken**, not "different from the declaration" -- keeping it running serves no
+purpose, and `up`'s job is to make the machine match the declarations. The restart keeps the
+route's port (the old process is stopped first), so the domain keeps its upstream.
 
 Only the routes whose command actually mentions the variable are checked -- a route that never
 reads `$DEVPROXY_API_PORT` does not care that the API moved. Apps started by an older
 devproxy have no recorded environment and are never checked: after an upgrade, restart them
 once.
 
-A conflict is reported, never acted on: devproxy does not kill or restart anything, and
-`devproxy up` exits with code 1.
+A **declaration** change (a different command, or a pinned port in the file) is still only
+reported, never acted on: there the question is "should the running process be replaced by
+this new definition?", and that is your call. devproxy does not kill anything in that case,
+and `devproxy up` exits with code 1:
+
+```
+⚠️  conflict web → https://web.test -- command differs (current [...], expected [...])
+   Fix: run devproxy down web and then devproxy up again
+```
 
 ### How to use it
 

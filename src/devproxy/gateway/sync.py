@@ -193,7 +193,7 @@ def execute_sync_plan(
     # that is only knowable if every port of this batch is chosen up front.
     # The map is exported to every app as DEVPROXY_<NAME>_PORT.
     known_ports, allocated = _plan_ports(project, plan, store)
-    _apply_env_drift(plan, known_ports)
+    restarts = _apply_env_drift(plan, known_ports, allocated)
 
     # 1) up mode: start all background workers first (in parallel), then wait
     # for each to become ready.
@@ -251,11 +251,15 @@ def execute_sync_plan(
                     )
                 )
                 continue
+            restart_reason = restarts.get(declared.name)
+            detail = f"port {ready_route.port}"
+            if restart_reason:
+                detail = f"{restart_reason}; {detail}"
             record(
                 SyncOutcome(
                     declared.name,
-                    "created",
-                    f"port {ready_route.port}",
+                    "restarted" if restart_reason else "created",
+                    detail,
                     domain=ready_route.domain,
                     port=ready_route.port,
                     log_path=log_path,
@@ -429,19 +433,37 @@ def _sibling_env(known_ports: dict[str, int]) -> dict[str, str]:
     return {port_env_name(n): str(p) for n, p in known_ports.items()}
 
 
-def _apply_env_drift(plan: SyncPlan, known_ports: dict[str, int]) -> None:
-    """Turn "would skip" into "conflict" when a sibling's port changed.
+def _apply_env_drift(
+    plan: SyncPlan, known_ports: dict[str, int], allocated: dict[str, int]
+) -> dict[str, str]:
+    """Restart the apps whose sibling port moved under their feet.
 
     An app that was started with DEVPROXY_API_PORT=32847 keeps that value in
     its environment. When the API is restarted and gets another port, the
     frontend is now pointing at a dead port -- and nothing about its own
     declaration changed, so the ordinary conflict check stays silent. The
     route table remembers what each app was started with, so the drift is
-    detected here and reported as a conflict: the user decides when to
-    restart (devproxy down <name> && devproxy up).
+    detected here.
+
+    Such an app is **broken**, not "different from the declaration": keeping
+    it running serves no purpose, and `up`'s job is to make the machine match
+    the declarations. So a drifted route is turned into a restart instead of a
+    conflict -- the same thing `devproxy down <name> && devproxy up` would
+    do, minus the extra round trip.
+
+    The restart keeps the route's **port**: the old process is stopped first
+    (the worker does that), so the port is free again and the domain keeps
+    pointing at the same upstream.
+
+    A *declaration* change (a different command, or a pinned port in the
+    file) stays a conflict: there the question is "should the running
+    process be replaced by this new definition?", and that is the user's
+    call, not devproxy's.
+
+    Returns the routes that were restarted, with the reason.
     """
     expected = _sibling_env(known_ports)
-    drifted: list[tuple[ProjectRoute, Route, str]] = []
+    restarts: dict[str, str] = {}
     for declared, current in list(plan.skip):
         if not current.env:
             # Started before devproxy exported sibling ports -- nothing to
@@ -460,11 +482,14 @@ def _apply_env_drift(plan: SyncPlan, known_ports: dict[str, int]) -> None:
         ]
         if not changes:
             continue
-        drifted.append((declared, current, "sibling port changed (" + ", ".join(changes) + ")"))
-    if not drifted:
-        return
-    plan.skip = [item for item in plan.skip if item not in [(d, c) for d, c, _ in drifted]]
-    plan.conflict.extend(drifted)
+        reason = "sibling port changed (" + ", ".join(changes) + ")"
+        plan.skip.remove((declared, current))
+        plan.create_up.append(declared)
+        # Same port as before: the old process is stopped by the worker, so
+        # the port is free again and the domain keeps its upstream.
+        allocated[declared.name] = current.port
+        restarts[declared.name] = reason
+    return restarts
 
 
 def _spawn_worker(

@@ -27,9 +27,11 @@
 - 命令里引用了本文件没有声明的路由，会在**读文件时**直接报错
   （`route 'web' uses $DEVPROXY_API_PORT, but no route 'api' is declared in this file
   (devproxy only exports the ports of this project's routes)`）。
-- 被引用的兄弟路由换了端口时，握着过期指针的应用会被报成**冲突**
-  （`sibling port changed (DEVPROXY_API_PORT: 49435 -> 51717)`），
-  而不是悄悄代理到一个死端口。
+- 被引用的兄弟路由换了端口时，握着过期指针的应用会被**用新端口重启**
+  （`↻ restarted web -- sibling port changed (DEVPROXY_API_PORT: 49435 -> 51717)`），
+  而不是悄悄代理到一个死端口。这类应用是「坏的」，不是「和声明不一样」，所以 `up`
+  直接收敛它，不用再手工 `down` + `up`。而**声明变了**（命令不同、端口钉死）仍然
+  只报告：要不要用新定义换掉正在跑的应用，是你的决定。
 - `devproxy init` 在「前端 + 后端」的仓库里会生成**两条路由**并自动接线：前端在
   `frontend/` / `web/` / `client/` / `ui/` 里找，生成 `<API 名>-web` 路由；前端命令
   拿到 API 的动态端口（注入到它自己的配置读取的那个变量里），外加自己的域名

@@ -757,12 +757,12 @@ def _env_aware_spawn(monkeypatch, store, recorded):
     monkeypatch.setattr("devproxy.gateway.sync._spawn_worker", spawn)
 
 
-def test_sync_reports_conflict_when_a_referenced_sibling_port_changed(
+def test_sync_restarts_the_route_whose_referenced_sibling_port_changed(
     ctx, env, project_dir, monkeypatch
 ):
     """The frontend keeps the port the API had when it started. When the API
-    is restarted on another port, the frontend points at a dead one -- that
-    has to surface as a conflict, not as a silent "up to date"."""
+    is restarted on another port, the frontend points at a dead one -- it is
+    **broken**, so `up` restarts it instead of asking the user to."""
     paths, cfg, store, admin = ctx
     (project_dir / "devproxy.toml").write_text(SIBLING_TOML)
     recorded: dict = {}
@@ -782,16 +782,20 @@ def test_sync_reports_conflict_when_a_referenced_sibling_port_changed(
     store.mutate(bump)
 
     second = CliRunner().invoke(app, ["up"])
-    assert second.exit_code == 1, second.output
+    assert second.exit_code == 0, second.output
+    assert "restarted" in second.output
     assert "sibling port changed" in second.output
     assert f"DEVPROXY_API_PORT: {api_port} -> {new_api_port}" in second.output
+    # the web route was restarted -- with the API's new port in its env
+    assert "web" in recorded, "the stale route must be started again"
+    assert recorded["web"]["extra_env"]["DEVPROXY_API_PORT"] == str(new_api_port)
 
 
-def test_sync_reports_the_drift_only_for_the_route_that_uses_the_port(
+def test_sync_restarts_only_the_route_that_uses_the_changed_port(
     ctx, env, project_dir, monkeypatch
 ):
     """A route that never mentions a sibling's port does not care that the
-    sibling was restarted -- only the route that reads the port conflicts."""
+    sibling was restarted -- only the route that reads the port is restarted."""
     paths, cfg, store, admin = ctx
     (project_dir / "devproxy.toml").write_text(SIBLING_TOML)
     recorded: dict = {}
@@ -806,10 +810,10 @@ def test_sync_reports_the_drift_only_for_the_route_that_uses_the_port(
     store.mutate(bump)
     res = CliRunner().invoke(app, ["up"])
     # The API itself is fine -- it never reads the web route's port -- so
-    # exactly one conflict is reported, and it is the web route's.
-    assert res.exit_code == 1
+    # exactly one route is restarted, and it is the web route's.
+    assert res.exit_code == 0, res.output
     assert res.output.count("sibling port changed") == 1
-    assert "conflict web" in res.output.replace("\u26a0\ufe0f  ", "")
+    assert "restarted web" in res.output.replace("\u21bb ", "")
 
 
 def test_up_route_with_pinned_port_uses_it_and_tells_siblings(ctx, env, project_dir, monkeypatch):
@@ -828,9 +832,12 @@ def test_up_route_with_pinned_port_uses_it_and_tells_siblings(ctx, env, project_
     assert recorded["web"]["extra_env"]["DEVPROXY_API_PORT"] == "41001"
 
 
-def test_sync_reports_drift_when_the_sibling_is_restarted(ctx, env, project_dir, monkeypatch):
+def test_sync_restarts_the_stale_app_when_the_sibling_is_restarted(
+    ctx, env, project_dir, monkeypatch
+):
     """The realistic case: the API is stopped and started again, and gets
-    another port. The frontend still holds the old one."""
+    another port. The frontend still holds the old one -- so `up` restarts it
+    with the new port."""
     paths, cfg, store, admin = ctx
     (project_dir / "devproxy.toml").write_text(SIBLING_TOML)
     recorded: dict = {}
@@ -843,9 +850,10 @@ def test_sync_reports_drift_when_the_sibling_is_restarted(ctx, env, project_dir,
     new_port = old_port + 100
     monkeypatch.setattr("devproxy.gateway.sync.alloc_port", lambda: new_port)
     res = CliRunner().invoke(app, ["up"])
-    assert res.exit_code == 1, res.output
+    assert res.exit_code == 0, res.output
     assert "sibling port changed" in res.output
     assert f"DEVPROXY_API_PORT: {old_port} -> {new_port}" in res.output
+    assert "restarted" in res.output
 
 
 def test_legacy_route_without_env_is_not_a_conflict(ctx, env, project_dir, monkeypatch):
