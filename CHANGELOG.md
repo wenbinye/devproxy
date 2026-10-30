@@ -10,6 +10,8 @@ User-visible changes to devproxy. The format follows
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-30
+
 ### Added
 
 - `devproxy init` generates **two routes** for a repository that has a frontend next to
@@ -63,6 +65,20 @@ User-visible changes to devproxy. The format follows
 - `devproxy init` calls vite directly when the project's dev script runs vite
   (`"dev": "vite --port 5174"`): appending `--port $PORT` to such a script does not
   reliably override the hardcoded port, while the CLI flag always does.
+
+- `devproxy up` never hands the same port to two routes of one batch -- the OS may
+  hand a port out again right after it was released, and the second app would fail
+  to bind.
+- `devproxy init --name <name>` no longer writes a file that points at the old
+  (directory-derived) route names: devproxy rejected such a file as referring to a
+  route that does not exist.
+- `devproxy trust` now removes the root-only CA copy the predecessor `devp` script
+  left in the trust store staging directory. It was installed with `cp`, so it
+  carried the source file's 0600 -- every tool that walks the trust store
+  directory (mise reads every `*.pem`) failed on it with "permission denied",
+  while the fingerprint check kept saying "already trusted".
+- The PyPI page renders correctly again: the README's images and documentation
+  links are absolute URLs now (relative paths have no base on PyPI).
 
 ## [0.1.0] - 2026-10-27
 
