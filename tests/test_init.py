@@ -580,15 +580,23 @@ def _pick_port() -> int | None:
 
 
 def _wait_for_port(port: int, proc) -> bool:
-    """Is the port connectable within a few seconds?"""
+    """Is the port connectable within a few seconds?
+
+    Probe with `create_connection` (blocking, like devproxy's own readiness
+    check) -- a hand-rolled non-blocking `connect_ex` returns EINPROGRESS
+    forever against the dual-stack listener that Python 3.13+'s http.server
+    creates on macOS, and the test would then measure its own probe instead
+    of the placeholder.
+    """
     import socket
 
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
-        with socket.socket() as s:
-            s.settimeout(0.3)
-            if s.connect_ex(("127.0.0.1", port)) == 0:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.5):
                 return True
+        except OSError:
+            pass
         if proc.poll() is not None:
             return False
         time.sleep(0.1)
