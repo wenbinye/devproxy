@@ -1,7 +1,7 @@
 # devproxy
 
 <p align="center">
-  <img src="assets/icon-256.png" width="128" alt="devproxy icon: several local services converging into one HTTPS padlock that points at a .test domain">
+  <img src="https://raw.githubusercontent.com/wenbinye/devproxy/main/assets/icon-256.png" width="128" alt="devproxy icon: several local services converging into one HTTPS padlock that points at a .test domain">
 </p>
 
 <p align="center">
@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img src="assets/demo.gif" width="820" alt="devproxy demo: the route table, starting an app under a domain, and curl over HTTPS without -k">
+  <img src="https://raw.githubusercontent.com/wenbinye/devproxy/main/assets/demo.gif" width="820" alt="devproxy demo: the route table, starting an app under a domain, and curl over HTTPS without -k">
 </p>
 
 ## Local services under real HTTPS domains
@@ -93,7 +93,7 @@ In a non-interactive environment (CI, scripts), `setup` / `trust` need an explic
 `--yes` whenever a step requires elevation; otherwise the tool refuses with exit code 4
 (it neither skips silently nor elevates silently).
 
-**Want to undo it?** See [Uninstall](docs/migration-and-uninstall.md#uninstall):
+**Want to undo it?** See [Uninstall](https://github.com/wenbinye/devproxy/blob/main/docs/migration-and-uninstall.md#uninstall):
 `devproxy uninstall --dry-run` shows what it would do.
 
 ---
@@ -223,30 +223,30 @@ creates it when the first route is registered)" — that is a normal state, not 
 | `devproxy init` | Generate a `devproxy.toml` in the project (route name from the directory, start command guessed from the project type or given with `--command` / `--from`) |
 | `devproxy --install-completion` | Install shell completion: commands, options, and the **route names** in `logs` / `down` (bash / zsh / fish / powershell) |
 
-Every option of every command: see [docs/commands.md](docs/commands.md).
+Every option of every command: see [docs/commands.md](https://github.com/wenbinye/devproxy/blob/main/docs/commands.md).
 
 ---
 
 ## Documentation
 
-The details live under [docs/](docs/), pick what you need:
+The details live under [docs/](https://github.com/wenbinye/devproxy/tree/main/docs/), pick what you need:
 
 | Document | Contents |
 |---|---|
-| [docs/commands.md](docs/commands.md) | Every command, option, and exit code |
-| [docs/apps.md](docs/apps.md) | Wiring apps up: `expose`, the two ways to use `$PORT`, caveats |
-| [docs/dns-and-certs.md](docs/dns-and-certs.md) | The DNS route, certificate trust (including Firefox), `doctor` vs `setup` |
-| [docs/configuration.md](docs/configuration.md) | Every `config.toml` setting, the domain-suffix allowlist, the storage archive |
-| [docs/project-config.md](docs/project-config.md) | `devproxy.toml`: the declarative `up` / `down` workflow |
-| [docs/platforms.md](docs/platforms.md) | Directories and files, platform differences, `devproxy run` without systemd |
-| [docs/migration-and-uninstall.md](docs/migration-and-uninstall.md) | Migration and rollback, uninstall |
-| [docs/troubleshooting.md](docs/troubleshooting.md) | Troubleshooting |
-| [docs/development.md](docs/development.md) | Development and CI, code structure |
+| [docs/commands.md](https://github.com/wenbinye/devproxy/blob/main/docs/commands.md) | Every command, option, and exit code |
+| [docs/apps.md](https://github.com/wenbinye/devproxy/blob/main/docs/apps.md) | Wiring apps up: `expose`, the two ways to use `$PORT`, caveats |
+| [docs/dns-and-certs.md](https://github.com/wenbinye/devproxy/blob/main/docs/dns-and-certs.md) | The DNS route, certificate trust (including Firefox), `doctor` vs `setup` |
+| [docs/configuration.md](https://github.com/wenbinye/devproxy/blob/main/docs/configuration.md) | Every `config.toml` setting, the domain-suffix allowlist, the storage archive |
+| [docs/project-config.md](https://github.com/wenbinye/devproxy/blob/main/docs/project-config.md) | `devproxy.toml`: the declarative `up` / `down` workflow |
+| [docs/platforms.md](https://github.com/wenbinye/devproxy/blob/main/docs/platforms.md) | Directories and files, platform differences, `devproxy run` without systemd |
+| [docs/migration-and-uninstall.md](https://github.com/wenbinye/devproxy/blob/main/docs/migration-and-uninstall.md) | Migration and rollback, uninstall |
+| [docs/troubleshooting.md](https://github.com/wenbinye/devproxy/blob/main/docs/troubleshooting.md) | Troubleshooting |
+| [docs/development.md](https://github.com/wenbinye/devproxy/blob/main/docs/development.md) | Development and CI, code structure |
 
-Find documents by scenario: [docs/README.md](docs/README.md).
-Real-machine verification checklist: [docs/verification-checklist.md](docs/verification-checklist.md).
+Find documents by scenario: [docs/README.md](https://github.com/wenbinye/devproxy/blob/main/docs/README.md).
+Real-machine verification checklist: [docs/verification-checklist.md](https://github.com/wenbinye/devproxy/blob/main/docs/verification-checklist.md).
 
-**Docs in Chinese:** [README.zh-CN.md](README.zh-CN.md) and [docs/zh-CN/](docs/zh-CN/).
+**Docs in Chinese:** [README.zh-CN.md](https://github.com/wenbinye/devproxy/blob/main/README.zh-CN.md) and [docs/zh-CN/](https://github.com/wenbinye/devproxy/tree/main/docs/zh-CN/).
 
 ---
 
@@ -254,11 +254,11 @@ Real-machine verification checklist: [docs/verification-checklist.md](docs/verif
 
 | File | When to read it |
 |---|---|
-| [CONTRIBUTING.md](CONTRIBUTING.md) | Before a PR: dev environment, checklist, code style |
-| [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | The community's code of conduct |
-| [SECURITY.md](SECURITY.md) | Reporting security issues (**do not** open a public issue); also the boundaries of what this tool changes |
-| [CHANGELOG.md](CHANGELOG.md) | User-visible changes in every release |
+| [CONTRIBUTING.md](https://github.com/wenbinye/devproxy/blob/main/CONTRIBUTING.md) | Before a PR: dev environment, checklist, code style |
+| [CODE_OF_CONDUCT.md](https://github.com/wenbinye/devproxy/blob/main/CODE_OF_CONDUCT.md) | The community's code of conduct |
+| [SECURITY.md](https://github.com/wenbinye/devproxy/blob/main/SECURITY.md) | Reporting security issues (**do not** open a public issue); also the boundaries of what this tool changes |
+| [CHANGELOG.md](https://github.com/wenbinye/devproxy/blob/main/CHANGELOG.md) | User-visible changes in every release |
 
 ## License
 
-[MIT](LICENSE) © 2026 Ye Wenbin
+[MIT](https://github.com/wenbinye/devproxy/blob/main/LICENSE) © 2026 Ye Wenbin

@@ -1,7 +1,7 @@
 # devproxy
 
 <p align="center">
-  <img src="assets/icon-256.png" width="128" alt="devproxy 图标：多个本地服务汇聚到一把 HTTPS 挂锁，指向 .test 域名">
+  <img src="https://raw.githubusercontent.com/wenbinye/devproxy/main/assets/icon-256.png" width="128" alt="devproxy 图标：多个本地服务汇聚到一把 HTTPS 挂锁，指向 .test 域名">
 </p>
 
 <p align="center">
@@ -19,7 +19,7 @@
 > 本页与 `docs/zh-CN/` 是完整的中文镜像文档。
 
 <p align="center">
-  <img src="assets/demo.gif" width="820" alt="devproxy 演示：路由表、把应用挂到域名下、以及不用 -k 的 HTTPS curl">
+  <img src="https://raw.githubusercontent.com/wenbinye/devproxy/main/assets/demo.gif" width="820" alt="devproxy 演示：路由表、把应用挂到域名下、以及不用 -k 的 HTTPS curl">
 </p>
 
 ## 本地服务，用真正的 HTTPS 域名访问
@@ -92,7 +92,7 @@ devproxy up api -- npm run dev
 非交互环境（CI、脚本）里跑 `setup` / `trust`，如果需要提权，必须显式加 `--yes`，
 否则工具会以退出码 4 拒绝执行（不会默默跳过，也不会默默提权）。
 
-**想撤回？** 见下面的[「卸载」](docs/zh-CN/migration-and-uninstall.md#卸载)：`devproxy uninstall --dry-run` 可以先看它会做什么。
+**想撤回？** 见下面的[「卸载」](https://github.com/wenbinye/devproxy/blob/main/docs/zh-CN/migration-and-uninstall.md#卸载)：`devproxy uninstall --dry-run` 可以先看它会做什么。
 
 ---
 
@@ -215,31 +215,31 @@ Caddy 的内部 CA **在第一次加载 `tls internal` 站点时**才生成 —�
 | `devproxy init` | 在项目里生成 `devproxy.toml`（路由名取目录名，启动命令按项目类型猜或用 `--command` / `--from` 指定） |
 | `devproxy --install-completion` | 装 shell 补全：命令、选项，以及 `logs` / `down` 里的**路由名**（bash / zsh / fish / powershell） |
 
-常用选项与各命令的全部选项：见 [docs/zh-CN/commands.md](docs/zh-CN/commands.md)。
+常用选项与各命令的全部选项：见 [docs/zh-CN/commands.md](https://github.com/wenbinye/devproxy/blob/main/docs/zh-CN/commands.md)。
 
 
 ---
 
 ## 文档
 
-英文文档：[README.md](README.md) 与 [docs/](docs/)。本页及 `docs/zh-CN/` 是中文镜像。
+英文文档：[README.md](https://github.com/wenbinye/devproxy/blob/main/README.md) 与 [docs/](https://github.com/wenbinye/devproxy/tree/main/docs/)。本页及 `docs/zh-CN/` 是中文镜像。
 
-详细说明拆在 [docs/](docs/) 下，按需查阅：
+详细说明拆在 [docs/](https://github.com/wenbinye/devproxy/tree/main/docs/) 下，按需查阅：
 
 | 文档 | 内容 |
 |---|---|
-| [docs/zh-CN/commands.md](docs/zh-CN/commands.md) | 全部命令、选项、退出码 |
-| [docs/zh-CN/apps.md](docs/zh-CN/apps.md) | 应用接入：`expose`、`$PORT` 的两种写法、注意事项 |
-| [docs/zh-CN/dns-and-certs.md](docs/zh-CN/dns-and-certs.md) | DNS 路由、证书信任（含 Firefox）、`doctor` 与 `setup` 分工 |
-| [docs/zh-CN/configuration.md](docs/zh-CN/configuration.md) | `config.toml` 全部配置项、域名后缀白名单、storage 留档 |
-| [docs/zh-CN/project-config.md](docs/zh-CN/project-config.md) | `devproxy.toml`：`up` / `down` 的声明式工作流 |
-| [docs/zh-CN/platforms.md](docs/zh-CN/platforms.md) | 目录与文件、平台差异、没有 systemd 时用 `devproxy run` |
-| [docs/zh-CN/migration-and-uninstall.md](docs/zh-CN/migration-and-uninstall.md) | 迁移与回滚、卸载 |
-| [docs/zh-CN/troubleshooting.md](docs/zh-CN/troubleshooting.md) | 故障排查 |
-| [docs/zh-CN/development.md](docs/zh-CN/development.md) | 开发与 CI、代码结构 |
+| [docs/zh-CN/commands.md](https://github.com/wenbinye/devproxy/blob/main/docs/zh-CN/commands.md) | 全部命令、选项、退出码 |
+| [docs/zh-CN/apps.md](https://github.com/wenbinye/devproxy/blob/main/docs/zh-CN/apps.md) | 应用接入：`expose`、`$PORT` 的两种写法、注意事项 |
+| [docs/zh-CN/dns-and-certs.md](https://github.com/wenbinye/devproxy/blob/main/docs/zh-CN/dns-and-certs.md) | DNS 路由、证书信任（含 Firefox）、`doctor` 与 `setup` 分工 |
+| [docs/zh-CN/configuration.md](https://github.com/wenbinye/devproxy/blob/main/docs/zh-CN/configuration.md) | `config.toml` 全部配置项、域名后缀白名单、storage 留档 |
+| [docs/zh-CN/project-config.md](https://github.com/wenbinye/devproxy/blob/main/docs/zh-CN/project-config.md) | `devproxy.toml`：`up` / `down` 的声明式工作流 |
+| [docs/zh-CN/platforms.md](https://github.com/wenbinye/devproxy/blob/main/docs/zh-CN/platforms.md) | 目录与文件、平台差异、没有 systemd 时用 `devproxy run` |
+| [docs/zh-CN/migration-and-uninstall.md](https://github.com/wenbinye/devproxy/blob/main/docs/zh-CN/migration-and-uninstall.md) | 迁移与回滚、卸载 |
+| [docs/zh-CN/troubleshooting.md](https://github.com/wenbinye/devproxy/blob/main/docs/zh-CN/troubleshooting.md) | 故障排查 |
+| [docs/zh-CN/development.md](https://github.com/wenbinye/devproxy/blob/main/docs/zh-CN/development.md) | 开发与 CI、代码结构 |
 
-按场景找文档：[docs/zh-CN/README.md](docs/zh-CN/README.md)。
-真机验证清单：[docs/verification-checklist.md](docs/zh-CN/verification-checklist.md)。
+按场景找文档：[docs/zh-CN/README.md](https://github.com/wenbinye/devproxy/blob/main/docs/zh-CN/README.md)。
+真机验证清单：[docs/verification-checklist.md](https://github.com/wenbinye/devproxy/blob/main/docs/zh-CN/verification-checklist.md)。
 
 ---
 
@@ -247,11 +247,11 @@ Caddy 的内部 CA **在第一次加载 `tls internal` 站点时**才生成 —�
 
 | 文件 | 什么时候看 |
 |---|---|
-| [CONTRIBUTING.md](CONTRIBUTING.md) | 提 PR 之前：开发环境、检查清单、代码风格 |
-| [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | 参与社区的行为准则 |
-| [SECURITY.md](SECURITY.md) | 报安全问题（**不要**开公开 issue）；以及这个工具会改你系统的边界 |
-| [CHANGELOG.md](CHANGELOG.md) | 每个版本的用户可见变化 |
+| [CONTRIBUTING.md](https://github.com/wenbinye/devproxy/blob/main/CONTRIBUTING.md) | 提 PR 之前：开发环境、检查清单、代码风格 |
+| [CODE_OF_CONDUCT.md](https://github.com/wenbinye/devproxy/blob/main/CODE_OF_CONDUCT.md) | 参与社区的行为准则 |
+| [SECURITY.md](https://github.com/wenbinye/devproxy/blob/main/SECURITY.md) | 报安全问题（**不要**开公开 issue）；以及这个工具会改你系统的边界 |
+| [CHANGELOG.md](https://github.com/wenbinye/devproxy/blob/main/CHANGELOG.md) | 每个版本的用户可见变化 |
 
 ## 许可
 
-[MIT](LICENSE) © 2026 Ye Wenbin
+[MIT](https://github.com/wenbinye/devproxy/blob/main/LICENSE) © 2026 Ye Wenbin
