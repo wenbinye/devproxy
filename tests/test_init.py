@@ -476,6 +476,7 @@ def test_init_non_vite_frontend_uses_npm_run(tmp_path, monkeypatch):
 def test_placeholder_command_really_listens_on_port(tmp_path):
     """The placeholder must be startable: devproxy's readiness check is
     "connectable on $PORT", and the file is promised to be startable."""
+    import shutil
     import socket
     import subprocess
     import sys
@@ -509,14 +510,30 @@ def test_placeholder_command_really_listens_on_port(tmp_path):
             if proc.poll() is not None:
                 break
             time.sleep(0.1)
-        output = ""
-        if proc.poll() is not None:
+        if not reachable:
+            # Diagnostics: what did the child actually run, and what did it say?
+            try:
+                proc.terminate()
+                proc.wait(timeout=5)
+            except Exception:  # pragma: no cover -- diagnostics only
+                pass
             output = proc.stdout.read() if proc.stdout else ""
-        assert reachable, "the placeholder command must listen on $PORT" + (
-            f" (child output: {output!r})" if output else ""
-        )
+            cmdline = ""
+            try:
+                cmdline = Path(f"/proc/{proc.pid}/cmdline").read_bytes().decode().replace("\0", " ")
+            except OSError:
+                cmdline = "(no /proc on this platform)"
+            pytest.fail(
+                "the placeholder command must listen on $PORT\n"
+                f"  child output: {output!r}\n"
+                f"  child cmdline: {cmdline!r}\n"
+                f"  PORT in env: {env.get('PORT')!r}\n"
+                f"  python3 resolves to: "
+                f"{shutil.which('python3', path=env.get('PATH'))!r}"
+            )
     finally:
-        proc.terminate()
+        if proc.poll() is None:
+            proc.terminate()
         proc.wait(timeout=10)
 
 
