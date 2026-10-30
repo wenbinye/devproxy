@@ -514,12 +514,19 @@ def test_placeholder_command_really_listens_on_port(tmp_path):
 
     from devproxy.gateway.project import PLACEHOLDER_COMMAND
 
-    # The placeholder uses `python3` from the machine's PATH -- exactly what a
-    # user's `devproxy up` would resolve it to. Do **not** point PATH at this
-    # test process's interpreter: overriding it makes the child resolve to the
-    # venv's trampoline, which (observed on macOS runners) can hang before
-    # binding -- the test would then measure that, not the placeholder.
-    env = {**os.environ}
+    # The placeholder resolves `python3` from PATH, and it must see the same
+    # PATH a real `devproxy up` sees. A `uv run pytest` process has the venv's
+    # bin directory **first in PATH** (so `python3` = the uv trampoline), and
+    # on macOS runners that trampoline hangs the child before it ever binds --
+    # observed repeatedly. A user's `devproxy up` never has this repo's .venv
+    # in PATH, so drop it: the test then measures the real thing.
+    venv_bin = Path(sys.executable).parent.resolve()
+    kept = [
+        part
+        for part in os.environ.get("PATH", "").split(os.pathsep)
+        if part and Path(part).resolve() != venv_bin
+    ]
+    env = {**os.environ, "PATH": os.pathsep.join(kept)}
 
     for _attempt in range(5):
         port = _pick_port()
