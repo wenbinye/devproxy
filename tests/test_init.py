@@ -527,9 +527,9 @@ def test_placeholder_command_really_listens_on_port(tmp_path):
     env["PATH"] = str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", "")
 
     for _attempt in range(5):
-        with socket.socket() as probe:
-            probe.bind(("127.0.0.1", 0))
-            port = probe.getsockname()[1]
+        port = _pick_port()
+        if port is None:
+            continue
         child_env = {**env, "PORT": str(port)}
         proc = subprocess.Popen(
             PLACEHOLDER_COMMAND,
@@ -557,6 +557,30 @@ def test_placeholder_command_really_listens_on_port(tmp_path):
             f"{shutil.which('python3', path=child_env.get('PATH'))!r}"
         )
     pytest.fail("the placeholder command never got a free port to bind")
+
+
+def _pick_port() -> int | None:
+    """A free port **below** the ephemeral range.
+
+    Asking the kernel for a free port (bind to :0) hands out a number from
+    the ephemeral range -- on macOS that range starts at 49152. Connecting to
+    such a port from the same machine can fail because the outgoing socket's
+    source port is drawn from the same range and collides with the
+    destination. The test would then measure the kernel's port bookkeeping
+    instead of the placeholder command.
+    """
+    import random
+    import socket
+
+    for _ in range(20):
+        port = random.randint(18000, 28000)  # noqa: S311 -- a test port, not a secret
+        with socket.socket() as probe:
+            try:
+                probe.bind(("127.0.0.1", port))
+            except OSError:
+                continue
+        return port
+    return None
 
 
 def _wait_for_port(port: int, proc) -> bool:
