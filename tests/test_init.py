@@ -473,6 +473,38 @@ def test_init_non_vite_frontend_uses_npm_run(tmp_path, monkeypatch):
     assert "__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS" not in web_cmd
 
 
+def _kill_group(proc) -> None:
+    """Stop the child and everything it started (the shell's own child)."""
+    if proc.poll() is not None:
+        return
+    try:
+        os.killpg(os.getpgid(proc.pid), 15)
+    except (OSError, ProcessLookupError):
+        try:
+            proc.terminate()
+        except OSError:
+            pass
+
+
+def _drain(proc) -> str:
+    """The child's output, without blocking forever on a grandchild that
+    still holds the pipe."""
+    if proc.stdout is None:
+        return ""
+    try:
+        proc.stdout.close()
+    except OSError:
+        pass
+    return ""
+
+
+def _cmdline(pid: int) -> str:
+    try:
+        return Path(f"/proc/{pid}/cmdline").read_bytes().decode().replace("\0", " ")
+    except OSError:
+        return "(no /proc on this platform)"
+
+
 def test_placeholder_command_really_listens_on_port(tmp_path):
     """The placeholder must be startable: devproxy's readiness check is
     "connectable on $PORT", and the file is promised to be startable."""
@@ -497,6 +529,9 @@ def test_placeholder_command_really_listens_on_port(tmp_path):
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        # Its own session: the shell's child (python3) must die with it, and
+        # must not keep the pipe open -- reading the pipe would then block.
+        start_new_session=True,
     )
     try:
         deadline = time.monotonic() + 10
@@ -512,17 +547,9 @@ def test_placeholder_command_really_listens_on_port(tmp_path):
             time.sleep(0.1)
         if not reachable:
             # Diagnostics: what did the child actually run, and what did it say?
-            try:
-                proc.terminate()
-                proc.wait(timeout=5)
-            except Exception:  # pragma: no cover -- diagnostics only
-                pass
-            output = proc.stdout.read() if proc.stdout else ""
-            cmdline = ""
-            try:
-                cmdline = Path(f"/proc/{proc.pid}/cmdline").read_bytes().decode().replace("\0", " ")
-            except OSError:
-                cmdline = "(no /proc on this platform)"
+            _kill_group(proc)
+            output = _drain(proc)
+            cmdline = _cmdline(proc.pid)
             pytest.fail(
                 "the placeholder command must listen on $PORT\n"
                 f"  child output: {output!r}\n"
@@ -532,8 +559,7 @@ def test_placeholder_command_really_listens_on_port(tmp_path):
                 f"{shutil.which('python3', path=env.get('PATH'))!r}"
             )
     finally:
-        if proc.poll() is None:
-            proc.terminate()
+        _kill_group(proc)
         proc.wait(timeout=10)
 
 
