@@ -1,4 +1,4 @@
-name: Debug placeholder on macOS
+name: Debug placeholder variations
 
 on:
   workflow_dispatch:
@@ -7,26 +7,52 @@ jobs:
   debug:
     runs-on: macos-latest
     steps:
-      - name: Run the placeholder command exactly as devproxy does
+      - name: Reproduce the pytest scenario with every variable
         run: |
-          set -x
+          python3 - <<'EOF'
+          import os, subprocess, socket, time, tempfile
+
+          tmp = tempfile.mkdtemp()
+          port = 22077
+          env = {**os.environ, "PORT": str(port)}
+          cmd = ["sh", "-c",
+                 "echo 'devproxy: placeholder'; python3 -m http.server -b 127.0.0.1 $PORT"]
+
+          def probe(port):
+              for _ in range(30):
+                  with socket.socket() as s:
+                      s.settimeout(0.5)
+                      try:
+                          s.connect(("127.0.0.1", port))
+                          return True
+                      except OSError:
+                          pass
+                  time.sleep(0.3)
+              return False
+
+          for variant, kwargs in (("plain", {}), ("setsid", {"start_new_session": True})):
+              path = os.path.join(tmp, f"out-{variant}.txt")
+              with open(path, "w") as out:
+                  proc = subprocess.Popen(cmd, env=env, stdout=out,
+                                          stderr=subprocess.STDOUT, **kwargs)
+              ok = probe(port)
+              alive = proc.poll() is None
+              if alive:
+                  proc.terminate(); proc.wait(timeout=5)
+              print(f"[{variant}] reachable={ok} returncode={proc.returncode} output={open(path).read()!r}")
+          print("python3:", subprocess.run(["sh","-c","which python3; python3 --version"],
+                                           capture_output=True, text=True).stdout)
+          print("lsof on 22077:", subprocess.run(["sh","-c","lsof -nP -iTCP:22077 || true"],
+                                                 capture_output=True, text=True).stdout)
+      - name: Same via uv-managed venv python
+        run: |
           which python3; python3 --version
-          # 与 PLACEHOLDER_COMMAND 完全一致的形式
-          PORT=20945 sh -c "echo 'devproxy: placeholder'; python3 -m http.server \$PORT" > /tmp/out.txt 2>&1 &
+          uv sync --locked --all-groups
+          VENV_PY="$(pwd)/.venv/bin/python3"
+          "$VENV_PY" --version
+          PORT=22078 "$VENV_PY" -m http.server -b 127.0.0.1 22078 > /tmp/venv-out.txt 2>&1 &
           CHILD=$!
           sleep 3
-          echo "=== /tmp/out.txt:"; cat /tmp/out.txt
-          echo "=== listeners:"; lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null | grep -E "20945|python3" || echo "(none)"
-          echo "=== curl:"; curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:20945/ || true
-          echo "=== child alive:"; ps -p $CHILD -o pid,stat,command || echo "(gone)"
-          pkill -f "http.server 20945" || true
-          sleep 1
-          echo "=== after kill, file:"; cat /tmp/out.txt
-      - name: Compare with the system python3 directly
-        run: |
-          PORT=20946 /usr/bin/python3 -m http.server 20946 > /tmp/out2.txt 2>&1 &
-          CHILD=$!
-          sleep 3
-          echo "=== /tmp/out2.txt:"; cat /tmp/out2.txt
-          echo "=== curl:"; curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:20946/ || true
+          echo "=== /tmp/venv-out.txt:"; cat /tmp/venv-out.txt
+          echo "=== curl:"; curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:22078/ || true
           kill $CHILD 2>/dev/null || true
