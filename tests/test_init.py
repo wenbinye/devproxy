@@ -485,11 +485,17 @@ def test_placeholder_command_really_listens_on_port(tmp_path):
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
+    # `python3` must be a working interpreter for the check to mean anything:
+    # on some CI images the system python3 is a stub that refuses to run, and
+    # then the test would measure the image, not the placeholder.
+    env = {**os.environ, "PORT": str(port)}
+    env["PATH"] = str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", "")
     proc = subprocess.Popen(
         PLACEHOLDER_COMMAND,
-        env={**os.environ, "PORT": str(port)},
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
     )
     try:
         deadline = time.monotonic() + 10
@@ -500,8 +506,15 @@ def test_placeholder_command_really_listens_on_port(tmp_path):
                 if s.connect_ex(("127.0.0.1", port)) == 0:
                     reachable = True
                     break
+            if proc.poll() is not None:
+                break
             time.sleep(0.1)
-        assert reachable, "the placeholder command must listen on $PORT"
+        output = ""
+        if proc.poll() is not None:
+            output = proc.stdout.read() if proc.stdout else ""
+        assert reachable, "the placeholder command must listen on $PORT" + (
+            f" (child output: {output!r})" if output else ""
+        )
     finally:
         proc.terminate()
         proc.wait(timeout=10)
